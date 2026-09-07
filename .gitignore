@@ -1,0 +1,17 @@
+# Agent / tooling directories
+.codex/
+.claude/
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/bin/
+shell/tmux-shell
+
+# Hub binary (see openspec/changes/browser-session-manager)
+hub/hub
+
+# OS cruft
+.DS_Store
