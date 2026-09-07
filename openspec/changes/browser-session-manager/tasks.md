@@ -1,6 +1,6 @@
 ## 0. Safety net
 
-- [ ] 0.1 Run `git init` in the project root, add a `.gitignore` covering `node_modules/`, `dist/`, `hub/hub`, and commit the current tree as a baseline — verify `git log --oneline` shows one commit and `git status` is clean. **This must be done first: design.md's rollback section notes the project is not currently under version control, and this change deletes ~4,400 lines.**
+- [x] 0.1 Run `git init` in the project root, add a `.gitignore` covering `node_modules/`, `dist/`, `hub/hub`, and commit the current tree as a baseline — verify `git log --oneline` shows one commit and `git status` is clean. **This must be done first: design.md's rollback section notes the project is not currently under version control, and this change deletes ~4,400 lines.** — DONE: commit `524241d` on `main`, 87 files tracked, working tree clean. `.gitignore` also extended to cover `build/bin/`, `shell/tmux-shell`, and `.DS_Store`.
 
 ## 1. Hub module scaffold
 
