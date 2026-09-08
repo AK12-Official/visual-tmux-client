@@ -47,6 +47,13 @@
 - [x] 8.2 Add the `marked` dependency and `HelpModal.vue` (fetch-once with cached render, `v-html` output, Esc/backdrop close); wire help buttons into the sidebar footer and the collapsed rail; verify opening/closing the overlay keeps an attached terminal connected
 - [x] 8.3 Verify self-containment: with the guide open, the browser devtools network panel shows requests only to the hub origin
 
+## 10. Acceptance fixes
+
+- [x] 10.1 Reject full-width `：`/`．` in session names (they render like the reserved ASCII characters; found in acceptance); covered by new table-driven cases in `tmux_test.go`
+- [x] 10.2 Stop setting the global `window-size` option on every attach (it repaints every tmux client on the server, falsely lighting every background session's activity indicator); pin it once per hub run on the first attachment, and verify by CDP that clicking a session no longer repaints other sessions' clients
+- [x] 10.3 Match `refreshSessionSize` to the attachment's own tmux client by pid (multi-client sessions previously produced a broken multi-line tty target)
+- [x] 10.4 Show the font size (e.g. `13 px`) between the header's font-size buttons
+
 ## 9. Release v0.2.0
 
 - [x] 9.1 Update `README.md` and `README.zh-CN.md`: Unicode name rules, always-printed token banner, new features, and version-bumped download/run examples

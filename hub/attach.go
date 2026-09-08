@@ -249,8 +249,11 @@ func (s *server) attach(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 
 	// Defensive for older tmux: window-size latest is already the default on
-	// 3.7b. A non-zero exit must not fail the attachment.
-	_, _, _, _ = s.tmux.exec("set-option", "-g", "window-size", "latest")
+	// 3.7b. A non-zero exit must not fail the attachment. Done once per hub
+	// run, NOT per attach: setting the global option repaints every tmux
+	// client on the server, which would light up every background session's
+	// activity indicator with output the user did not cause.
+	s.pinWindowSizePolicy()
 
 	// Start pumping output before sending ready, so output produced between
 	// spawn and ready is staged (and later flushed) rather than lost.
@@ -425,7 +428,11 @@ func (a *attachment) applyResize(cols, rows int) {
 	a.mu.Lock()
 	a.cols, a.rows = cols, rows
 	a.mu.Unlock()
-	a.s.tmux.refreshSessionSize(a.session, cols, rows)
+	var pid int
+	if a.cmd != nil && a.cmd.Process != nil {
+		pid = a.cmd.Process.Pid
+	}
+	a.s.tmux.refreshSessionSize(a.session, pid, cols, rows)
 }
 
 // forceRepaint applies rows-1 then rows in quick succession so tmux emits a

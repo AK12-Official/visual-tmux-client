@@ -101,6 +101,13 @@ func validateSessionName(name string) error {
 		if r == ':' || r == '.' {
 			return fmt.Errorf("%w: name must not contain %q (reserved by tmux target syntax)", ErrInvalidName, r)
 		}
+		// Full-width lookalikes pass tmux untouched, but they render exactly
+		// like the reserved characters and are one keystroke away in CJK
+		// input methods — reject them so a forbidden-looking name can never
+		// exist.
+		if r == '：' || r == '．' {
+			return fmt.Errorf("%w: name must not contain the full-width character %q (use the ASCII form)", ErrInvalidName, r)
+		}
 	}
 	if unicode.IsSpace(runes[0]) || unicode.IsSpace(runes[len(runes)-1]) {
 		return fmt.Errorf("%w: name has leading or trailing whitespace", ErrInvalidName)
@@ -388,16 +395,26 @@ func childEnv() []string {
 
 // refreshSessionSize is a best-effort "belt-and-braces" resize: after
 // pty.Setsize (the authoritative mechanism, which fires SIGWINCH at tmux), it
-// also asks tmux to refresh the size of a client attached to the session.
-// Failure is silently tolerated; Setsize already handled the resize.
-func (c *tmuxClient) refreshSessionSize(session string, cols, rows int) {
-	stdout, _, code, err := c.exec("list-clients", "-t", exactTarget(session), "-F", "#{client_tty}")
+// also asks tmux to refresh the size of THIS attachment's tmux client. The
+// client is matched by pid because a session can carry several clients (other
+// browser tabs, other hubs) and resizing those would fight their own
+// authoritative resize path. Failure is silently tolerated; Setsize already
+// handled the resize.
+func (c *tmuxClient) refreshSessionSize(session string, clientPID int, cols, rows int) {
+	stdout, _, code, err := c.exec("list-clients", "-t", exactTarget(session), "-F", "#{client_pid} #{client_tty}")
 	if err != nil || code != 0 {
 		return
 	}
-	tty := strings.TrimSpace(stdout)
-	if tty == "" {
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil || pid != clientPID {
+			continue
+		}
+		_, _, _, _ = c.exec("refresh-client", "-t", fields[1], "-C", fmt.Sprintf("%dx%d", cols, rows))
 		return
 	}
-	_, _, _, _ = c.exec("refresh-client", "-t", tty, "-C", fmt.Sprintf("%dx%d", cols, rows))
 }

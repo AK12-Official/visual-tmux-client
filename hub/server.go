@@ -27,6 +27,9 @@ type server struct {
 
 	mu          sync.Mutex
 	attachments map[*attachment]struct{}
+
+	// Guards the one-time window-size policy pin; see pinWindowSizePolicy.
+	sizePolicyOnce sync.Once
 }
 
 func newServer(cfg *config, token string) *server {
@@ -38,6 +41,17 @@ func newServer(cfg *config, token string) *server {
 		tickets:     newTicketStore(),
 		attachments: make(map[*attachment]struct{}),
 	}
+}
+
+// pinWindowSizePolicy sets tmux's global window-size policy to "latest" once
+// per hub run, on the first attachment. Older tmux defaults differ, and the
+// policy governs how the sessions we attach resize. It must NOT run on every
+// attachment: setting a global tmux option repaints every client on the
+// server, which our background attachments would report as activity.
+func (s *server) pinWindowSizePolicy() {
+	s.sizePolicyOnce.Do(func() {
+		_, _, _, _ = s.tmux.exec("set-option", "-g", "window-size", "latest")
+	})
 }
 
 // auth wraps a handler with the bearer-token middleware.

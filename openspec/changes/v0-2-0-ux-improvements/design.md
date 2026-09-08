@@ -50,6 +50,10 @@ This is a store rather than props because emitters live at three depths (`App.vu
 
 Shell metacharacters (`;`, `$`, backticks, quotes) become **accepted**. The old ASCII charset rejected them as belt-and-braces, but the hub never constructs a shell string (`runCommand` passes an argv slice; this is tested), so with Unicode admitted an ASCII-only metacharacter blacklist is incoherent — full-width variants would pass anyway. The shell-injection-safety requirement is updated to rest on the argv mechanism instead of name rejection.
 
+The full-width lookalikes `：` (U+FF1A) and `．` (U+FF0E) are **rejected** alongside ASCII `:` and `.`: tmux itself accepts them, but they render exactly like the reserved characters and are the natural CJK-IME keystroke, so without this rule a "forbidden-looking" name can exist and the validation error reads as self-contradictory (found in acceptance testing).
+
+Two repaint-related pitfalls found in acceptance testing and fixed: setting tmux's global `window-size` option (previously done on every attach) repaints every client on the server, which every background attachment reports as activity — the pin now runs once per hub run on the first attachment; and `refreshSessionSize` now matches the attachment's own tmux client by pid, because a session can carry several clients (other tabs, other hubs) and resizing those would fight their own resize path.
+
 Auto-name collisions: `CreateSession("")` retries the generated name with a `-1`…`-9` suffix (bounded, then a real error), instead of the current single-shot name that collides when two creates land in the same second.
 
 ### D4. Token banner: printed in `main.run()`, always

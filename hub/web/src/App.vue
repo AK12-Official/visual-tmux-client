@@ -328,6 +328,7 @@ onBeforeUnmount(() => {
               title="decrease font size"
               @click="setFontSize(fontSize - 1)"
             >A−</button>
+            <span class="app__term-fontsize" aria-live="polite">{{ fontSize }} px</span>
             <button
               class="app__term-btn"
               title="increase font size"
@@ -479,6 +480,14 @@ onBeforeUnmount(() => {
 .app__term-btn:hover {
   color: var(--th-text-hi);
   border-color: var(--th-text-lo);
+}
+.app__term-fontsize {
+  font-size: 0.72rem;
+  color: var(--th-text-lo);
+  min-width: 3.2em;
+  text-align: center;
+  white-space: nowrap;
+  user-select: none;
 }
 .app__body {
   flex: 1;

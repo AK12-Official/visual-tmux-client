@@ -6,7 +6,7 @@
 
 The hub SHALL expose an operation that creates a new detached tmux session. The caller MAY supply a name; when no name is supplied the hub SHALL generate a unique one. A created session SHALL start in the invoking user's home directory.
 
-A caller-supplied name SHALL be valid when all of the following hold: it is non-empty; it is valid UTF-8 containing no control characters; it contains neither `:` nor `.` (which tmux's own name and target syntax reserves); it has no leading or trailing whitespace; and it is at most 64 characters long, counted in code points. The hub SHALL accept any valid name, including names outside ASCII such as CJK text.
+A caller-supplied name SHALL be valid when all of the following hold: it is non-empty; it is valid UTF-8 containing no control characters; it contains neither `:` nor `.` (which tmux's own name and target syntax reserves) nor their full-width lookalikes `：` and `．` (which render identically to the reserved characters); it has no leading or trailing whitespace; and it is at most 64 characters long, counted in code points. The hub SHALL accept any valid name, including names outside ASCII such as CJK text.
 
 #### Scenario: Create with an explicit name
 
@@ -35,7 +35,7 @@ A caller-supplied name SHALL be valid when all of the following hold: it is non-
 
 #### Scenario: Name is rejected
 
-- **WHEN** a caller requests session creation with a name that contains a control character, `:` or `.`, leading or trailing whitespace, or that exceeds 64 code points
+- **WHEN** a caller requests session creation with a name that contains a control character, `:` or `.` or their full-width lookalikes, leading or trailing whitespace, or that exceeds 64 code points
 - **THEN** the hub does not invoke tmux and returns a validation error naming the constraint that was violated
 
 ### Requirement: Session renaming
