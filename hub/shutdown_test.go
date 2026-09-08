@@ -23,7 +23,7 @@ func attachPids(t *testing.T) map[string]bool {
 	t.Helper()
 	out, _ := exec.Command("pgrep", "-f", "tmux.*attach").Output()
 	m := map[string]bool{}
-	for _, p := range strings.Fields(string(out)) {
+	for p := range strings.FieldsSeq(string(out)) {
 		m[p] = true
 	}
 	return m
@@ -45,12 +45,20 @@ func TestGracefulShutdownNoOrphan(t *testing.T) {
 	}
 
 	// Isolate the default tmux socket via TMUX_TMPDIR so we don't touch any
-	// real default-socket sessions.
-	tmpdir := t.TempDir()
+	// real default-socket sessions. Use a short temp-dir name rather than
+	// t.TempDir(): tmux's socket path is TMUX_TMPDIR/tmux-<uid>/default, and
+	// t.TempDir() on macOS produces paths long enough to exceed the Unix
+	// socket sun_path limit, failing bind() with ENAMETOOLONG.
+	tmpdir, err := os.MkdirTemp("", "tmuxhub-")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(tmpdir) })
 	isolatedEnv := append(os.Environ(), "TMUX_TMPDIR="+tmpdir)
 
-	if _, _, code, err := runEnvCommand(tmux, isolatedEnv, "new-session", "-d", "-s", "probe", "sh -c 'sleep 60'"); err != nil || code != 0 {
-		t.Fatalf("new-session: code=%d err=%v", code, err)
+	out, errout, code, err := runEnvCommand(tmux, isolatedEnv, "new-session", "-d", "-s", "probe", "sh -c 'sleep 60'")
+	if err != nil || code != 0 {
+		t.Fatalf("new-session: code=%d err=%v stdout=%q stderr=%q", code, err, out, errout)
 	}
 	t.Cleanup(func() { runEnvCommand(tmux, isolatedEnv, "kill-server") })
 
@@ -81,6 +89,13 @@ func TestGracefulShutdownNoOrphan(t *testing.T) {
 	// Get a ticket and attach.
 	ticket := getTicket(t, baseURL, token, "probe")
 	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/local/probe?ticket=" + ticket + "&cols=80&rows=24"
+
+	// Capture the attach-process baseline BEFORE dialing: the hub spawns
+	// `tmux attach-session` synchronously during the WebSocket upgrade, so a
+	// baseline taken after Dial would already include it and the diff below
+	// would never find a new PID.
+	before := attachPids(t)
+
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	conn, _, err := websocket.Dial(dialCtx, wsURL, nil)
 	dialCancel()
@@ -89,10 +104,7 @@ func TestGracefulShutdownNoOrphan(t *testing.T) {
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
-	// Find the attach process we just spawned.
-	before := attachPids(t)
-	_ = before
-	// Wait until an attach process appears (it is spawned on attachment).
+	// Wait until a new attach process appears (spawned on attachment).
 	var attachPID string
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
