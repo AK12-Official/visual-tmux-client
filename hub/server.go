@@ -3,7 +3,9 @@ package main
 import (
 	"embed"
 	"io/fs"
+	"mime"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -56,6 +58,19 @@ func (s *server) handler() http.Handler {
 	return mux
 }
 
+// contentTypeFor maps a dist file name to its Content-Type. Only root-level
+// public assets (the embedded guide) rely on this; `.md` is missing from some
+// systems' MIME databases, so it is mapped explicitly before the generic
+// lookup.
+func contentTypeFor(name string) string {
+	if ext := filepath.Ext(name); strings.EqualFold(ext, ".md") {
+		return "text/markdown; charset=utf-8"
+	} else if ct := mime.TypeByExtension(ext); ct != "" {
+		return ct
+	}
+	return "application/octet-stream"
+}
+
 // track registers an active attachment so shutdown can close it.
 func (s *server) track(a *attachment) {
 	s.mu.Lock()
@@ -84,9 +99,11 @@ func (s *server) shutdownAll() {
 }
 
 // spaHandler serves the embedded frontend. Content-hashed assets under /assets/
-// are served with a long immutable cache lifetime; every other non-API, non-WS
-// path falls back to index.html (SPA fallback). Unknown /api/ and /ws/ paths
-// are 404 rather than falling through to index.html.
+// are served with a long immutable cache lifetime; other real files present in
+// dist (e.g. the embedded tmux guide that vite copies from public/) are served
+// as themselves; every remaining non-API, non-WS path falls back to index.html
+// (SPA fallback). Unknown /api/ and /ws/ paths are 404 rather than falling
+// through to index.html.
 func (s *server) spaHandler() http.Handler {
 	dist, _ := fs.Sub(webFS, "web/dist")
 	fileServer := http.FileServer(http.FS(dist))
@@ -100,6 +117,19 @@ func (s *server) spaHandler() http.Handler {
 		if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/ws/") {
 			http.NotFound(w, r)
 			return
+		}
+		// Serve real root-level files before the SPA fallback, so e.g. the
+		// guide at /tmux-guide.zh-CN.md is not swallowed by index.html.
+		// http.ServeMux has already cleaned the path, and embed.FS rejects
+		// anything outside its tree, so this cannot escape dist.
+		if name := strings.TrimPrefix(path, "/"); name != "" && name != "index.html" {
+			if data, err := fs.ReadFile(dist, name); err == nil {
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Content-Type", contentTypeFor(name))
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(data)
+				return
+			}
 		}
 		w.Header().Set("Cache-Control", "no-cache")
 		data, err := fs.ReadFile(dist, "index.html")

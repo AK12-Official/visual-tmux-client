@@ -222,4 +222,17 @@ func TestSPAFallback(t *testing.T) {
 	if resp.StatusCode != 404 {
 		t.Fatalf("api unknown: expected 404, got %d", resp.StatusCode)
 	}
+
+	// a real root-level file (the embedded guide) serves as itself rather
+	// than being swallowed by the SPA fallback
+	resp = apiRequest(t, ts, "GET", "/tmux-guide.zh-CN.md", "", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("guide: expected 200, got %d", resp.StatusCode)
+	}
+	if ct = resp.Header.Get("Content-Type"); !strings.Contains(ct, "markdown") {
+		t.Fatalf("expected markdown content type, got %q", ct)
+	}
+	if body := readAll(t, resp); !strings.Contains(string(body), "tmux") {
+		t.Fatal("expected guide content, got something else")
+	}
 }

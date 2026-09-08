@@ -16,6 +16,7 @@ import type { ConnState } from './terminal'
 import SessionList from './components/SessionList.vue'
 import TerminalView from './components/TerminalView.vue'
 import ToastStack from './components/ToastStack.vue'
+import HelpModal from './components/HelpModal.vue'
 
 const token = ref(getToken() ?? '')
 const tokenInput = ref('')
@@ -122,6 +123,10 @@ function toggleSidebar(): void {
   sidebarCollapsed.value = !sidebarCollapsed.value
   localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed.value ? '1' : '0')
 }
+
+// --- In-app help ---
+
+const helpOpen = ref(false)
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -279,22 +284,28 @@ onBeforeUnmount(() => {
               title="collapse sidebar"
               @click="toggleSidebar"
             >«</button>
-            <SessionList
-              :sessions="sessions"
-              :error="listError"
-              :selected="selected"
-              :active="activity"
-              @select="selected = $event"
-              @create="onCreate"
-              @rename="onRename"
-              @kill="onKill"
-              @bulk-kill="onBulkKill"
-              @retry="refresh"
-            />
+            <div class="app__sidebar-body">
+              <SessionList
+                :sessions="sessions"
+                :error="listError"
+                :selected="selected"
+                :active="activity"
+                @select="selected = $event"
+                @create="onCreate"
+                @rename="onRename"
+                @kill="onKill"
+                @bulk-kill="onBulkKill"
+                @retry="refresh"
+              />
+            </div>
+            <button class="app__help-btn" title="tmux 使用指南" @click="helpOpen = true">
+              ? Help
+            </button>
           </template>
           <div v-else class="app__rail">
             <button class="app__rail-btn" title="expand sidebar" @click="toggleSidebar">»</button>
             <button class="app__rail-btn" title="new session" @click="onCreate">+</button>
+            <button class="app__rail-btn" title="help" @click="helpOpen = true">?</button>
           </div>
         </aside>
 
@@ -350,6 +361,8 @@ onBeforeUnmount(() => {
         </main>
       </div>
     </template>
+
+    <HelpModal :open="helpOpen" @close="helpOpen = false" />
   </div>
 </template>
 
@@ -478,16 +491,37 @@ onBeforeUnmount(() => {
   background: var(--th-surface);
   border-right: 1px solid var(--th-border);
   padding: 0.6rem;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-height: 0;
   transition: width 0.15s ease, flex-basis 0.15s ease;
 }
 .app__sidebar--collapsed {
   width: 44px;
   flex-basis: 44px;
   padding: 0.5rem 0.25rem;
+  gap: 0.4rem;
+}
+.app__sidebar-body {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+}
+.app__help-btn {
+  background: var(--th-raised);
+  color: var(--th-text-mid);
+  border: 1px solid var(--th-border);
+  border-radius: 4px;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.app__help-btn:hover {
+  color: var(--th-text-hi);
+  border-color: var(--th-accent);
 }
 .app__sidebar-toggle {
   align-self: flex-end;
@@ -498,7 +532,6 @@ onBeforeUnmount(() => {
   font-size: 0.75rem;
   padding: 0.1rem 0.35rem;
   cursor: pointer;
-  margin-bottom: 0.35rem;
 }
 .app__sidebar-toggle:hover {
   color: var(--th-text-hi);
