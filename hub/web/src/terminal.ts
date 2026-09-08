@@ -61,6 +61,9 @@ export class TerminalSession {
     private hooks: TerminalHooks,
   ) {
     this.term = new Terminal({
+      // The unicode API (unicode11 addon + term.unicode.activeVersion) is a
+      // proposed API in xterm 6.x; accessing it throws unless this is set.
+      allowProposedApi: true,
       convertEol: true,
       scrollback: 5000,
       fontFamily:

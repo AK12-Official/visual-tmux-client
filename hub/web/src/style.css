@@ -30,10 +30,3 @@ body {
     height: 100vh;
     background: var(--app-bg);
 }
-
-/* The terminal's container chain must all resolve to a definite height so
-   xterm.js (height: 100%) and FitAddon can measure a real character grid. */
-.app__main .terminal-view {
-    flex: 1;
-    min-height: 0;
-}
