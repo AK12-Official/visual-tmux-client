@@ -46,7 +46,7 @@ for target in $targets; do
       -ldflags "-s -w -X main.version=$version" \
       -o "$package_dir/visual-tmux-client" .
   )
-  cp "$project_dir/README.md" "$project_dir/LICENSE" "$package_dir/"
+  cp "$project_dir/README.md" "$project_dir/README.zh-CN.md" "$project_dir/LICENSE" "$package_dir/"
   tar -C "$staging_dir" -czf "$output_dir/$archive_name.tar.gz" "$archive_name"
   rm -rf "$staging_dir"
 done
