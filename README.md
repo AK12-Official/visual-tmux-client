@@ -1,5 +1,7 @@
 # Visual Tmux Client
 
+[简体中文](README.zh-CN.md) | English
+
 **Visual Tmux Client** is a small, self-hosted web interface for managing and using tmux sessions from a browser. The Vue frontend is embedded in a single Go binary, so deployment only needs the binary and a local `tmux` installation.
 
 > The project is currently an early `v0.1` release. It manages tmux on the same machine where Visual Tmux Client runs; remote-host aggregation is not implemented.
