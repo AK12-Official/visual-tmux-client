@@ -22,7 +22,7 @@ const authError = ref('')
 const sessions = ref<Session[]>([])
 const listError = ref('')
 const selected = ref<string | null>(null)
-const connState = ref<ConnState>('connecting')
+const connStates = ref<Record<string, ConnState>>({})
 const notice = ref('')
 
 const hasToken = computed(() => !!token.value)
@@ -111,8 +111,8 @@ async function onKill(name: string) {
   }
 }
 
-function onState(state: ConnState) {
-  connState.value = state
+function onState(session: string, state: ConnState) {
+  connStates.value = { ...connStates.value, [session]: state }
 }
 
 function onNotice(message: string) {
@@ -150,7 +150,11 @@ onBeforeUnmount(() => {
     <template v-else>
       <header class="app__bar">
         <span class="app__title">tmux-hub</span>
-        <span v-if="selected" class="app__state" :class="`app__state--${connState}`">{{ connState }}</span>
+        <span
+          v-if="selected"
+          class="app__state"
+          :class="`app__state--${connStates[selected] ?? 'connecting'}`"
+        >{{ connStates[selected] ?? 'connecting' }}</span>
         <button class="app__logout" @click="logout">Disconnect</button>
       </header>
 

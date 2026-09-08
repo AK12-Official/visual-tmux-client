@@ -4,7 +4,7 @@ import { TerminalSession, type ConnState } from '../terminal'
 
 const props = defineProps<{ session: string }>()
 const emit = defineEmits<{
-  (e: 'state', state: ConnState): void
+  (e: 'state', session: string, state: ConnState): void
   (e: 'notice', message: string): void
 }>()
 
@@ -15,7 +15,7 @@ onMounted(() => {
   if (!el.value) return
   try {
     session = new TerminalSession(el.value, props.session, {
-      onState: (state) => emit('state', state),
+      onState: (state) => emit('state', props.session, state),
       onNotice: (message) => emit('notice', message),
     })
   } catch (err) {
