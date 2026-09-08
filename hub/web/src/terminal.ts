@@ -11,9 +11,12 @@ import { issueTicket } from './api'
 
 export type ConnState = 'connecting' | 'connected' | 'reconnecting' | 'ended'
 
+/** Notice levels mirror the toast levels; omitted means 'error'. */
+export type NoticeLevel = 'error' | 'warning'
+
 export interface TerminalHooks {
   onState: (state: ConnState) => void
-  onNotice: (message: string) => void
+  onNotice: (message: string, level?: NoticeLevel) => void
 }
 
 // Dark terminal palette modeled on Visual Tmux Client's default-dark theme, matching the
@@ -95,7 +98,9 @@ export class TerminalSession {
       const selection = this.term.getSelection()
       if (!selection) return true
       navigator.clipboard.writeText(selection).catch(() => {
-        this.hooks.onNotice('Copy failed: the browser blocked the clipboard write.')
+        // A blocked clipboard is a degraded-but-recoverable state, not a
+        // failure of the terminal itself: warn rather than error.
+        this.hooks.onNotice('Copy failed: the browser blocked the clipboard write.', 'warning')
       })
       return false
     })

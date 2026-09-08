@@ -11,9 +11,11 @@ import {
   setToken,
   type Session,
 } from './api'
+import { notify } from './toasts'
 import type { ConnState } from './terminal'
 import SessionList from './components/SessionList.vue'
 import TerminalView from './components/TerminalView.vue'
+import ToastStack from './components/ToastStack.vue'
 
 const token = ref(getToken() ?? '')
 const tokenInput = ref('')
@@ -23,7 +25,6 @@ const sessions = ref<Session[]>([])
 const listError = ref('')
 const selected = ref<string | null>(null)
 const connStates = ref<Record<string, ConnState>>({})
-const notice = ref('')
 
 const hasToken = computed(() => !!token.value)
 
@@ -88,7 +89,7 @@ async function onCreate(name: string) {
     await createSession(name)
     await refresh()
   } catch (err) {
-    notice.value = err instanceof Error ? err.message : String(err)
+    notify('error', err instanceof Error ? err.message : String(err))
   }
 }
 
@@ -97,7 +98,7 @@ async function onRename(oldName: string, newName: string) {
     await renameSession(oldName, newName)
     await refresh()
   } catch (err) {
-    notice.value = err instanceof Error ? err.message : String(err)
+    notify('error', err instanceof Error ? err.message : String(err))
   }
 }
 
@@ -107,7 +108,7 @@ async function onKill(name: string) {
     if (selected.value === name) selected.value = null
     await refresh()
   } catch (err) {
-    notice.value = err instanceof Error ? err.message : String(err)
+    notify('error', err instanceof Error ? err.message : String(err))
   }
 }
 
@@ -115,8 +116,8 @@ function onState(session: string, state: ConnState) {
   connStates.value = { ...connStates.value, [session]: state }
 }
 
-function onNotice(message: string) {
-  notice.value = message
+function onNotice(message: string, level: 'error' | 'warning' = 'error') {
+  notify(level, message)
 }
 
 onMounted(() => {
@@ -183,10 +184,7 @@ onBeforeUnmount(() => {
               @notice="onNotice"
             />
           </KeepAlive>
-          <div v-if="notice" class="app__notice">
-            <span>{{ notice }}</span>
-            <button class="app__notice-btn" @click="notice = ''">✕</button>
-          </div>
+          <ToastStack />
         </main>
       </div>
     </template>
@@ -273,27 +271,6 @@ onBeforeUnmount(() => {
   padding: 1rem;
   color: var(--th-text-lo);
   font-size: 0.9rem;
-}
-.app__notice {
-  position: absolute;
-  bottom: 0.75rem;
-  left: 0.75rem;
-  right: 0.75rem;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  background: var(--th-raised);
-  border: 1px solid var(--th-border);
-  border-radius: 6px;
-  padding: 0.5rem 0.75rem;
-  font-size: 0.85rem;
-}
-.app__notice-btn {
-  margin-left: auto;
-  background: none;
-  border: none;
-  color: var(--th-text-mid);
-  cursor: pointer;
 }
 </style>
 

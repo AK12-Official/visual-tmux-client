@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { TerminalSession, type ConnState } from '../terminal'
+import { TerminalSession, type ConnState, type NoticeLevel } from '../terminal'
 
 const props = defineProps<{ session: string }>()
 const emit = defineEmits<{
   (e: 'state', session: string, state: ConnState): void
-  (e: 'notice', message: string): void
+  (e: 'notice', message: string, level?: NoticeLevel): void
 }>()
 
 const el = ref<HTMLDivElement | null>(null)
@@ -16,7 +16,7 @@ onMounted(() => {
   try {
     session = new TerminalSession(el.value, props.session, {
       onState: (state) => emit('state', props.session, state),
-      onNotice: (message) => emit('notice', message),
+      onNotice: (message, level) => emit('notice', message, level),
     })
   } catch (err) {
     emit('notice', `Terminal init failed: ${String(err)}`)
