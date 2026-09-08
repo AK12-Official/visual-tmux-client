@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -21,19 +20,20 @@ func randomToken(n int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// resolveToken returns the shared bearer token: VISUAL_TMUX_CLIENT_TOKEN if set,
-// otherwise a freshly generated 32-byte token printed once to stderr. The hub
-// never serves without a token.
-func resolveToken() (string, error) {
+// resolveToken returns the shared bearer token and whether it was generated:
+// VISUAL_TMUX_CLIENT_TOKEN if set (generated=false), otherwise a freshly
+// generated 32-byte token (generated=true). Surfacing the token to the
+// operator is the caller's job (see startupBanner); the hub never serves
+// without a token either way.
+func resolveToken() (string, bool, error) {
 	if tok := os.Getenv("VISUAL_TMUX_CLIENT_TOKEN"); tok != "" {
-		return tok, nil
+		return tok, false, nil
 	}
 	tok, err := randomToken(32)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	fmt.Fprintf(os.Stderr, "visual-tmux-client: generated token: %s\n", tok)
-	return tok, nil
+	return tok, true, nil
 }
 
 // constantTimeEqual compares two secrets without leaking length or content

@@ -62,6 +62,15 @@ The hub SHALL expose an operation that renames an existing tmux session, subject
 - **WHEN** a caller requests a rename to a name held by a different session
 - **THEN** the hub returns an error identifying the conflict and no session is modified
 
+### Requirement: Shell-injection-safe tmux invocation
+
+The hub SHALL invoke tmux by passing an argument vector directly to the operating system, never by constructing a command string interpreted by a shell.
+
+#### Scenario: Name contains shell metacharacters
+
+- **WHEN** a caller supplies a session name containing shell metacharacters such as `;`, `$`, backticks, or quotes
+- **THEN** the name reaches tmux as one argument with no shell interpretation of it ever occurring
+
 ## ADDED Requirements
 
 ### Requirement: Startup credential disclosure

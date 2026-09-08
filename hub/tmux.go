@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Sentinel errors distinguish tmux-level outcomes so callers (and the JSON
@@ -21,11 +22,10 @@ var (
 	ErrInvalidName  = errors.New("invalid session name")
 )
 
-// sessionNameRe is the allowed session-name character set. It deliberately
-// excludes shell metacharacters (`;`, `$`, backtick, quotes, spaces, `:`, and
-// others) so a name can never be interpreted by a shell — even though tmux is
-// always invoked with an argv slice and never a shell string.
-var sessionNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+// maxSessionNameRunes bounds session-name length counted in code points, not
+// bytes: a CJK name spends 3 bytes per character, so a byte bound would admit
+// only a third as many characters.
+const maxSessionNameRunes = 64
 
 // Session is a single tmux session as exposed to the JSON API.
 type Session struct {
@@ -74,10 +74,36 @@ func resolveTmux() (string, error) {
 	return p, nil
 }
 
-// validateSessionName enforces the permitted name character set and length.
+// validateSessionName enforces the permitted session-name rules. tmux itself
+// accepts nearly anything (verified against 3.7b: CJK and spaces are fine), so
+// the constraints are only the ones that keep a name unambiguous everywhere it
+// travels: `:` and `.` are reserved by tmux's own target syntax
+// (session:window.pane) and rejected by older tmux versions; control
+// characters and edge whitespace make a name invisible or untypeable; length
+// keeps names displayable. Everything else — including non-ASCII text — is
+// allowed, because names never travel through a shell (runCommand passes an
+// argv slice, see the shell-injection-safety requirement).
 func validateSessionName(name string) error {
-	if !sessionNameRe.MatchString(name) {
-		return fmt.Errorf("%w: %q (must match %s)", ErrInvalidName, name, sessionNameRe.String())
+	if !utf8.ValidString(name) {
+		return fmt.Errorf("%w: name is not valid UTF-8", ErrInvalidName)
+	}
+	runes := []rune(name)
+	if len(runes) == 0 {
+		return fmt.Errorf("%w: name is empty", ErrInvalidName)
+	}
+	if len(runes) > maxSessionNameRunes {
+		return fmt.Errorf("%w: name is longer than %d characters", ErrInvalidName, maxSessionNameRunes)
+	}
+	for _, r := range runes {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("%w: name contains a control character", ErrInvalidName)
+		}
+		if r == ':' || r == '.' {
+			return fmt.Errorf("%w: name must not contain %q (reserved by tmux target syntax)", ErrInvalidName, r)
+		}
+	}
+	if unicode.IsSpace(runes[0]) || unicode.IsSpace(runes[len(runes)-1]) {
+		return fmt.Errorf("%w: name has leading or trailing whitespace", ErrInvalidName)
 	}
 	return nil
 }
@@ -215,11 +241,29 @@ func homeDir() string {
 	return "."
 }
 
-// generateSessionName produces a unique-ish name of the form
-// session-YYYYMMDD-HHMMSS, appending a random suffix if the base collides.
+// generateSessionName produces the base auto-name of the form
+// session-YYYYMMDD-HHMMSS. The base has second resolution, so two nameless
+// creates within one second collide; uniqueness is resolved by
+// generateUniqueName's suffix retries.
 func generateSessionName(now time.Time) string {
-	base := now.Format("session-20060102-150405")
-	return base
+	return now.Format("session-20060102-150405")
+}
+
+// generateUniqueName returns an auto-generated name not already in use,
+// retrying the timestamp base with -1…-9 suffixes. The bound makes a runaway
+// loop impossible; exhausting it surfaces ErrNameInUse.
+func (c *tmuxClient) generateUniqueName() (string, error) {
+	base := generateSessionName(time.Now())
+	for i := 0; i < 10; i++ {
+		name := base
+		if i > 0 {
+			name = fmt.Sprintf("%s-%d", base, i)
+		}
+		if !c.hasSession(name) {
+			return name, nil
+		}
+	}
+	return "", ErrNameInUse
 }
 
 // CreateSession creates a new detached session starting in $HOME. An empty
@@ -227,7 +271,11 @@ func generateSessionName(now time.Time) string {
 // ErrInvalidName on a rejected name.
 func (c *tmuxClient) CreateSession(name string) (Session, error) {
 	if name == "" {
-		name = generateSessionName(time.Now())
+		var err error
+		name, err = c.generateUniqueName()
+		if err != nil {
+			return Session{}, err
+		}
 	}
 	if err := validateSessionName(name); err != nil {
 		return Session{}, err

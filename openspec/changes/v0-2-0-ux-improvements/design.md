@@ -48,6 +48,8 @@ This is a store rather than props because emitters live at three depths (`App.vu
 
 *Alternative considered:* a Unicode-property regexp (`^[\p{L}\p{N}...]+$`). Rejected — it either over-restricts (which characters are "letters enough"?) or degenerates into "almost everything", and it cannot produce a specific violation message.
 
+Shell metacharacters (`;`, `$`, backticks, quotes) become **accepted**. The old ASCII charset rejected them as belt-and-braces, but the hub never constructs a shell string (`runCommand` passes an argv slice; this is tested), so with Unicode admitted an ASCII-only metacharacter blacklist is incoherent — full-width variants would pass anyway. The shell-injection-safety requirement is updated to rest on the argv mechanism instead of name rejection.
+
 Auto-name collisions: `CreateSession("")` retries the generated name with a `-1`…`-9` suffix (bounded, then a real error), instead of the current single-shot name that collides when two creates land in the same second.
 
 ### D4. Token banner: printed in `main.run()`, always

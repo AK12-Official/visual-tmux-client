@@ -33,7 +33,7 @@ func usage(fs *flag.FlagSet) func() {
 		fmt.Fprintf(out, "Usage:\n  visual-tmux-client [flags]\n\nFlags:\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(out, "\nEnvironment:\n")
-		fmt.Fprintf(out, "  VISUAL_TMUX_CLIENT_TOKEN      shared bearer token; generated and printed if unset\n")
+		fmt.Fprintf(out, "  VISUAL_TMUX_CLIENT_TOKEN      shared bearer token; printed at startup, generated if unset\n")
 		fmt.Fprintf(out, "  VISUAL_TMUX_CLIENT_ORIGIN     allowed WebSocket origin; defaults to the bind address\n")
 		fmt.Fprintf(out, "  VISUAL_TMUX_CLIENT_TMUX_PATH  path to the tmux binary; defaults to $PATH lookup\n")
 	}
@@ -90,16 +90,46 @@ func main() {
 	}
 }
 
+// startupBanner returns the operator-facing startup output: the effective
+// access credential and the address to open in a browser. The token is printed
+// whatever its source — an environment-supplied token exists only inside this
+// process (the parent shell never sees `VAR=x cmd` assignments), so without
+// this line the operator could not authenticate at all.
+func startupBanner(token string, generated bool, addr string) string {
+	source := "environment"
+	if generated {
+		source = "generated"
+	}
+	return fmt.Sprintf(
+		"visual-tmux-client: token: %s (source: %s)\nvisual-tmux-client: open %s\n",
+		token, source, browserURL(addr),
+	)
+}
+
+// browserURL turns a listen address into the URL a browser should open,
+// substituting loopback for wildcard hosts so the printed URL is clickable.
+func browserURL(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "http://" + addr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
 func run() error {
 	cfg, err := parseConfig(os.Args[1:])
 	if err != nil {
 		return err
 	}
-	token, err := resolveToken()
+	token, generated, err := resolveToken()
 	if err != nil {
 		return err
 	}
 	cfg.token = token
+	fmt.Fprint(os.Stderr, startupBanner(token, generated, cfg.addr))
 
 	srv := newServer(cfg, token)
 

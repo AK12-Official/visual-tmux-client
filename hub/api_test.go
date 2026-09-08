@@ -123,7 +123,7 @@ func TestCreateSessionOutcomes(t *testing.T) {
 	}
 
 	// invalid name -> 400
-	resp = apiRequest(t, ts, "POST", "/api/hosts/local/sessions", token, `{"name":"bad;name"}`)
+	resp = apiRequest(t, ts, "POST", "/api/hosts/local/sessions", token, `{"name":"bad:name"}`)
 	if resp.StatusCode != 400 {
 		t.Fatalf("create invalid: expected 400, got %d", resp.StatusCode)
 	}

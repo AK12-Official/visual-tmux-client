@@ -80,18 +80,41 @@ func TestResolveTmuxHonorsEnvPath(t *testing.T) {
 }
 
 func TestValidateSessionName(t *testing.T) {
-	reject := []string{
-		"",
-		strings.Repeat("a", 65),
-		";", "$", "`", "'", "\"", " ", ":",
-		"a b", "a;b", "a$b", "a`b", "a:b", "a'b", "a\"b",
+	// Each rejected name maps to a substring its error must name, per the
+	// spec's "naming the constraint that was violated" scenario.
+	reject := map[string]string{
+		"":                       "empty",
+		strings.Repeat("a", 65):  "longer than 64",
+		strings.Repeat("测", 65): "longer than 64",
+		":":                      "reserved by tmux",
+		".":                      "reserved by tmux",
+		"a:b":                    "reserved by tmux",
+		"a.b":                    "reserved by tmux",
+		"a\x00b":                 "control character",
+		"a\nb":                   "control character",
+		" lead":                  "whitespace",
+		"trail ":                 "whitespace",
+		"　x":                    "whitespace", // U+3000 ideographic space
+		"\xff\xfe":               "UTF-8",
 	}
-	for _, name := range reject {
-		if err := validateSessionName(name); err == nil {
+	for name, want := range reject {
+		err := validateSessionName(name)
+		if err == nil {
 			t.Errorf("expected rejection of %q", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("rejection of %q should name %q, got %v", name, want, err)
 		}
 	}
-	accept := []string{"api", "api-staging", "web.2", "a_b", "a", "A.1-2_b"}
+	accept := []string{
+		"api", "api-staging", "a_b", "a", "A1-2_b",
+		"测试会话",                     // CJK end to end
+		"名字 with 空格",              // internal spaces are fine
+		"emoji-😀",                  // non-ASCII breadth beyond CJK
+		"a;b", "a$b", "a`b", "a'b", // shell metacharacters: argv only, no shell
+		strings.Repeat("测", 64), // exactly at the rune bound
+	}
 	for _, name := range accept {
 		if err := validateSessionName(name); err != nil {
 			t.Errorf("expected %q to be accepted, got %v", name, err)
@@ -224,6 +247,28 @@ func TestCreateSessionGeneratedName(t *testing.T) {
 	}
 }
 
+func TestCreateSessionGeneratedNameCollision(t *testing.T) {
+	c := newTestClient(t)
+	// Two nameless creates within the same second must both succeed: the
+	// second retries the timestamp base with a suffix instead of failing
+	// with a name conflict. (If the calls straddle a second boundary the
+	// names differ anyway, so the invariant holds either way.)
+	first, err := c.CreateSession("")
+	if err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	second, err := c.CreateSession("")
+	if err != nil {
+		t.Fatalf("second create: %v", err)
+	}
+	if first.Name == second.Name {
+		t.Fatalf("expected distinct names, got %q twice", first.Name)
+	}
+	if !strings.HasPrefix(second.Name, "session-") {
+		t.Fatalf("expected generated name, got %q", second.Name)
+	}
+}
+
 func TestCreateSessionDuplicate(t *testing.T) {
 	c := newTestClient(t)
 	if _, err := c.CreateSession("dup"); err != nil {
@@ -236,8 +281,22 @@ func TestCreateSessionDuplicate(t *testing.T) {
 
 func TestCreateSessionInvalidName(t *testing.T) {
 	c := newTestClient(t)
-	if _, err := c.CreateSession("bad;name"); !errors.Is(err, ErrInvalidName) {
+	if _, err := c.CreateSession("bad:name"); !errors.Is(err, ErrInvalidName) {
 		t.Fatalf("expected ErrInvalidName, got %v", err)
+	}
+}
+
+func TestCreateSessionUnicodeName(t *testing.T) {
+	c := newTestClient(t)
+	sess, err := c.CreateSession("测试会话")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if sess.Name != "测试会话" {
+		t.Fatalf("expected name 测试会话, got %q", sess.Name)
+	}
+	if !c.hasSession("测试会话") {
+		t.Fatalf("测试会话 should exist")
 	}
 }
 
@@ -264,6 +323,20 @@ func TestRenameSessionConflict(t *testing.T) {
 	mkSession(t, c, "b")
 	if err := c.RenameSession("a", "b"); !errors.Is(err, ErrNameInUse) {
 		t.Fatalf("expected ErrNameInUse, got %v", err)
+	}
+}
+
+func TestRenameSessionToUnicodeName(t *testing.T) {
+	c := newTestClient(t)
+	mkSession(t, c, "old")
+	if err := c.RenameSession("old", "新名字"); err != nil {
+		t.Fatalf("RenameSession: %v", err)
+	}
+	if !c.hasSession("新名字") {
+		t.Fatalf("新名字 should exist")
+	}
+	if c.hasSession("old") {
+		t.Fatalf("old should be gone")
 	}
 }
 

@@ -7,9 +7,9 @@
 
 ## 2. Hub fixes (Go)
 
-- [ ] 2.1 Rewrite `validateSessionName` as a code-point walk (non-empty, valid UTF-8, no control characters, no `:`/`.`, no leading/trailing whitespace, ≤ 64 runes) returning an error that names the first violated constraint; add table-driven cases to `hub/tmux_test.go` covering CJK acceptance and each rejection; verify `go test ./...` in `hub/`
-- [ ] 2.2 Make empty-name creation retry generated names with a `-1`…`-9` suffix on collision; add a test creating two nameless sessions within the same second; verify both succeed with distinct names and `go test ./...` passes
-- [ ] 2.3 Move token printing out of `resolveToken` into a single startup banner in `main.go` that always prints the effective token with its source (`environment`/`generated`) plus an `open http://…` line derived from `--addr` (substituting `127.0.0.1` for wildcard hosts); update `hub/auth_test.go`; verify `go test ./...` and a manual run with and without `VISUAL_TMUX_CLIENT_TOKEN` shows the banner in both cases
+- [x] 2.1 Rewrite `validateSessionName` as a code-point walk (non-empty, valid UTF-8, no control characters, no `:`/`.`, no leading/trailing whitespace, ≤ 64 runes) returning an error that names the first violated constraint; add table-driven cases to `hub/tmux_test.go` covering CJK acceptance and each rejection; verify `go test ./...` in `hub/`
+- [x] 2.2 Make empty-name creation retry generated names with a `-1`…`-9` suffix on collision; add a test creating two nameless sessions within the same second; verify both succeed with distinct names and `go test ./...` passes
+- [x] 2.3 Move token printing out of `resolveToken` into a single startup banner in `main.go` that always prints the effective token with its source (`environment`/`generated`) plus an `open http://…` line derived from `--addr` (substituting `127.0.0.1` for wildcard hosts); update `hub/auth_test.go`; verify `go test ./...` and a manual run with and without `VISUAL_TMUX_CLIENT_TOKEN` shows the banner in both cases
 
 ## 3. Re-attachable terminals
 
