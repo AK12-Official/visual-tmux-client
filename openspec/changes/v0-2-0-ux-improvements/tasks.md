@@ -53,6 +53,7 @@
 - [x] 10.2 Stop setting the global `window-size` option on every attach (it repaints every tmux client on the server, falsely lighting every background session's activity indicator); pin it once per hub run on the first attachment, and verify by CDP that clicking a session no longer repaints other sessions' clients
 - [x] 10.3 Match `refreshSessionSize` to the attachment's own tmux client by pid (multi-client sessions previously produced a broken multi-line tty target)
 - [x] 10.4 Show the font size (e.g. `13 px`) between the header's font-size buttons
+- [x] 10.5 Validate the credential at the login prompt before entering the main view: probe with a session listing, stay on the prompt with a clear error on rejection, and reject header-unsafe tokens (full-width IME characters) without a round trip; verify by CDP with a wrong ASCII token, a full-width token, and the correct token
 
 ## 9. Release v0.2.0
 

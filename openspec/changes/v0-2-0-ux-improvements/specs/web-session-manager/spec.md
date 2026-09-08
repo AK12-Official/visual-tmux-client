@@ -182,6 +182,35 @@ The client SHALL present a header above the attached terminal that identifies th
 - **WHEN** the user closes the terminal panel
 - **THEN** the session-selection state is shown and the session remains alive and listed
 
+### Requirement: Credential entry and session persistence
+
+The client SHALL prompt for the server credential when it does not have a valid one, retain it across page reloads so the user need not re-enter it each visit, and return to the prompt when the server rejects it. The client SHALL NOT enter the main view until the submitted credential has been accepted by the server, and SHALL reject at the prompt — without storing it — a credential that cannot be sent in an HTTP header.
+
+#### Scenario: No credential held
+
+- **WHEN** the client loads without a stored credential
+- **THEN** it prompts for one and does not display a session list until authenticated
+
+#### Scenario: An invalid credential is submitted
+
+- **WHEN** the user submits a credential the server rejects
+- **THEN** the client stays on the credential prompt, states that authentication failed, and does not enter the main view
+
+#### Scenario: A credential that cannot be sent in a header is submitted
+
+- **WHEN** the user submits a credential containing characters that cannot appear in an HTTP header value, such as full-width IME characters
+- **THEN** the client rejects it at the prompt with an explanatory message and stores nothing
+
+#### Scenario: Credential is rejected
+
+- **WHEN** a stored credential is rejected by the server
+- **THEN** the client discards it, prompts again, and states that authentication failed
+
+#### Scenario: Page is reloaded
+
+- **WHEN** the user reloads the page while holding a valid credential
+- **THEN** the client authenticates without prompting again
+
 ### Requirement: Collapsible session sidebar
 
 The client SHALL let the user collapse the session sidebar to a narrow form and expand it again, with the terminal area using the freed space. The collapsed or expanded state SHALL persist across page reloads.

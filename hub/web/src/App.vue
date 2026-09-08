@@ -5,6 +5,7 @@ import {
   clearToken,
   createSession,
   getToken,
+  isHeaderSafeToken,
   killSession,
   listSessions,
   renameSession,
@@ -21,6 +22,7 @@ import HelpModal from './components/HelpModal.vue'
 const token = ref(getToken() ?? '')
 const tokenInput = ref('')
 const authError = ref('')
+const authBusy = ref(false)
 
 const sessions = ref<Session[]>([])
 const listError = ref('')
@@ -166,14 +168,40 @@ function handleAuthFailure() {
   authError.value = 'Authentication failed. Re-enter the token.'
 }
 
-function submitToken() {
+// The main view opens only after the server has accepted the credential:
+// submitting stores the token (authFetch reads it from storage), probes with
+// a session listing, and bounces back to this prompt on any failure. A token
+// that cannot be sent in an HTTP header (full-width IME characters look
+// identical in the password box) is rejected without a round trip.
+async function submitToken() {
   const t = tokenInput.value.trim()
-  if (!t) return
-  setToken(t)
-  token.value = t
-  tokenInput.value = ''
+  if (!t || authBusy.value) return
+  if (!isHeaderSafeToken(t)) {
+    authError.value =
+      'The token contains characters that cannot be sent in an HTTP header — ' +
+      'check for full-width characters (e.g. from an IME), which look identical but are not.'
+    return
+  }
+  authBusy.value = true
   authError.value = ''
-  void refresh()
+  try {
+    setToken(t)
+    const list = await listSessions()
+    token.value = t
+    tokenInput.value = ''
+    sessions.value = list
+    listError.value = ''
+    startPolling()
+  } catch (err) {
+    clearToken()
+    if (err instanceof AuthError) {
+      authError.value = 'Authentication failed. Check the token and try again.'
+    } else {
+      authError.value = err instanceof Error ? err.message : String(err)
+    }
+  } finally {
+    authBusy.value = false
+  }
 }
 
 function logout() {
@@ -263,9 +291,12 @@ onBeforeUnmount(() => {
           class="auth-card__input"
           placeholder="token"
           autocomplete="off"
+          :disabled="authBusy"
           @keyup.enter="submitToken"
         />
-        <button class="auth-card__btn" @click="submitToken">Connect</button>
+        <button class="auth-card__btn" :disabled="authBusy" @click="submitToken">
+          {{ authBusy ? 'Connecting…' : 'Connect' }}
+        </button>
         <p v-if="authError" class="auth-card__error">{{ authError }}</p>
       </div>
     </div>
@@ -623,6 +654,10 @@ onBeforeUnmount(() => {
 }
 .auth-card__btn:hover {
   border-color: var(--th-text-lo);
+}
+.auth-card__btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .auth-card__error {
   margin: 0;

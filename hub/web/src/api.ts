@@ -32,8 +32,27 @@ export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY)
 }
 
+// The token travels in an Authorization header, and browsers only accept
+// ISO-8859-1 header values. Full-width characters from an IME (or any other
+// non-Latin text) can never authenticate — rejecting them with a clear
+// message beats entering the app and throwing "String contains non
+// ISO-8859-1 code point" on every request.
+const HEADER_SAFE_RE = /^[\x20-\x7E\xA0-\xFF]+$/
+
+/** isHeaderSafeToken reports whether a token can be sent in an HTTP header. */
+export function isHeaderSafeToken(token: string): boolean {
+  return HEADER_SAFE_RE.test(token)
+}
+
 async function authFetch(path: string, init?: RequestInit): Promise<Response> {
   const token = getToken()
+  if (token !== null && !isHeaderSafeToken(token)) {
+    // A stored token that cannot be sent in a header can never authenticate
+    // (it may predate input validation). Treat it as rejected so the client
+    // returns to the prompt instead of failing on every request.
+    clearToken()
+    throw new AuthError()
+  }
   const headers = new Headers(init?.headers)
   if (token) headers.set('Authorization', `Bearer ${token}`)
   const res = await fetch(path, { ...init, headers })
