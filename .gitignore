@@ -1,14 +1,22 @@
 # Agent / tooling directories
 .codex/
 .claude/
+.mcp.json
 
 # Dependencies
 node_modules/
 
 # Build output
 dist/
+release/
+coverage/
 hub/hub
 hub/tmux-hub
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
 
 # OS cruft
 .DS_Store

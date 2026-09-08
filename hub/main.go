@@ -14,8 +14,8 @@ import (
 	"time"
 )
 
-// version is the hub's release version string.
-const version = "0.1.0"
+// version is replaced at build time for release binaries.
+var version = "dev"
 
 // config holds runtime configuration resolved from flags and environment.
 type config struct {
@@ -30,7 +30,7 @@ func usage(fs *flag.FlagSet) func() {
 	return func() {
 		out := fs.Output()
 		fmt.Fprintf(out, "tmux-hub %s\n\n", version)
-		fmt.Fprintf(out, "Usage:\n  hub [flags]\n\nFlags:\n")
+		fmt.Fprintf(out, "Usage:\n  tmux-hub [flags]\n\nFlags:\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(out, "\nEnvironment:\n")
 		fmt.Fprintf(out, "  TMUX_HUB_TOKEN      shared bearer token; generated and printed if unset\n")

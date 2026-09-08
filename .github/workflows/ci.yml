@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: hub/web/package-lock.json
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: hub/go.mod
+          cache-dependency-path: hub/go.sum
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install --yes tmux
+      - name: Build web UI
+        run: npm ci && npm run build
+        working-directory: hub/web
+      - name: Test Go packages
+        run: go test ./...
+        working-directory: hub
+      - name: Vet Go packages
+        run: go vet ./...
+        working-directory: hub
+      - name: Build application
+        run: go build -trimpath -o tmux-hub .
+        working-directory: hub
