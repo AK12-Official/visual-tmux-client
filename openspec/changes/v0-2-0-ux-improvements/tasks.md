@@ -43,12 +43,12 @@
 
 ## 8. In-app help
 
-- [ ] 8.1 Adapt the author's desktop tmux guide into `hub/web/public/tmux-guide.zh-CN.md`: keep fundamentals and the cheat sheet, drop personal references, add a 使用本程序 section (token connection, create/rename, attach/detach/close semantics); verify the file is served by both `vite dev` and the built hub
-- [ ] 8.2 Add the `marked` dependency and `HelpModal.vue` (fetch-once with cached render, `v-html` output, Esc/backdrop close); wire help buttons into the sidebar footer and the collapsed rail; verify opening/closing the overlay keeps an attached terminal connected
-- [ ] 8.3 Verify self-containment: with the guide open, the browser devtools network panel shows requests only to the hub origin
+- [x] 8.1 Adapt the author's desktop tmux guide into `hub/web/public/tmux-guide.zh-CN.md`: keep fundamentals and the cheat sheet, drop personal references, add a 使用本程序 section (token connection, create/rename, attach/detach/close semantics); verify the file is served by both `vite dev` and the built hub
+- [x] 8.2 Add the `marked` dependency and `HelpModal.vue` (fetch-once with cached render, `v-html` output, Esc/backdrop close); wire help buttons into the sidebar footer and the collapsed rail; verify opening/closing the overlay keeps an attached terminal connected
+- [x] 8.3 Verify self-containment: with the guide open, the browser devtools network panel shows requests only to the hub origin
 
 ## 9. Release v0.2.0
 
-- [ ] 9.1 Update `README.md` and `README.zh-CN.md`: Unicode name rules, always-printed token banner, new features, and version-bumped download/run examples
-- [ ] 9.2 Bump versions (`npm --prefix hub/web version 0.2.0 --no-git-tag-version`, `Makefile` `VERSION`), run `make test`, build all four targets via `make package`, and smoke-test the local artifact (`--version`, `--help`, tarball contains binary + both READMEs + LICENSE)
+- [x] 9.1 Update `README.md` and `README.zh-CN.md`: Unicode name rules, always-printed token banner, new features, and version-bumped download/run examples
+- [x] 9.2 Bump versions (`npm --prefix hub/web version 0.2.0 --no-git-tag-version`, `Makefile` `VERSION`), run `make test`, build all four targets via `make package`, and smoke-test the local artifact (`--version`, `--help`, tarball contains binary + both READMEs + LICENSE)
 - [ ] 9.3 After `main` CI is green, tag `v0.2.0`, push, and verify the GitHub Release assets (four archives + checksums) per the release workflow doc

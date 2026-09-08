@@ -4,12 +4,18 @@
 
 **Visual Tmux Client** is a small, self-hosted web interface for managing and using tmux sessions from a browser. The Vue frontend is embedded in a single Go binary, so deployment only needs the binary and a local `tmux` installation.
 
-> The project is currently an early `v0.1` release. It manages tmux on the same machine where Visual Tmux Client runs; remote-host aggregation is not implemented.
+> The project is currently an early `v0.2` release. It manages tmux on the same machine where Visual Tmux Client runs; remote-host aggregation is not implemented.
 
 ## Features
 
-- List, create, rename, and terminate local tmux sessions.
-- Attach to a session in a full browser terminal powered by xterm.js.
+- List, create (one click, auto-named), rename, and terminate local tmux sessions — individually or in batches.
+- Attach to a session in a full browser terminal powered by xterm.js, and re-attach after a detach or a disconnect.
+- See which session is talking: background sessions with recent output get a highlighted card; the viewed session is marked in the terminal header and the browser tab title.
+- Terminal header with font-size controls, fullscreen, and panel close.
+- Manual session ordering with drag reorder and pin-to-top, plus a collapsible session sidebar.
+- Leveled, auto-expiring toast notifications for action results and terminal events.
+- Built-in Chinese tmux guide available from the in-app help button.
+- Session names accept non-ASCII text such as Chinese; only `:` and `.` are reserved.
 - Preserve terminal state across browser disconnects by leaving tmux sessions running.
 - Use bearer-token authentication and short-lived, single-use WebSocket tickets.
 - Ship the web UI inside one dependency-free application binary.
@@ -28,12 +34,12 @@ Building from source additionally requires Go 1.26.3+ and Node.js 24+.
 Download the archive for your platform from the repository's Releases page, then:
 
 ```sh
-tar -xzf visual-tmux-client_0.1.0_darwin_arm64.tar.gz
-cd visual-tmux-client_0.1.0_darwin_arm64
+tar -xzf visual-tmux-client_0.2.0_darwin_arm64.tar.gz
+cd visual-tmux-client_0.2.0_darwin_arm64
 ./visual-tmux-client
 ```
 
-The server listens on `http://127.0.0.1:7690` by default. When no token is configured, it prints a freshly generated token to stderr. Open the URL and paste that token into the sign-in screen.
+The server listens on `http://127.0.0.1:7690` by default. At startup it prints its access token and the URL to open — whether the token was generated or taken from the environment — so you can always sign in. Open the URL and paste that token into the sign-in screen.
 
 To use a stable token:
 
