@@ -22,18 +22,18 @@
 
 ## 5. Terminal header controls
 
-- [ ] 5.1 Add the terminal header to `App.vue`'s main region (session name, connection state moved here from the app bar, activity dot placeholder); verify it renders for the selected session and the placeholder view shows when none is selected
-- [ ] 5.2 Implement font-size −/+ : persisted `vtc:font-size` state (default 13, clamp 8–24, 1 px steps) passed as a prop, applied in `TerminalView` via `term.options.fontSize` followed by a re-fit; verify the grid re-negotiates (columns change) and the size survives a reload
-- [ ] 5.3 Implement fullscreen: `requestFullscreen()` on the terminal container with the exit path restoring layout; verify entering/leaving fullscreen re-fits the terminal to the new box
-- [ ] 5.4 Implement close: sets selection to null and returns to the placeholder; verify the session remains alive and listed, and its card can still show activity
+- [x] 5.1 Add the terminal header to `App.vue`'s main region (session name, connection state moved here from the app bar, activity dot placeholder); verify it renders for the selected session and the placeholder view shows when none is selected
+- [x] 5.2 Implement font-size −/+ : persisted `vtc:font-size` state (default 13, clamp 8–24, 1 px steps) passed as a prop, applied in `TerminalView` via `term.options.fontSize` followed by a re-fit; verify the grid re-negotiates (columns change) and the size survives a reload
+- [x] 5.3 Implement fullscreen: `requestFullscreen()` on the terminal container with the exit path restoring layout; verify entering/leaving fullscreen re-fits the terminal to the new box
+- [x] 5.4 Implement close: sets selection to null and returns to the placeholder; verify the session remains alive and listed, and its card can still show activity
 
 ## 6. Session list redesign
 
-- [ ] 6.1 Rework session cards to a taller two-line layout (name row, meta/actions row); verify visual check across 1/2-digit window counts and long CJK names (ellipsis, no wrap)
-- [ ] 6.2 Add select mode: a toggle that shows per-card checkboxes, suspends click-to-navigate, and offers a confirmed bulk kill that issues sequential DELETEs and reports per-session failures as toasts; verify selecting 3 sessions and killing removes exactly those, and a mid-batch failure names the failed session
-- [ ] 6.3 Add ordering state `vtc:order` (`mode`, `order[]`, `pinned[]`) with default/manual mode toggle; manual rendering is pinned first, then saved order, then unseen sessions appended; renames and kills keep the stored entries consistent; verify mode and positions survive reload
-- [ ] 6.4 Add drag reorder and pin/unpin in manual mode (HTML5 drag-and-drop on cards); verify a dragged position and a pin persist across reload and that a newly created session appears without disturbing saved positions
-- [ ] 6.5 Add sidebar collapse: persisted `vtc:sidebar-collapsed`, 260 px ↔ ~44 px icon rail (expand, create, help), animated width; verify the terminal re-fits on collapse/expand and the state survives reload
+- [x] 6.1 Rework session cards to a taller two-line layout (name row, meta/actions row); verify visual check across 1/2-digit window counts and long CJK names (ellipsis, no wrap)
+- [x] 6.2 Add select mode: a toggle that shows per-card checkboxes, suspends click-to-navigate, and offers a confirmed bulk kill that issues sequential DELETEs and reports per-session failures as toasts; verify selecting 3 sessions and killing removes exactly those, and a mid-batch failure names the failed session
+- [x] 6.3 Add ordering state `vtc:order` (`mode`, `order[]`, `pinned[]`) with default/manual mode toggle; manual rendering is pinned first, then saved order, then unseen sessions appended; renames and kills keep the stored entries consistent; verify mode and positions survive reload
+- [x] 6.4 Add drag reorder and pin/unpin in manual mode (HTML5 drag-and-drop on cards); verify a dragged position and a pin persist across reload and that a newly created session appears without disturbing saved positions
+- [x] 6.5 Add sidebar collapse: persisted `vtc:sidebar-collapsed`, 260 px ↔ ~44 px icon rail (expand, create, help), animated width; verify the terminal re-fits on collapse/expand and the state survives reload
 
 ## 7. Activity indication
 

@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { TerminalSession, type ConnState, type NoticeLevel } from '../terminal'
 
 const props = defineProps<{
   session: string
   /** Whether the session still exists server-side (from the polled list). */
   alive: boolean
+  /** Terminal font size in px, owned and persisted by App.vue. */
+  fontSize?: number
 }>()
 const emit = defineEmits<{
   (e: 'state', session: string, state: ConnState): void
@@ -31,7 +33,7 @@ function attach(): void {
         emit('state', props.session, s)
       },
       onNotice: (message, level) => emit('notice', message, level),
-    })
+    }, props.fontSize)
   } catch (err) {
     emit('notice', `Terminal init failed: ${String(err)}`)
   }
@@ -47,6 +49,14 @@ function reconnect(): void {
 }
 
 onMounted(attach)
+
+// Live font-size changes from the header apply to the live terminal session.
+watch(
+  () => props.fontSize,
+  (px) => {
+    if (px !== undefined) session?.setFontSize(px)
+  },
+)
 
 onBeforeUnmount(() => {
   session?.dispose()

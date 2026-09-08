@@ -62,6 +62,7 @@ export class TerminalSession {
     private container: HTMLElement,
     private session: string,
     private hooks: TerminalHooks,
+    fontSize = 13,
   ) {
     this.term = new Terminal({
       // The unicode API (unicode11 addon + term.unicode.activeVersion) is a
@@ -71,7 +72,7 @@ export class TerminalSession {
       scrollback: 5000,
       fontFamily:
         'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-      fontSize: 13,
+      fontSize,
       theme: THEME,
     })
     this.fit = new FitAddon()
@@ -128,6 +129,13 @@ export class TerminalSession {
         // transient zero-size layout glitch
       }
     }
+  }
+
+  // Live font-size change from the terminal header. The re-fit re-measures
+  // the grid and reports the new dimensions, so tmux re-lays-out its content.
+  setFontSize(px: number): void {
+    this.term.options.fontSize = px
+    this.refit()
   }
 
   private proposedSize(): { cols: number; rows: number } {
