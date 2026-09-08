@@ -12,6 +12,7 @@ shell/tmux-shell
 
 # Hub binary (see openspec/changes/browser-session-manager)
 hub/hub
+hub/tmux-hub
 
 # OS cruft
 .DS_Store

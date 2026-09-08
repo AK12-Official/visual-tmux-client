@@ -1,0 +1,114 @@
+package main
+
+import (
+	"embed"
+	"io/fs"
+	"net/http"
+	"strings"
+	"sync"
+)
+
+// webFS embeds the built frontend. `all:` includes files that would otherwise
+// be skipped by the embed tool.
+//
+//go:embed all:web/dist
+var webFS embed.FS
+
+// server holds the hub's runtime state: configuration, the tmux client, the
+// ticket store, and the set of active attachments (for graceful shutdown).
+type server struct {
+	cfg     *config
+	token   string
+	origin  string
+	tmux    *tmuxClient
+	tickets *ticketStore
+
+	mu          sync.Mutex
+	attachments map[*attachment]struct{}
+}
+
+func newServer(cfg *config, token string) *server {
+	return &server{
+		cfg:         cfg,
+		token:       token,
+		origin:      cfg.origin,
+		tmux:        newTmuxClient(""),
+		tickets:     newTicketStore(),
+		attachments: make(map[*attachment]struct{}),
+	}
+}
+
+// auth wraps a handler with the bearer-token middleware.
+func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {
+	return requireAuth(s.token, next)
+}
+
+// handler builds the HTTP router.
+func (s *server) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/hosts/{hostId}/sessions", s.auth(s.listSessions))
+	mux.HandleFunc("POST /api/hosts/{hostId}/sessions", s.auth(s.createSession))
+	mux.HandleFunc("PATCH /api/hosts/{hostId}/sessions/{name}", s.auth(s.renameSession))
+	mux.HandleFunc("DELETE /api/hosts/{hostId}/sessions/{name}", s.auth(s.killSession))
+	mux.HandleFunc("POST /api/ws-ticket", s.auth(s.issueTicket))
+	mux.HandleFunc("GET /ws/{hostId}/{session}", s.attach)
+	mux.Handle("/", s.spaHandler())
+	return mux
+}
+
+// track registers an active attachment so shutdown can close it.
+func (s *server) track(a *attachment) {
+	s.mu.Lock()
+	s.attachments[a] = struct{}{}
+	s.mu.Unlock()
+}
+
+// untrack removes an attachment from the active set.
+func (s *server) untrack(a *attachment) {
+	s.mu.Lock()
+	delete(s.attachments, a)
+	s.mu.Unlock()
+}
+
+// shutdownAll closes every active attachment, killing its pty process.
+func (s *server) shutdownAll() {
+	s.mu.Lock()
+	list := make([]*attachment, 0, len(s.attachments))
+	for a := range s.attachments {
+		list = append(list, a)
+	}
+	s.mu.Unlock()
+	for _, a := range list {
+		a.shutdown()
+	}
+}
+
+// spaHandler serves the embedded frontend. Content-hashed assets under /assets/
+// are served with a long immutable cache lifetime; every other non-API, non-WS
+// path falls back to index.html (SPA fallback). Unknown /api/ and /ws/ paths
+// are 404 rather than falling through to index.html.
+func (s *server) spaHandler() http.Handler {
+	dist, _ := fs.Sub(webFS, "web/dist")
+	fileServer := http.FileServer(http.FS(dist))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if strings.HasPrefix(path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/ws/") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-cache")
+		data, err := fs.ReadFile(dist, "index.html")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	})
+}

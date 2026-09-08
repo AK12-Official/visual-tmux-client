@@ -4,20 +4,20 @@
 
 ## 1. Hub module scaffold
 
-- [ ] 1.1 Create the `hub/` Go module (`go mod init tmux-hub`, Go 1.26) with `main.go` printing a version string — verify `cd hub && go build ./... && ./hub --version` succeeds.
+- [x] 1.1 Create the `hub/` Go module (`go mod init tmux-hub`, Go 1.26) with `main.go` printing a version string — verify `cd hub && go build ./... && ./hub --version` succeeds.
 - [ ] 1.2 Add dependencies `github.com/creack/pty` and `github.com/coder/websocket` — verify `go mod tidy` leaves both in `go.mod` as direct (non-`// indirect`) requirements.
-- [ ] 1.3 Implement flag/env config in `main.go`: `--addr` (default `127.0.0.1:7690`), `TMUX_HUB_TOKEN`, `TMUX_HUB_ORIGIN` — verify `./hub --help` lists all three and that `--addr` rejects a malformed value with a non-zero exit.
+- [x] 1.3 Implement flag/env config in `main.go`: `--addr` (default `127.0.0.1:7690`), `TMUX_HUB_TOKEN`, `TMUX_HUB_ORIGIN` — verify `./hub --help` lists all three and that `--addr` rejects a malformed value with a non-zero exit.
 
 ## 2. tmux exec wrapper (`hub/tmux.go`)
 
-- [ ] 2.1 Implement `resolveTmux()` honoring `TMUX_HUB_TMUX_PATH` then falling back to `exec.LookPath("tmux")`, returning a distinguishable `ErrTmuxNotFound` — verify a unit test with a `PATH` containing no tmux returns `ErrTmuxNotFound`.
-- [ ] 2.2 Implement `validateSessionName(string) error` enforcing `^[A-Za-z0-9._-]{1,64}$` — verify table-driven tests reject empty, 65-char, and each of `;`, `$`, backtick, `'`, `"`, space, `:`, and accept `api`, `api-staging`, `web.2`, `a_b`. (spec: session-hub → Shell-injection-safe tmux invocation)
-- [ ] 2.3 Implement `execTmux(args ...string)` using `exec.Command` with an argv slice (never a shell string), returning stdout, stderr, and exit code separately — verify a unit test asserts `exec.Command` receives discrete args by invoking `list-sessions` against a dedicated `-L` test socket.
-- [ ] 2.4 Implement `exactTarget(name string) string` returning `"=" + name` and use it for every `-t` argument — verify an integration test creates sessions `probe` and `probe-staging`, kills `probe`, and asserts `probe-staging` survives. (spec: session-hub → Exact session targeting)
-- [ ] 2.5 Implement `ListSessions()` parsing `list-sessions -F "#{session_name}|#{session_windows}|#{session_attached}|#{session_created}"` into a struct slice — verify a test against a live test-socket server with 2 sessions returns both with correct window counts, and that a server with no sessions returns an empty slice with nil error. (spec: session-hub → Session listing)
-- [ ] 2.6 Make `ListSessions()` map tmux's "no server running" stderr to an empty slice + nil error, while `ErrTmuxNotFound` still propagates as an error — verify one test with no server running returns empty/nil and another with no tmux binary returns an error. (spec: session-hub → Session listing, scenarios "No tmux server is running" / "The tmux binary is unavailable")
-- [ ] 2.7 Implement `CreateSession(name string)` running `new-session -d -s <name> -c $HOME`, generating `session-YYYYMMDD-HHMMSS` when name is empty, and returning a distinguishable `ErrNameInUse` when the name exists — verify tests cover explicit name, generated name, and duplicate-name rejection. (spec: session-hub → Session creation)
-- [ ] 2.8 Implement `RenameSession(old, new string)` and `KillSession(name string)` with `ErrNotFound` for absent targets and `ErrNameInUse` for rename conflicts — verify tests cover success, absent target, and rename-onto-existing for each. (spec: session-hub → Session renaming, Session termination)
+- [x] 2.1 Implement `resolveTmux()` honoring `TMUX_HUB_TMUX_PATH` then falling back to `exec.LookPath("tmux")`, returning a distinguishable `ErrTmuxNotFound` — verify a unit test with a `PATH` containing no tmux returns `ErrTmuxNotFound`.
+- [x] 2.2 Implement `validateSessionName(string) error` enforcing `^[A-Za-z0-9._-]{1,64}$` — verify table-driven tests reject empty, 65-char, and each of `;`, `$`, backtick, `'`, `"`, space, `:`, and accept `api`, `api-staging`, `web.2`, `a_b`. (spec: session-hub → Shell-injection-safe tmux invocation)
+- [x] 2.3 Implement `execTmux(args ...string)` using `exec.Command` with an argv slice (never a shell string), returning stdout, stderr, and exit code separately — verify a unit test asserts `exec.Command` receives discrete args by invoking `list-sessions` against a dedicated `-L` test socket.
+- [x] 2.4 Implement `exactTarget(name string) string` returning `"=" + name` and use it for every `-t` argument — verify an integration test creates sessions `probe` and `probe-staging`, kills `probe`, and asserts `probe-staging` survives. (spec: session-hub → Exact session targeting)
+- [x] 2.5 Implement `ListSessions()` parsing `list-sessions -F "#{session_name}|#{session_windows}|#{session_attached}|#{session_created}"` into a struct slice — verify a test against a live test-socket server with 2 sessions returns both with correct window counts, and that a server with no sessions returns an empty slice with nil error. (spec: session-hub → Session listing)
+- [x] 2.6 Make `ListSessions()` map tmux's "no server running" stderr to an empty slice + nil error, while `ErrTmuxNotFound` still propagates as an error — verify one test with no server running returns empty/nil and another with no tmux binary returns an error. (spec: session-hub → Session listing, scenarios "No tmux server is running" / "The tmux binary is unavailable")
+- [x] 2.7 Implement `CreateSession(name string)` running `new-session -d -s <name> -c $HOME`, generating `session-YYYYMMDD-HHMMSS` when name is empty, and returning a distinguishable `ErrNameInUse` when the name exists — verify tests cover explicit name, generated name, and duplicate-name rejection. (spec: session-hub → Session creation)
+- [x] 2.8 Implement `RenameSession(old, new string)` and `KillSession(name string)` with `ErrNotFound` for absent targets and `ErrNameInUse` for rename conflicts — verify tests cover success, absent target, and rename-onto-existing for each. (spec: session-hub → Session renaming, Session termination)
 
 ## 3. Auth and tickets
 
