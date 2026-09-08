@@ -28,6 +28,13 @@ const connStates = ref<Record<string, ConnState>>({})
 
 const hasToken = computed(() => !!token.value)
 
+// Whether the selected session still exists server-side, from the same polled
+// list that renders the sidebar. Drives the terminal's ended overlay: a
+// detached-but-alive session offers Reconnect; a gone one states its end.
+const selectedAlive = computed(() =>
+  selected.value !== null && sessions.value.some((s) => s.name === selected.value),
+)
+
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
 function startPolling() {
@@ -84,9 +91,11 @@ function logout() {
   sessions.value = []
 }
 
-async function onCreate(name: string) {
+// One-click creation: the hub assigns the default name (made unique by its
+// suffix retry); renaming is how the user personalizes it afterwards.
+async function onCreate() {
   try {
-    await createSession(name)
+    await createSession()
     await refresh()
   } catch (err) {
     notify('error', err instanceof Error ? err.message : String(err))
@@ -180,6 +189,7 @@ onBeforeUnmount(() => {
               v-if="selected"
               :key="selected"
               :session="selected"
+              :alive="selectedAlive"
               @state="onState"
               @notice="onNotice"
             />

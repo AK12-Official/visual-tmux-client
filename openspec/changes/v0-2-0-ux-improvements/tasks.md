@@ -13,12 +13,12 @@
 
 ## 3. Re-attachable terminals
 
-- [ ] 3.1 Add the ended overlay to `TerminalView.vue`: when the connection state is `ended` and the session still exists in the polled list, show "detached" with a Reconnect action that disposes the current `TerminalSession` and builds a new one; when the session is gone, state that it ended; verify manually: detach with `Ctrl-b d` → Reconnect restores live I/O without a reload; kill the session → the ended wording appears with no reconnect offer
-- [ ] 3.2 Confirm `KeepAlive` never serves a dead instance after reconnect (switch away and back after a detach+reconnect); verify the view still streams and accepts input
+- [x] 3.1 Add the ended overlay to `TerminalView.vue`: when the connection state is `ended` and the session still exists in the polled list, show "detached" with a Reconnect action that disposes the current `TerminalSession` and builds a new one; when the session is gone, state that it ended; verify manually: detach with `Ctrl-b d` → Reconnect restores live I/O without a reload; kill the session → the ended wording appears with no reconnect offer
+- [x] 3.2 Confirm `KeepAlive` never serves a dead instance after reconnect (switch away and back after a detach+reconnect); verify the view still streams and accepts input
 
 ## 4. One-click session creation
 
-- [ ] 4.1 Replace the name input + Create button in `SessionList.vue` with a single create action that emits creation without a name, and drop the name from `App.vue`'s create handler; verify clicking it produces a `session-…`-named session in the list, and two clicks within one second produce two distinct sessions (with task 2.2)
+- [x] 4.1 Replace the name input + Create button in `SessionList.vue` with a single create action that emits creation without a name, and drop the name from `App.vue`'s create handler; verify clicking it produces a `session-…`-named session in the list, and two clicks within one second produce two distinct sessions (with task 2.2)
 
 ## 5. Terminal header controls
 

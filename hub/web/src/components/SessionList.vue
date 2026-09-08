@@ -10,23 +10,15 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'select', name: string): void
-  (e: 'create', name: string): void
+  (e: 'create'): void
   (e: 'rename', oldName: string, newName: string): void
   (e: 'kill', name: string): void
   (e: 'retry'): void
 }>()
 
-const newName = ref('')
 const renaming = ref<string | null>(null)
 const renameDraft = ref('')
 const confirmingKill = ref<string | null>(null)
-
-function submitCreate() {
-  const name = newName.value.trim()
-  if (!name) return
-  emit('create', name)
-  newName.value = ''
-}
 
 function startRename(name: string) {
   renaming.value = name
@@ -53,15 +45,7 @@ function confirmKill() {
 
 <template>
   <div class="session-list">
-    <div class="session-list__create">
-      <input
-        v-model="newName"
-        class="session-list__input"
-        placeholder="new session name (blank = auto)"
-        @keyup.enter="submitCreate"
-      />
-      <button class="session-list__btn" @click="submitCreate">Create</button>
-    </div>
+    <button class="session-list__create-btn" @click="emit('create')">+ New session</button>
 
     <div v-if="error" class="session-list__error">
       <span>{{ error }}</span>
@@ -118,9 +102,18 @@ function confirmKill() {
   gap: 0.5rem;
   height: 100%;
 }
-.session-list__create {
-  display: flex;
-  gap: 0.4rem;
+.session-list__create-btn {
+  background: var(--th-raised);
+  color: var(--th-text-hi);
+  border: 1px solid var(--th-border);
+  border-radius: 4px;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.session-list__create-btn:hover {
+  border-color: var(--th-accent);
 }
 .session-list__input {
   flex: 1;

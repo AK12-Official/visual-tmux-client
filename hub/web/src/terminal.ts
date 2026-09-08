@@ -15,7 +15,7 @@ export type ConnState = 'connecting' | 'connected' | 'reconnecting' | 'ended'
 export type NoticeLevel = 'error' | 'warning'
 
 export interface TerminalHooks {
-  onState: (state: ConnState) => void
+  onState: (state: ConnState, detail?: string) => void
   onNotice: (message: string, level?: NoticeLevel) => void
 }
 
@@ -177,7 +177,16 @@ export class TerminalSession {
       }
     } catch (err) {
       if (this.disposed || gen !== this.generation) return
-      this.hooks.onNotice(err instanceof Error ? err.message : String(err))
+      const message = err instanceof Error ? err.message : String(err)
+      if (message.includes('session_not_found')) {
+        // The session is gone; no retry can ever succeed. End instead of
+        // retrying quietly forever (the spec forbids silent indefinite retry).
+        this.ended = true
+        this.hooks.onState('ended')
+        this.hooks.onNotice(`Session "${this.session}" no longer exists.`)
+        return
+      }
+      this.hooks.onNotice(message)
       this.scheduleReconnect()
     }
   }
@@ -200,7 +209,8 @@ export class TerminalSession {
         if (msg.message) this.hooks.onNotice(msg.message)
         if (!msg.retryable) {
           this.ended = true
-          this.hooks.onState('ended')
+          // Carry the refusal reason so the ended overlay can explain itself.
+          this.hooks.onState('ended', msg.message)
         }
         break
       case 'pong':
