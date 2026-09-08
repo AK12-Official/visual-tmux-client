@@ -49,7 +49,7 @@ func TestGracefulShutdownNoOrphan(t *testing.T) {
 	// t.TempDir(): tmux's socket path is TMUX_TMPDIR/tmux-<uid>/default, and
 	// t.TempDir() on macOS produces paths long enough to exceed the Unix
 	// socket sun_path limit, failing bind() with ENAMETOOLONG.
-	tmpdir, err := os.MkdirTemp("", "tmuxhub-")
+	tmpdir, err := os.MkdirTemp("", "visual-tmux-client-")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestGracefulShutdownNoOrphan(t *testing.T) {
 
 	const token = "test-token"
 	hub := exec.Command(hubBin, "--addr", addr)
-	hub.Env = append(os.Environ(), "TMUX_HUB_TOKEN="+token, "TMUX_TMPDIR="+tmpdir)
+	hub.Env = append(os.Environ(), "VISUAL_TMUX_CLIENT_TOKEN="+token, "TMUX_TMPDIR="+tmpdir)
 	var stderr bytes.Buffer
 	hub.Stderr = &stderr
 	if err := hub.Start(); err != nil {

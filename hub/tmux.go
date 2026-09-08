@@ -57,11 +57,11 @@ func newTmuxClient(socket string) *tmuxClient {
 	return &tmuxClient{path: path, socket: socket, err: err}
 }
 
-// resolveTmux returns the tmux binary path, honoring TMUX_HUB_TMUX_PATH and
+// resolveTmux returns the tmux binary path, honoring VISUAL_TMUX_CLIENT_TMUX_PATH and
 // falling back to $PATH lookup. It returns ErrTmuxNotFound when no binary is
 // available so callers can distinguish "tmux missing" from "no sessions".
 func resolveTmux() (string, error) {
-	if p := os.Getenv("TMUX_HUB_TMUX_PATH"); p != "" {
+	if p := os.Getenv("VISUAL_TMUX_CLIENT_TMUX_PATH"); p != "" {
 		if _, err := os.Stat(p); err != nil {
 			return "", fmt.Errorf("%w: %v", ErrTmuxNotFound, err)
 		}
@@ -88,7 +88,7 @@ func validateSessionName(name string) error {
 // error is reserved for "could not start the process" failures.
 //
 // Every tmux subprocess the hub spawns runs with a scrubbed environment so the
-// hub's secrets (TMUX_HUB_TOKEN) never leak into a session, and so a hub that
+// hub's secrets (VISUAL_TMUX_CLIENT_TOKEN) never leak into a session, and so a hub that
 // happens to run inside a tmux session does not nest (TMUX/TMUX_PANE removed).
 func runCommand(path string, args ...string) (stdout, stderr string, exitCode int, err error) {
 	cmd := exec.Command(path, args...)
@@ -308,7 +308,7 @@ func (c *tmuxClient) attachCommand(name string) *exec.Cmd {
 // scrubbedEnv returns the hub's environment with its own secrets and any
 // tmux nesting markers removed.
 func scrubbedEnv() []string {
-	return filterEnv(os.Environ(), "TMUX", "TMUX_PANE", "TMUX_HUB_TOKEN")
+	return filterEnv(os.Environ(), "TMUX", "TMUX_PANE", "VISUAL_TMUX_CLIENT_TOKEN")
 }
 
 // filterEnv returns env with entries whose key matches any of the given names

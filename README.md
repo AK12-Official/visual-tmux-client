@@ -1,8 +1,8 @@
-# tmux-hub
+# Visual Tmux Client
 
-`tmux-hub` is a small, self-hosted web interface for managing and using tmux sessions from a browser. The Vue frontend is embedded in a single Go binary, so deployment only needs the binary and a local `tmux` installation.
+**Visual Tmux Client** is a small, self-hosted web interface for managing and using tmux sessions from a browser. The Vue frontend is embedded in a single Go binary, so deployment only needs the binary and a local `tmux` installation.
 
-> The project is currently an early `v0.1` release. It manages tmux on the same machine where `tmux-hub` runs; remote-host aggregation is not implemented.
+> The project is currently an early `v0.1` release. It manages tmux on the same machine where Visual Tmux Client runs; remote-host aggregation is not implemented.
 
 ## Features
 
@@ -26,9 +26,9 @@ Building from source additionally requires Go 1.26.3+ and Node.js 24+.
 Download the archive for your platform from the repository's Releases page, then:
 
 ```sh
-tar -xzf tmux-hub_0.1.0_darwin_arm64.tar.gz
-cd tmux-hub_0.1.0_darwin_arm64
-./tmux-hub
+tar -xzf visual-tmux-client_0.1.0_darwin_arm64.tar.gz
+cd visual-tmux-client_0.1.0_darwin_arm64
+./visual-tmux-client
 ```
 
 The server listens on `http://127.0.0.1:7690` by default. When no token is configured, it prints a freshly generated token to stderr. Open the URL and paste that token into the sign-in screen.
@@ -36,27 +36,27 @@ The server listens on `http://127.0.0.1:7690` by default. When no token is confi
 To use a stable token:
 
 ```sh
-TMUX_HUB_TOKEN="$(openssl rand -base64 32)" ./tmux-hub
+VISUAL_TMUX_CLIENT_TOKEN="$(openssl rand -base64 32)" ./visual-tmux-client
 ```
 
-Run `./tmux-hub --help` to see all flags and environment variables.
+Run `./visual-tmux-client --help` to see all flags and environment variables.
 
 ## Configuration
 
 | Setting | Default | Description |
 | --- | --- | --- |
 | `--addr` | `127.0.0.1:7690` | HTTP listen address |
-| `TMUX_HUB_TOKEN` | generated at startup | Shared bearer token used by the browser UI |
-| `TMUX_HUB_ORIGIN` | `http://<listen-address>` | Exact browser origin allowed for WebSocket upgrades |
-| `TMUX_HUB_TMUX_PATH` | resolved from `PATH` | Explicit path to the tmux executable |
+| `VISUAL_TMUX_CLIENT_TOKEN` | generated at startup | Shared bearer token used by the browser UI |
+| `VISUAL_TMUX_CLIENT_ORIGIN` | `http://<listen-address>` | Exact browser origin allowed for WebSocket upgrades |
+| `VISUAL_TMUX_CLIENT_TMUX_PATH` | resolved from `PATH` | Explicit path to the tmux executable |
 
-The default loopback binding is intentional. If you expose the service to another machine, put it behind HTTPS, use a strong stable token, and set `TMUX_HUB_ORIGIN` to the exact public origin. See [SECURITY.md](SECURITY.md) before exposing it to a network.
+The default loopback binding is intentional. If you expose the service to another machine, put it behind HTTPS, use a strong stable token, and set `VISUAL_TMUX_CLIENT_ORIGIN` to the exact public origin. See [SECURITY.md](SECURITY.md) before exposing it to a network.
 
 ## Build from source
 
 ```sh
 make build
-./hub/tmux-hub
+./hub/visual-tmux-client
 ```
 
 `make build` installs locked frontend dependencies, builds the Vue application, and embeds it into the Go binary. Other useful commands:

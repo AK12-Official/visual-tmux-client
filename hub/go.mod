@@ -1,4 +1,4 @@
-module tmux-hub
+module github.com/AK12-Official/visual-tmux-client/hub
 
 go 1.26.3
 

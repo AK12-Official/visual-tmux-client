@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/creack/pty"
+	"github.com/AK12-Official/visual-tmux-client/hub/ringbuffer"
 	"github.com/coder/websocket"
-	"tmux-hub/ringbuffer"
+	"github.com/creack/pty"
 )
 
 // Backpressure thresholds and poll interval for the output pump. When the
@@ -22,8 +22,8 @@ import (
 // end-to-end flow-control mechanism. Terminal output is never dropped and never
 // buffered without bound.
 const (
-	outputHighWater = 1 << 20     // 1 MB: stop reading the pty above this
-	outputLowWater  = 128 << 10   // 128 KB: resume below this
+	outputHighWater = 1 << 20   // 1 MB: stop reading the pty above this
+	outputLowWater  = 128 << 10 // 128 KB: resume below this
 	pollInterval    = 100 * time.Millisecond
 )
 

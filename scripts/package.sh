@@ -17,7 +17,7 @@ npm --prefix "$project_dir/hub/web" ci
 npm --prefix "$project_dir/hub/web" run build
 
 mkdir -p "$output_dir"
-find "$output_dir" -maxdepth 1 -type f \( -name 'tmux-hub_*.tar.gz' -o -name 'checksums.txt' \) -delete
+find "$output_dir" -maxdepth 1 -type f \( -name 'visual-tmux-client_*.tar.gz' -o -name 'checksums.txt' \) -delete
 
 for target in $targets; do
   goos=${target%/*}
@@ -34,8 +34,8 @@ for target in $targets; do
       ;;
   esac
 
-  archive_name="tmux-hub_${version}_${goos}_${goarch}"
-  staging_dir=$(mktemp -d "${TMPDIR:-/tmp}/tmux-hub-package.XXXXXX")
+  archive_name="visual-tmux-client_${version}_${goos}_${goarch}"
+  staging_dir=$(mktemp -d "${TMPDIR:-/tmp}/visual-tmux-client-package.XXXXXX")
   package_dir="$staging_dir/$archive_name"
   mkdir -p "$package_dir"
 
@@ -44,7 +44,7 @@ for target in $targets; do
     CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
       -trimpath \
       -ldflags "-s -w -X main.version=$version" \
-      -o "$package_dir/tmux-hub" .
+      -o "$package_dir/visual-tmux-client" .
   )
   cp "$project_dir/README.md" "$project_dir/LICENSE" "$package_dir/"
   tar -C "$staging_dir" -czf "$output_dir/$archive_name.tar.gz" "$archive_name"
@@ -53,7 +53,7 @@ done
 
 (
   cd "$output_dir"
-  shasum -a 256 tmux-hub_*.tar.gz > checksums.txt
+  shasum -a 256 visual-tmux-client_*.tar.gz > checksums.txt
 )
 
 echo "release artifacts written to $output_dir"

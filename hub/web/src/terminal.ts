@@ -16,7 +16,7 @@ export interface TerminalHooks {
   onNotice: (message: string) => void
 }
 
-// Dark terminal palette modeled on TmuxHub's default-dark theme, matching the
+// Dark terminal palette modeled on Visual Tmux Client's default-dark theme, matching the
 // chrome tokens in style.css so the terminal reads as one surface.
 const THEME = {
   background: '#0a0a0a',

@@ -11,7 +11,7 @@ dist/
 release/
 coverage/
 hub/hub
-hub/tmux-hub
+hub/visual-tmux-client
 
 # Local configuration and secrets
 .env

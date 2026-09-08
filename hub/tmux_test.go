@@ -55,7 +55,7 @@ func mkSession(t *testing.T, c *tmuxClient, name string) {
 }
 
 func TestResolveTmuxNotFound(t *testing.T) {
-	t.Setenv("TMUX_HUB_TMUX_PATH", "")
+	t.Setenv("VISUAL_TMUX_CLIENT_TMUX_PATH", "")
 	t.Setenv("PATH", "")
 	_, err := resolveTmux()
 	if !errors.Is(err, ErrTmuxNotFound) {
@@ -69,7 +69,7 @@ func TestResolveTmuxHonorsEnvPath(t *testing.T) {
 	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("TMUX_HUB_TMUX_PATH", fake)
+	t.Setenv("VISUAL_TMUX_CLIENT_TMUX_PATH", fake)
 	got, err := resolveTmux()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

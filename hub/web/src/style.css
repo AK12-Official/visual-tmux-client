@@ -1,4 +1,4 @@
-/* Dark theme tokens, modeled on TmuxHub's default-dark palette. */
+/* Dark theme tokens, modeled on Visual Tmux Client's default-dark palette. */
 :root {
     color-scheme: dark;
     --app-bg: #0a0a0a;

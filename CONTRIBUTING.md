@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve tmux-hub.
+Thanks for helping improve Visual Tmux Client.
 
 ## Development setup
 
@@ -9,7 +9,7 @@ Install Go 1.26.3+, Node.js 24+, npm, and tmux 3.3+. Then run:
 ```sh
 make test
 make build
-./hub/tmux-hub
+./hub/visual-tmux-client
 ```
 
 The browser UI is under `hub/web`. For frontend development with hot reload, run `npm run dev` there. API requests still need a running Go server or an appropriate local proxy.

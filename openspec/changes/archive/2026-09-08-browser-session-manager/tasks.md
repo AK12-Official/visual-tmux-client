@@ -4,13 +4,13 @@
 
 ## 1. Hub module scaffold
 
-- [x] 1.1 Create the `hub/` Go module (`go mod init tmux-hub`, Go 1.26) with `main.go` printing a version string — verify `cd hub && go build ./... && ./hub --version` succeeds.
+- [x] 1.1 Create the `hub/` Go module (`go mod init visual-tmux-client`, Go 1.26) with `main.go` printing a version string — verify `cd hub && go build ./... && ./hub --version` succeeds.
 - [x] 1.2 Add dependencies `github.com/creack/pty` and `github.com/coder/websocket` — verify `go mod tidy` leaves both in `go.mod` as direct (non-`// indirect`) requirements.
-- [x] 1.3 Implement flag/env config in `main.go`: `--addr` (default `127.0.0.1:7690`), `TMUX_HUB_TOKEN`, `TMUX_HUB_ORIGIN` — verify `./hub --help` lists all three and that `--addr` rejects a malformed value with a non-zero exit.
+- [x] 1.3 Implement flag/env config in `main.go`: `--addr` (default `127.0.0.1:7690`), `VISUAL_TMUX_CLIENT_TOKEN`, `VISUAL_TMUX_CLIENT_ORIGIN` — verify `./hub --help` lists all three and that `--addr` rejects a malformed value with a non-zero exit.
 
 ## 2. tmux exec wrapper (`hub/tmux.go`)
 
-- [x] 2.1 Implement `resolveTmux()` honoring `TMUX_HUB_TMUX_PATH` then falling back to `exec.LookPath("tmux")`, returning a distinguishable `ErrTmuxNotFound` — verify a unit test with a `PATH` containing no tmux returns `ErrTmuxNotFound`.
+- [x] 2.1 Implement `resolveTmux()` honoring `VISUAL_TMUX_CLIENT_TMUX_PATH` then falling back to `exec.LookPath("tmux")`, returning a distinguishable `ErrTmuxNotFound` — verify a unit test with a `PATH` containing no tmux returns `ErrTmuxNotFound`.
 - [x] 2.2 Implement `validateSessionName(string) error` enforcing `^[A-Za-z0-9._-]{1,64}$` — verify table-driven tests reject empty, 65-char, and each of `;`, `$`, backtick, `'`, `"`, space, `:`, and accept `api`, `api-staging`, `web.2`, `a_b`. (spec: session-hub → Shell-injection-safe tmux invocation)
 - [x] 2.3 Implement `execTmux(args ...string)` using `exec.Command` with an argv slice (never a shell string), returning stdout, stderr, and exit code separately — verify a unit test asserts `exec.Command` receives discrete args by invoking `list-sessions` against a dedicated `-L` test socket.
 - [x] 2.4 Implement `exactTarget(name string) string` returning `"=" + name` and use it for every `-t` argument — verify an integration test creates sessions `probe` and `probe-staging`, kills `probe`, and asserts `probe-staging` survives. (spec: session-hub → Exact session targeting)
@@ -21,11 +21,11 @@
 
 ## 3. Auth and tickets
 
-- [x] 3.1 Implement token resolution in `hub/auth.go`: use `TMUX_HUB_TOKEN` if set, else generate 32 random bytes via `crypto/rand`, print to stderr once at startup, and never run without a token — verify starting with no env var prints a token and starting with one prints nothing. (spec: session-hub → Authenticated access, scenario "No credential is configured")
+- [x] 3.1 Implement token resolution in `hub/auth.go`: use `VISUAL_TMUX_CLIENT_TOKEN` if set, else generate 32 random bytes via `crypto/rand`, print to stderr once at startup, and never run without a token — verify starting with no env var prints a token and starting with one prints nothing. (spec: session-hub → Authenticated access, scenario "No credential is configured")
 - [x] 3.2 Implement bearer-token middleware using `crypto/subtle.ConstantTimeCompare` — verify tests assert 401 for missing header, 401 for wrong token, 200 for correct token, and that no tmux process is spawned on a 401. (spec: session-hub → Authenticated access)
 - [x] 3.3 Implement the ticket store in `hub/tickets.go`: 24 random bytes base64url, 30 s TTL, bound to a session name, and **deleted on lookup before validity is checked** — verify unit tests cover redeem-once-succeeds, redeem-twice-fails, expired-fails, and wrong-session-fails. (spec: session-hub → Terminal connection authorization by single-use ticket)
 - [x] 3.4 Add a background sweep discarding expired tickets — verify a test advancing time (injected clock) leaves the store empty after the TTL.
-- [x] 3.5 Implement `Origin` validation for WebSocket upgrades against `TMUX_HUB_ORIGIN`, defaulting to the bind address — verify a test with a foreign `Origin` header is rejected before any pty is spawned. (spec: session-hub → Cross-origin connection rejection)
+- [x] 3.5 Implement `Origin` validation for WebSocket upgrades against `VISUAL_TMUX_CLIENT_ORIGIN`, defaulting to the bind address — verify a test with a foreign `Origin` header is rejected before any pty is spawned. (spec: session-hub → Cross-origin connection rejection)
 
 ## 4. JSON API (`hub/api.go`, `hub/server.go`)
 
@@ -40,7 +40,7 @@
 ## 5. Terminal attachment (`hub/attach.go`)
 
 - [x] 5.1 Implement `WS /ws/:hostId/:session?ticket=&cols=&rows=`: redeem the ticket, validate it matches `:session`, and close with a JSON `error` frame then a close code on failure — verify tests cover missing, reused, expired, and session-mismatched tickets. (spec: session-hub → Terminal connection authorization by single-use ticket)
-- [x] 5.2 Spawn `tmux attach-session -t =<name>` under a pty sized from the validated `cols`/`rows` **before** the first read, scrubbing `TMUX`, `TMUX_PANE`, and `TMUX_HUB_TOKEN` from the child env and setting `TERM=xterm-256color` — verify a test runs `env` in the attached session and asserts none of the three appear. (spec: session-hub → Secret isolation from session processes)
+- [x] 5.2 Spawn `tmux attach-session -t =<name>` under a pty sized from the validated `cols`/`rows` **before** the first read, scrubbing `TMUX`, `TMUX_PANE`, and `VISUAL_TMUX_CLIENT_TOKEN` from the child env and setting `TERM=xterm-256color` — verify a test runs `env` in the attached session and asserts none of the three appear. (spec: session-hub → Secret isolation from session processes)
 - [x] 5.3 Send the `{"type":"ready",...}` text frame once the pty is spawned and sized — verify a WebSocket client test receives `ready` with the requested cols/rows before any binary frame.
 - [x] 5.4 Implement the output pump: pty → **binary** WebSocket frames, forwarding bytes verbatim with no transformation — verify a test writes a byte sequence containing a split multi-byte character across two pty reads and asserts the client receives the exact original bytes. (spec: session-hub → Byte-faithful terminal output)
 - [x] 5.5 Implement the input pump: **binary** WebSocket frames → pty write, verbatim — verify a test sends `0x03` (Ctrl-C) and an arrow-key escape sequence and asserts the session's program observes them.

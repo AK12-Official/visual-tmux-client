@@ -114,7 +114,7 @@ func writeText(t *testing.T, conn *websocket.Conn, v any) {
 func TestChildEnvScrubbed(t *testing.T) {
 	t.Setenv("TMUX", "/tmp/tmux-1000/default,123,0")
 	t.Setenv("TMUX_PANE", "%0")
-	t.Setenv("TMUX_HUB_TOKEN", "sekret")
+	t.Setenv("VISUAL_TMUX_CLIENT_TOKEN", "sekret")
 	t.Setenv("PATH", "/usr/bin") // must survive
 	env := childEnv()
 	for _, kv := range env {
@@ -122,7 +122,7 @@ func TestChildEnvScrubbed(t *testing.T) {
 		if i := strings.IndexByte(kv, '='); i >= 0 {
 			key = kv[:i]
 		}
-		if key == "TMUX" || key == "TMUX_PANE" || key == "TMUX_HUB_TOKEN" {
+		if key == "TMUX" || key == "TMUX_PANE" || key == "VISUAL_TMUX_CLIENT_TOKEN" {
 			t.Fatalf("scrubbed env still contains %q", kv)
 		}
 	}

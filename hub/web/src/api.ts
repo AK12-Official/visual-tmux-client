@@ -1,9 +1,9 @@
-// API client for the tmux-hub JSON control plane. Owns the shared bearer
+// API client for the visual-tmux-client JSON control plane. Owns the shared bearer
 // token (persisted in localStorage) and surfaces authentication failures as
 // a dedicated AuthError so the UI can distinguish "token rejected" from
 // "network error".
 
-const TOKEN_KEY = 'tmux-hub-token'
+const TOKEN_KEY = 'visual-tmux-client-token'
 
 export interface Session {
   name: string

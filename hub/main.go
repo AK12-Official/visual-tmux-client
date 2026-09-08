@@ -29,19 +29,19 @@ type config struct {
 func usage(fs *flag.FlagSet) func() {
 	return func() {
 		out := fs.Output()
-		fmt.Fprintf(out, "tmux-hub %s\n\n", version)
-		fmt.Fprintf(out, "Usage:\n  tmux-hub [flags]\n\nFlags:\n")
+		fmt.Fprintf(out, "visual-tmux-client %s\n\n", version)
+		fmt.Fprintf(out, "Usage:\n  visual-tmux-client [flags]\n\nFlags:\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(out, "\nEnvironment:\n")
-		fmt.Fprintf(out, "  TMUX_HUB_TOKEN      shared bearer token; generated and printed if unset\n")
-		fmt.Fprintf(out, "  TMUX_HUB_ORIGIN     allowed WebSocket origin; defaults to the bind address\n")
-		fmt.Fprintf(out, "  TMUX_HUB_TMUX_PATH  path to the tmux binary; defaults to $PATH lookup\n")
+		fmt.Fprintf(out, "  VISUAL_TMUX_CLIENT_TOKEN      shared bearer token; generated and printed if unset\n")
+		fmt.Fprintf(out, "  VISUAL_TMUX_CLIENT_ORIGIN     allowed WebSocket origin; defaults to the bind address\n")
+		fmt.Fprintf(out, "  VISUAL_TMUX_CLIENT_TMUX_PATH  path to the tmux binary; defaults to $PATH lookup\n")
 	}
 }
 
 // parseConfig parses flags and environment into a config.
 func parseConfig(args []string) (*config, error) {
-	fs := flag.NewFlagSet("hub", flag.ContinueOnError)
+	fs := flag.NewFlagSet("visual-tmux-client", flag.ContinueOnError)
 	fs.Usage = usage(fs)
 	showVersion := fs.Bool("version", false, "print version and exit")
 	addr := fs.String("addr", "127.0.0.1:7690", "listen address (host:port)")
@@ -57,8 +57,8 @@ func parseConfig(args []string) (*config, error) {
 	}
 	cfg := &config{
 		addr:   *addr,
-		origin: os.Getenv("TMUX_HUB_ORIGIN"),
-		token:  os.Getenv("TMUX_HUB_TOKEN"),
+		origin: os.Getenv("VISUAL_TMUX_CLIENT_ORIGIN"),
+		token:  os.Getenv("VISUAL_TMUX_CLIENT_TOKEN"),
 	}
 	if cfg.origin == "" {
 		cfg.origin = "http://" + cfg.addr
@@ -85,7 +85,7 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(0)
 		}
-		fmt.Fprintf(os.Stderr, "hub: %v\n", err)
+		fmt.Fprintf(os.Stderr, "visual-tmux-client: %v\n", err)
 		os.Exit(1)
 	}
 }

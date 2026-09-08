@@ -21,18 +21,18 @@ func randomToken(n int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// resolveToken returns the shared bearer token: TMUX_HUB_TOKEN if set,
+// resolveToken returns the shared bearer token: VISUAL_TMUX_CLIENT_TOKEN if set,
 // otherwise a freshly generated 32-byte token printed once to stderr. The hub
 // never serves without a token.
 func resolveToken() (string, error) {
-	if tok := os.Getenv("TMUX_HUB_TOKEN"); tok != "" {
+	if tok := os.Getenv("VISUAL_TMUX_CLIENT_TOKEN"); tok != "" {
 		return tok, nil
 	}
 	tok, err := randomToken(32)
 	if err != nil {
 		return "", err
 	}
-	fmt.Fprintf(os.Stderr, "tmux-hub: generated token: %s\n", tok)
+	fmt.Fprintf(os.Stderr, "visual-tmux-client: generated token: %s\n", tok)
 	return tok, nil
 }
 

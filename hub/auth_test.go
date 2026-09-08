@@ -30,7 +30,7 @@ func captureStderr(t *testing.T, f func()) string {
 }
 
 func TestResolveTokenFromEnv(t *testing.T) {
-	t.Setenv("TMUX_HUB_TOKEN", "sekret")
+	t.Setenv("VISUAL_TMUX_CLIENT_TOKEN", "sekret")
 	var tok string
 	out := captureStderr(t, func() {
 		var err error
@@ -48,7 +48,7 @@ func TestResolveTokenFromEnv(t *testing.T) {
 }
 
 func TestResolveTokenGeneratesAndPrints(t *testing.T) {
-	t.Setenv("TMUX_HUB_TOKEN", "")
+	t.Setenv("VISUAL_TMUX_CLIENT_TOKEN", "")
 	var tok string
 	out := captureStderr(t, func() {
 		var err error

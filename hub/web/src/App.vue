@@ -132,8 +132,8 @@ onBeforeUnmount(() => {
   <div class="app">
     <div v-if="!hasToken" class="app__auth">
       <div class="auth-card">
-        <h1 class="auth-card__title">tmux-hub</h1>
-        <p class="auth-card__hint">Enter the hub token to connect.</p>
+        <h1 class="auth-card__title">Visual Tmux Client</h1>
+        <p class="auth-card__hint">Enter the access token to connect.</p>
         <input
           v-model="tokenInput"
           type="password"
@@ -149,7 +149,7 @@ onBeforeUnmount(() => {
 
     <template v-else>
       <header class="app__bar">
-        <span class="app__title">tmux-hub</span>
+        <span class="app__title">Visual Tmux Client</span>
         <span
           v-if="selected"
           class="app__state"

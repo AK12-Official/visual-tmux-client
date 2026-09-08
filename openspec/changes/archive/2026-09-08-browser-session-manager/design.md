@@ -94,12 +94,12 @@ Server → client:
 
 **What**:
 
-- A single shared secret. Read from `TMUX_HUB_TOKEN`; if unset at startup, the hub generates 32 random bytes, prints the token to stderr once, and uses it for that run. It never starts unauthenticated.
+- A single shared secret. Read from `VISUAL_TMUX_CLIENT_TOKEN`; if unset at startup, the hub generates 32 random bytes, prints the token to stderr once, and uses it for that run. It never starts unauthenticated.
 - JSON API calls authenticate with `Authorization: Bearer <token>`, compared using `crypto/subtle.ConstantTimeCompare`.
 - Terminal attachment does **not** accept the token. The client calls `POST /api/ws-ticket` with `{"session":"<name>"}` and receives an opaque ticket: 24 random bytes, base64url, **30-second TTL, single-use, bound to that session name**. The ticket is passed as `?ticket=` on the WebSocket URL and consumed on redemption — deleted from the store before validity is even checked, so a replay cannot succeed regardless of outcome.
 - `Origin` is validated on WebSocket upgrade against the configured public origin, defaulting to the bind address.
 - The hub binds `127.0.0.1` by default.
-- The pty child's environment is scrubbed of `TMUX`, `TMUX_PANE`, and `TMUX_HUB_TOKEN` before spawn.
+- The pty child's environment is scrubbed of `TMUX`, `TMUX_PANE`, and `VISUAL_TMUX_CLIENT_TOKEN` before spawn.
 
 **Why**: The product moves from an embedded webview with no listening socket to an HTTP server, so unauthenticated access would mean local-network remote code execution. Tickets exist specifically because browsers cannot set headers on a WebSocket handshake: without them the long-lived token would have to travel in the URL, where it lands in browser history, server logs, and proxy logs. A 30-second single-use target-bound ticket has almost no value if leaked. Scrubbing `TMUX` also prevents the child from thinking it is nested inside a tmux session.
 
@@ -196,5 +196,5 @@ Rollback: this is a pre-1.0 project with no users and, notably, **no git reposit
 
 ## Open Questions
 
-- Should the generated token be persisted to a file (e.g. `~/.tmux-hub/token`) so it survives restarts, or printed fresh each run? Printing is fine for development; persistence is a small addition that does not affect the specs, the transport, or the task breakdown, so it can be settled during implementation.
+- Should the generated token be persisted to a file (e.g. `~/.visual-tmux-client/token`) so it survives restarts, or printed fresh each run? Printing is fine for development; persistence is a small addition that does not affect the specs, the transport, or the task breakdown, so it can be settled during implementation.
 - Whether to expose `default-terminal`/`TERM` as configuration. `xterm-256color` is correct for every case in scope; a truecolor-related need would be additive.

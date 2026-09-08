@@ -34,5 +34,5 @@ jobs:
         run: go vet ./...
         working-directory: hub
       - name: Build application
-        run: go build -trimpath -o tmux-hub .
+        run: go build -trimpath -o visual-tmux-client .
         working-directory: hub
