@@ -12,6 +12,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'state', session: string, state: ConnState): void
   (e: 'notice', message: string, level?: NoticeLevel): void
+  (e: 'activity', session: string): void
 }>()
 
 const el = ref<HTMLDivElement | null>(null)
@@ -33,6 +34,7 @@ function attach(): void {
         emit('state', props.session, s)
       },
       onNotice: (message, level) => emit('notice', message, level),
+      onActivity: () => emit('activity', props.session),
     }, props.fontSize)
   } catch (err) {
     emit('notice', `Terminal init failed: ${String(err)}`)

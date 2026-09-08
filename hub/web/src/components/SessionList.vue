@@ -13,6 +13,8 @@ const props = defineProps<{
   sessions: Session[]
   error: string
   selected: string | null
+  /** Sessions with terminal output in the last few seconds. */
+  active: Record<string, boolean>
 }>()
 
 const emit = defineEmits<{
@@ -202,6 +204,7 @@ const manualMode = computed(() => order.value.mode === 'manual')
         :class="{
           'session-list__row--selected': s.name === selected && !selecting,
           'session-list__row--checked': checked.has(s.name),
+          'session-list__row--active': active[s.name] && s.name !== selected,
           'session-list__row--drag-over': dragOverName === s.name && dragName !== s.name,
         }"
         :draggable="manualMode && renaming !== s.name"
@@ -414,6 +417,11 @@ const manualMode = computed(() => order.value.mode === 'manual')
 .session-list__row--checked {
   background: var(--th-raised);
   border-color: var(--th-accent);
+}
+/* Background activity: a green border on the card, distinct from the selected
+   card's accent border and from the viewed session's breathing dot. */
+.session-list__row--active {
+  border-color: var(--th-green);
 }
 .session-list__row--drag-over {
   border-color: var(--th-accent);

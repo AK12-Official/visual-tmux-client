@@ -17,6 +17,9 @@ export type NoticeLevel = 'error' | 'warning'
 export interface TerminalHooks {
   onState: (state: ConnState, detail?: string) => void
   onNotice: (message: string, level?: NoticeLevel) => void
+  /** Fires when the session produces output, throttled to roughly one call
+   * per ACTIVITY_THROTTLE_MS. Drives the list's activity highlights. */
+  onActivity?: () => void
 }
 
 // Dark terminal palette modeled on Visual Tmux Client's default-dark theme, matching the
@@ -46,6 +49,9 @@ const THEME = {
 const RESIZE_DEBOUNCE_MS = 100
 const MAX_RECONNECT_DELAY_MS = 3000
 const BASE_RECONNECT_DELAY_MS = 500
+// Activity events only drive a highlight, so a coarse throttle is enough and
+// keeps the hook cheap even under heavy output.
+const ACTIVITY_THROTTLE_MS = 500
 
 export class TerminalSession {
   private term: Terminal
@@ -57,6 +63,7 @@ export class TerminalSession {
   private disposed = false
   private resizeTimer: ReturnType<typeof setTimeout> | null = null
   private observer: ResizeObserver
+  private lastActivityAt = 0
 
   constructor(
     private container: HTMLElement,
@@ -138,6 +145,14 @@ export class TerminalSession {
     this.refit()
   }
 
+  private fireActivity(): void {
+    if (!this.hooks.onActivity) return
+    const now = Date.now()
+    if (now - this.lastActivityAt < ACTIVITY_THROTTLE_MS) return
+    this.lastActivityAt = now
+    this.hooks.onActivity()
+  }
+
   private proposedSize(): { cols: number; rows: number } {
     const d = this.fit.proposeDimensions()
     return d ? { cols: d.cols, rows: d.rows } : { cols: 80, rows: 24 }
@@ -174,6 +189,7 @@ export class TerminalSession {
           this.handleControl(ev.data)
         } else {
           this.term.write(new Uint8Array(ev.data))
+          this.fireActivity()
         }
       }
       ws.onclose = () => {

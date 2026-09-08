@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   AuthError,
   clearToken,
@@ -74,6 +74,44 @@ function closePanel(): void {
   if (document.fullscreenElement) void document.exitFullscreen()
   selected.value = null
 }
+
+// --- Session activity indication ---
+// Background terminals keep streaming (KeepAlive), so "which session just
+// produced output" is observable for free: each activity event lights the
+// session's card (or, for the viewed session, the header dot and the tab
+// title) and a decay timer dims it ~2 s after output stops.
+
+const ACTIVITY_DECAY_MS = 2000
+const activity = ref<Record<string, boolean>>({})
+const activityTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function onActivity(name: string): void {
+  if (!activity.value[name]) {
+    activity.value = { ...activity.value, [name]: true }
+  }
+  const timer = activityTimers.get(name)
+  if (timer) clearTimeout(timer)
+  activityTimers.set(
+    name,
+    setTimeout(() => {
+      activityTimers.delete(name)
+      const next = { ...activity.value }
+      delete next[name]
+      activity.value = next
+    }, ACTIVITY_DECAY_MS),
+  )
+}
+
+const selectedActive = computed(
+  () => selected.value !== null && !!activity.value[selected.value],
+)
+
+// The tab-title mark is the only signal visible when the browser tab itself
+// is backgrounded — the whole point of the prefix.
+const BASE_TITLE = 'Visual Tmux Client'
+watch(selectedActive, (live) => {
+  document.title = live ? `● ${BASE_TITLE}` : BASE_TITLE
+})
 
 // --- Sidebar collapse (persisted) ---
 
@@ -203,6 +241,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopPolling()
+  for (const timer of activityTimers.values()) clearTimeout(timer)
+  activityTimers.clear()
 })
 </script>
 
@@ -243,6 +283,7 @@ onBeforeUnmount(() => {
               :sessions="sessions"
               :error="listError"
               :selected="selected"
+              :active="activity"
               @select="selected = $event"
               @create="onCreate"
               @rename="onRename"
@@ -259,7 +300,12 @@ onBeforeUnmount(() => {
 
         <main ref="mainEl" class="app__main">
           <header v-if="selected" class="app__term-header">
-            <span class="app__term-dot" aria-hidden="true"></span>
+            <span
+              class="app__term-dot"
+              :class="{ 'app__term-dot--live': selectedActive }"
+              :title="selectedActive ? 'producing output' : 'idle'"
+              aria-hidden="true"
+            ></span>
             <span class="app__term-title">{{ selected }}</span>
             <span
               class="app__term-state"
@@ -297,6 +343,7 @@ onBeforeUnmount(() => {
               :font-size="fontSize"
               @state="onState"
               @notice="onNotice"
+              @activity="onActivity"
             />
           </KeepAlive>
           <ToastStack />
@@ -358,6 +405,21 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--th-text-lo);
+}
+/* The viewed session's activity is a breathing dot, deliberately different
+   from the background sessions' card-border highlight. */
+.app__term-dot--live {
+  background: var(--th-green);
+  animation: app-term-dot-breathe 1.2s ease-in-out infinite;
+}
+@keyframes app-term-dot-breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 .app__term-title {
   font-family: var(--app-code-font);

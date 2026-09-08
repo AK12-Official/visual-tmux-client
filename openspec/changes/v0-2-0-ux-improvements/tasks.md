@@ -37,9 +37,9 @@
 
 ## 7. Activity indication
 
-- [ ] 7.1 Add the throttled `onActivity` hook to `terminal.ts` (fires on binary frames, at most once per 500 ms per session); verify via a temporary console log that output in a background session fires it
-- [ ] 7.2 Track activity in `App.vue` (`lastActiveAt` per session with ~2 s decay timers) and highlight non-selected cards in `SessionList.vue` with a distinct border; verify running `ls` in a backgrounded session lights its card and the highlight fades ~2 s after output stops
-- [ ] 7.3 Indicate the selected session's activity with the header breathing dot and a `● ` prefix on `document.title`, both cleared on decay; verify the tab title signals output while the tab is backgrounded and restores when output stops
+- [x] 7.1 Add the throttled `onActivity` hook to `terminal.ts` (fires on binary frames, at most once per 500 ms per session); verify via a temporary console log that output in a background session fires it
+- [x] 7.2 Track activity in `App.vue` (`lastActiveAt` per session with ~2 s decay timers) and highlight non-selected cards in `SessionList.vue` with a distinct border; verify running `ls` in a backgrounded session lights its card and the highlight fades ~2 s after output stops
+- [x] 7.3 Indicate the selected session's activity with the header breathing dot and a `● ` prefix on `document.title`, both cleared on decay; verify the tab title signals output while the tab is backgrounded and restores when output stops
 
 ## 8. In-app help
 
