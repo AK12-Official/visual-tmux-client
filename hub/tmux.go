@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Sentinel errors distinguish tmux-level outcomes so callers (and the JSON
@@ -21,11 +22,10 @@ var (
 	ErrInvalidName  = errors.New("invalid session name")
 )
 
-// sessionNameRe is the allowed session-name character set. It deliberately
-// excludes shell metacharacters (`;`, `$`, backtick, quotes, spaces, `:`, and
-// others) so a name can never be interpreted by a shell — even though tmux is
-// always invoked with an argv slice and never a shell string.
-var sessionNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+// maxSessionNameRunes bounds session-name length counted in code points, not
+// bytes: a CJK name spends 3 bytes per character, so a byte bound would admit
+// only a third as many characters.
+const maxSessionNameRunes = 64
 
 // Session is a single tmux session as exposed to the JSON API.
 type Session struct {
@@ -74,10 +74,43 @@ func resolveTmux() (string, error) {
 	return p, nil
 }
 
-// validateSessionName enforces the permitted name character set and length.
+// validateSessionName enforces the permitted session-name rules. tmux itself
+// accepts nearly anything (verified against 3.7b: CJK and spaces are fine), so
+// the constraints are only the ones that keep a name unambiguous everywhere it
+// travels: `:` and `.` are reserved by tmux's own target syntax
+// (session:window.pane) and rejected by older tmux versions; control
+// characters and edge whitespace make a name invisible or untypeable; length
+// keeps names displayable. Everything else — including non-ASCII text — is
+// allowed, because names never travel through a shell (runCommand passes an
+// argv slice, see the shell-injection-safety requirement).
 func validateSessionName(name string) error {
-	if !sessionNameRe.MatchString(name) {
-		return fmt.Errorf("%w: %q (must match %s)", ErrInvalidName, name, sessionNameRe.String())
+	if !utf8.ValidString(name) {
+		return fmt.Errorf("%w: name is not valid UTF-8", ErrInvalidName)
+	}
+	runes := []rune(name)
+	if len(runes) == 0 {
+		return fmt.Errorf("%w: name is empty", ErrInvalidName)
+	}
+	if len(runes) > maxSessionNameRunes {
+		return fmt.Errorf("%w: name is longer than %d characters", ErrInvalidName, maxSessionNameRunes)
+	}
+	for _, r := range runes {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("%w: name contains a control character", ErrInvalidName)
+		}
+		if r == ':' || r == '.' {
+			return fmt.Errorf("%w: name must not contain %q (reserved by tmux target syntax)", ErrInvalidName, r)
+		}
+		// Full-width lookalikes pass tmux untouched, but they render exactly
+		// like the reserved characters and are one keystroke away in CJK
+		// input methods — reject them so a forbidden-looking name can never
+		// exist.
+		if r == '：' || r == '．' {
+			return fmt.Errorf("%w: name must not contain the full-width character %q (use the ASCII form)", ErrInvalidName, r)
+		}
+	}
+	if unicode.IsSpace(runes[0]) || unicode.IsSpace(runes[len(runes)-1]) {
+		return fmt.Errorf("%w: name has leading or trailing whitespace", ErrInvalidName)
 	}
 	return nil
 }
@@ -164,23 +197,34 @@ func (c *tmuxClient) getSession(name string) (Session, error) {
 	return Session{}, ErrNotFound
 }
 
-// parseSessions parses list-sessions -F output into a Session slice.
+// parseSessions parses list-sessions -F output into a Session slice. The three
+// trailing fields are numeric, so the record is split from the RIGHT: a session
+// name may itself contain "|" (tmux permits it, and validateSessionName does
+// not reserve it), which a left-anchored split would truncate.
+//
+// Lines are NOT whitespace-trimmed: tmux accepts names with leading or trailing
+// spaces (created outside the hub, where validateSessionName does not apply),
+// and trimming would report a name that no longer matches the real session, so
+// every subsequent attach/rename/kill on it would fail with ErrNotFound. Only a
+// trailing CR is stripped, which is line-ending noise rather than name content.
 func parseSessions(stdout string) []Session {
 	out := make([]Session, 0)
-	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
-		line = strings.TrimSpace(line)
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSuffix(line, "\r")
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|", 4)
-		if len(parts) != 4 {
+		parts := strings.Split(line, "|")
+		if len(parts) < 4 {
 			continue
 		}
-		windows, _ := strconv.Atoi(parts[1])
-		attached, _ := strconv.Atoi(parts[2])
-		created, _ := strconv.ParseInt(parts[3], 10, 64)
+		n := len(parts)
+		name := strings.Join(parts[:n-3], "|")
+		windows, _ := strconv.Atoi(parts[n-3])
+		attached, _ := strconv.Atoi(parts[n-2])
+		created, _ := strconv.ParseInt(parts[n-1], 10, 64)
 		out = append(out, Session{
-			Name:     parts[0],
+			Name:     name,
 			Windows:  windows,
 			Attached: attached,
 			Created:  created,
@@ -215,11 +259,29 @@ func homeDir() string {
 	return "."
 }
 
-// generateSessionName produces a unique-ish name of the form
-// session-YYYYMMDD-HHMMSS, appending a random suffix if the base collides.
+// generateSessionName produces the base auto-name of the form
+// session-YYYYMMDD-HHMMSS. The base has second resolution, so two nameless
+// creates within one second collide; uniqueness is resolved by
+// generateUniqueName's suffix retries.
 func generateSessionName(now time.Time) string {
-	base := now.Format("session-20060102-150405")
-	return base
+	return now.Format("session-20060102-150405")
+}
+
+// generateUniqueName returns an auto-generated name not already in use,
+// retrying the timestamp base with -1…-9 suffixes. The bound makes a runaway
+// loop impossible; exhausting it surfaces ErrNameInUse.
+func (c *tmuxClient) generateUniqueName() (string, error) {
+	base := generateSessionName(time.Now())
+	for i := 0; i < 10; i++ {
+		name := base
+		if i > 0 {
+			name = fmt.Sprintf("%s-%d", base, i)
+		}
+		if !c.hasSession(name) {
+			return name, nil
+		}
+	}
+	return "", ErrNameInUse
 }
 
 // CreateSession creates a new detached session starting in $HOME. An empty
@@ -227,7 +289,11 @@ func generateSessionName(now time.Time) string {
 // ErrInvalidName on a rejected name.
 func (c *tmuxClient) CreateSession(name string) (Session, error) {
 	if name == "" {
-		name = generateSessionName(time.Now())
+		var err error
+		name, err = c.generateUniqueName()
+		if err != nil {
+			return Session{}, err
+		}
 	}
 	if err := validateSessionName(name); err != nil {
 		return Session{}, err
@@ -260,7 +326,11 @@ func (c *tmuxClient) RenameSession(oldName, newName string) error {
 	if c.hasSession(newName) {
 		return ErrNameInUse
 	}
-	_, stderr, code, err := c.exec("rename-session", "-t", exactTarget(oldName), newName)
+	// "--" terminates option parsing: the new name is positional, so a name
+	// beginning with "-" would otherwise be read as a flag ("unknown flag -V").
+	// Such names are creatable (new-session takes the name as -s's argument),
+	// so rename has to accept them too.
+	_, stderr, code, err := c.exec("rename-session", "-t", exactTarget(oldName), "--", newName)
 	if err != nil {
 		return err
 	}
@@ -340,16 +410,26 @@ func childEnv() []string {
 
 // refreshSessionSize is a best-effort "belt-and-braces" resize: after
 // pty.Setsize (the authoritative mechanism, which fires SIGWINCH at tmux), it
-// also asks tmux to refresh the size of a client attached to the session.
-// Failure is silently tolerated; Setsize already handled the resize.
-func (c *tmuxClient) refreshSessionSize(session string, cols, rows int) {
-	stdout, _, code, err := c.exec("list-clients", "-t", exactTarget(session), "-F", "#{client_tty}")
+// also asks tmux to refresh the size of THIS attachment's tmux client. The
+// client is matched by pid because a session can carry several clients (other
+// browser tabs, other hubs) and resizing those would fight their own
+// authoritative resize path. Failure is silently tolerated; Setsize already
+// handled the resize.
+func (c *tmuxClient) refreshSessionSize(session string, clientPID int, cols, rows int) {
+	stdout, _, code, err := c.exec("list-clients", "-t", exactTarget(session), "-F", "#{client_pid} #{client_tty}")
 	if err != nil || code != 0 {
 		return
 	}
-	tty := strings.TrimSpace(stdout)
-	if tty == "" {
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil || pid != clientPID {
+			continue
+		}
+		_, _, _, _ = c.exec("refresh-client", "-t", fields[1], "-C", fmt.Sprintf("%dx%d", cols, rows))
 		return
 	}
-	_, _, _, _ = c.exec("refresh-client", "-t", tty, "-C", fmt.Sprintf("%dx%d", cols, rows))
 }

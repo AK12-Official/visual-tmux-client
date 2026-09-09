@@ -3,7 +3,9 @@ package main
 import (
 	"embed"
 	"io/fs"
+	"mime"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -25,6 +27,9 @@ type server struct {
 
 	mu          sync.Mutex
 	attachments map[*attachment]struct{}
+
+	// Guards the one-time window-size policy pin; see pinWindowSizePolicy.
+	sizePolicyOnce sync.Once
 }
 
 func newServer(cfg *config, token string) *server {
@@ -36,6 +41,17 @@ func newServer(cfg *config, token string) *server {
 		tickets:     newTicketStore(),
 		attachments: make(map[*attachment]struct{}),
 	}
+}
+
+// pinWindowSizePolicy sets tmux's global window-size policy to "latest" once
+// per hub run, on the first attachment. Older tmux defaults differ, and the
+// policy governs how the sessions we attach resize. It must NOT run on every
+// attachment: setting a global tmux option repaints every client on the
+// server, which our background attachments would report as activity.
+func (s *server) pinWindowSizePolicy() {
+	s.sizePolicyOnce.Do(func() {
+		_, _, _, _ = s.tmux.exec("set-option", "-g", "window-size", "latest")
+	})
 }
 
 // auth wraps a handler with the bearer-token middleware.
@@ -54,6 +70,19 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /ws/{hostId}/{session}", s.attach)
 	mux.Handle("/", s.spaHandler())
 	return mux
+}
+
+// contentTypeFor maps a dist file name to its Content-Type. Only root-level
+// public assets (the embedded guide) rely on this; `.md` is missing from some
+// systems' MIME databases, so it is mapped explicitly before the generic
+// lookup.
+func contentTypeFor(name string) string {
+	if ext := filepath.Ext(name); strings.EqualFold(ext, ".md") {
+		return "text/markdown; charset=utf-8"
+	} else if ct := mime.TypeByExtension(ext); ct != "" {
+		return ct
+	}
+	return "application/octet-stream"
 }
 
 // track registers an active attachment so shutdown can close it.
@@ -84,9 +113,11 @@ func (s *server) shutdownAll() {
 }
 
 // spaHandler serves the embedded frontend. Content-hashed assets under /assets/
-// are served with a long immutable cache lifetime; every other non-API, non-WS
-// path falls back to index.html (SPA fallback). Unknown /api/ and /ws/ paths
-// are 404 rather than falling through to index.html.
+// are served with a long immutable cache lifetime; other real files present in
+// dist (e.g. the embedded tmux guide that vite copies from public/) are served
+// as themselves; every remaining non-API, non-WS path falls back to index.html
+// (SPA fallback). Unknown /api/ and /ws/ paths are 404 rather than falling
+// through to index.html.
 func (s *server) spaHandler() http.Handler {
 	dist, _ := fs.Sub(webFS, "web/dist")
 	fileServer := http.FileServer(http.FS(dist))
@@ -100,6 +131,19 @@ func (s *server) spaHandler() http.Handler {
 		if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/ws/") {
 			http.NotFound(w, r)
 			return
+		}
+		// Serve real root-level files before the SPA fallback, so e.g. the
+		// guide at /tmux-guide.zh-CN.md is not swallowed by index.html.
+		// http.ServeMux has already cleaned the path, and embed.FS rejects
+		// anything outside its tree, so this cannot escape dist.
+		if name := strings.TrimPrefix(path, "/"); name != "" && name != "index.html" {
+			if data, err := fs.ReadFile(dist, name); err == nil {
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Content-Type", contentTypeFor(name))
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(data)
+				return
+			}
 		}
 		w.Header().Set("Cache-Control", "no-cache")
 		data, err := fs.ReadFile(dist, "index.html")

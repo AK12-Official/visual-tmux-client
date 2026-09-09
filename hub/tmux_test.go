@@ -80,18 +80,44 @@ func TestResolveTmuxHonorsEnvPath(t *testing.T) {
 }
 
 func TestValidateSessionName(t *testing.T) {
-	reject := []string{
-		"",
-		strings.Repeat("a", 65),
-		";", "$", "`", "'", "\"", " ", ":",
-		"a b", "a;b", "a$b", "a`b", "a:b", "a'b", "a\"b",
+	// Each rejected name maps to a substring its error must name, per the
+	// spec's "naming the constraint that was violated" scenario.
+	reject := map[string]string{
+		"":                      "empty",
+		strings.Repeat("a", 65): "longer than 64",
+		strings.Repeat("测", 65): "longer than 64",
+		":":                     "reserved by tmux",
+		".":                     "reserved by tmux",
+		"a:b":                   "reserved by tmux",
+		"a.b":                   "reserved by tmux",
+		"：":                     "full-width",
+		"．":                     "full-width",
+		"a：b":                   "full-width",
+		"a\x00b":                "control character",
+		"a\nb":                  "control character",
+		" lead":                 "whitespace",
+		"trail ":                "whitespace",
+		"　x":                    "whitespace", // U+3000 ideographic space
+		"\xff\xfe":              "UTF-8",
 	}
-	for _, name := range reject {
-		if err := validateSessionName(name); err == nil {
+	for name, want := range reject {
+		err := validateSessionName(name)
+		if err == nil {
 			t.Errorf("expected rejection of %q", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("rejection of %q should name %q, got %v", name, want, err)
 		}
 	}
-	accept := []string{"api", "api-staging", "web.2", "a_b", "a", "A.1-2_b"}
+	accept := []string{
+		"api", "api-staging", "a_b", "a", "A1-2_b",
+		"测试会话",                     // CJK end to end
+		"名字 with 空格",               // internal spaces are fine
+		"emoji-😀",                  // non-ASCII breadth beyond CJK
+		"a;b", "a$b", "a`b", "a'b", // shell metacharacters: argv only, no shell
+		strings.Repeat("测", 64), // exactly at the rune bound
+	}
 	for _, name := range accept {
 		if err := validateSessionName(name); err != nil {
 			t.Errorf("expected %q to be accepted, got %v", name, err)
@@ -199,6 +225,117 @@ func TestListSessionsNoServerRunning(t *testing.T) {
 	}
 }
 
+// parseSessions is a pure function guarding two name edge cases that reach it
+// from real tmux output: "|" inside a name (the record must be split from the
+// right) and leading/trailing spaces (which must survive verbatim, or every
+// later target lookup for that session fails).
+func TestParseSessions(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []Session
+	}{
+		{
+			name: "plain",
+			in:   "api|2|1|1700000000\n",
+			want: []Session{{Name: "api", Windows: 2, Attached: 1, Created: 1700000000}},
+		},
+		{
+			name: "pipe in name is not truncated",
+			in:   "a|b|1|0|1700000001\n",
+			want: []Session{{Name: "a|b", Windows: 1, Attached: 0, Created: 1700000001}},
+		},
+		{
+			name: "many pipes in name",
+			in:   "x|y|z|3|0|1700000002\n",
+			want: []Session{{Name: "x|y|z", Windows: 3, Attached: 0, Created: 1700000002}},
+		},
+		{
+			name: "leading and trailing spaces survive",
+			in:   " lead|1|0|1700000003\ntrail |1|0|1700000004\n",
+			want: []Session{
+				{Name: " lead", Windows: 1, Attached: 0, Created: 1700000003},
+				{Name: "trail ", Windows: 1, Attached: 0, Created: 1700000004},
+			},
+		},
+		{
+			name: "short and blank records are skipped",
+			in:   "\nbroken|1\n\nok|1|0|1700000005\n",
+			want: []Session{{Name: "ok", Windows: 1, Attached: 0, Created: 1700000005}},
+		},
+		{
+			name: "crlf line endings",
+			in:   "api|1|0|1700000006\r\n",
+			want: []Session{{Name: "api", Windows: 1, Attached: 0, Created: 1700000006}},
+		},
+		{
+			name: "empty output",
+			in:   "",
+			want: []Session{},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := parseSessions(c.in)
+			if len(got) != len(c.want) {
+				t.Fatalf("got %d sessions %+v, want %d %+v", len(got), got, len(c.want), c.want)
+			}
+			for i := range c.want {
+				if got[i] != c.want[i] {
+					t.Errorf("session %d: got %+v, want %+v", i, got[i], c.want[i])
+				}
+			}
+		})
+	}
+}
+
+// A session whose name has edge whitespace is creatable directly in tmux (the
+// hub's own validateSessionName forbids it, but sessions made outside the hub
+// still show up in the list). Trimming it during parse would make the session
+// permanently unreachable, so assert the round trip through real tmux.
+func TestListSessionsPreservesEdgeWhitespaceName(t *testing.T) {
+	c := newTestClient(t)
+	const name = " lead"
+	if _, _, code, err := c.exec("new-session", "-d", "-s", name, "-c", homeDir()); err != nil || code != 0 {
+		t.Fatalf("new-session %q: code=%d err=%v", name, code, err)
+	}
+	sessions, err := c.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	var found bool
+	for _, s := range sessions {
+		if s.Name == name {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a session named %q in %+v", name, sessions)
+	}
+	// The reported name must be usable as a target, which is the whole point.
+	if !c.hasSession(name) {
+		t.Fatalf("session %q reported by ListSessions is not addressable", name)
+	}
+}
+
+// RenameSession passes "--" before the new name, so a name starting with "-"
+// is treated as positional rather than as a tmux flag.
+func TestRenameSessionToLeadingDashName(t *testing.T) {
+	c := newTestClient(t)
+	if _, err := c.CreateSession("plain"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := c.RenameSession("plain", "-dash"); err != nil {
+		t.Fatalf("RenameSession to leading-dash name: %v", err)
+	}
+	if !c.hasSession("-dash") {
+		t.Fatalf("-dash should exist after rename")
+	}
+	if c.hasSession("plain") {
+		t.Fatalf("plain should no longer exist")
+	}
+}
+
 func TestCreateSessionExplicitName(t *testing.T) {
 	c := newTestClient(t)
 	sess, err := c.CreateSession("api")
@@ -224,6 +361,28 @@ func TestCreateSessionGeneratedName(t *testing.T) {
 	}
 }
 
+func TestCreateSessionGeneratedNameCollision(t *testing.T) {
+	c := newTestClient(t)
+	// Two nameless creates within the same second must both succeed: the
+	// second retries the timestamp base with a suffix instead of failing
+	// with a name conflict. (If the calls straddle a second boundary the
+	// names differ anyway, so the invariant holds either way.)
+	first, err := c.CreateSession("")
+	if err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	second, err := c.CreateSession("")
+	if err != nil {
+		t.Fatalf("second create: %v", err)
+	}
+	if first.Name == second.Name {
+		t.Fatalf("expected distinct names, got %q twice", first.Name)
+	}
+	if !strings.HasPrefix(second.Name, "session-") {
+		t.Fatalf("expected generated name, got %q", second.Name)
+	}
+}
+
 func TestCreateSessionDuplicate(t *testing.T) {
 	c := newTestClient(t)
 	if _, err := c.CreateSession("dup"); err != nil {
@@ -236,8 +395,22 @@ func TestCreateSessionDuplicate(t *testing.T) {
 
 func TestCreateSessionInvalidName(t *testing.T) {
 	c := newTestClient(t)
-	if _, err := c.CreateSession("bad;name"); !errors.Is(err, ErrInvalidName) {
+	if _, err := c.CreateSession("bad:name"); !errors.Is(err, ErrInvalidName) {
 		t.Fatalf("expected ErrInvalidName, got %v", err)
+	}
+}
+
+func TestCreateSessionUnicodeName(t *testing.T) {
+	c := newTestClient(t)
+	sess, err := c.CreateSession("测试会话")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if sess.Name != "测试会话" {
+		t.Fatalf("expected name 测试会话, got %q", sess.Name)
+	}
+	if !c.hasSession("测试会话") {
+		t.Fatalf("测试会话 should exist")
 	}
 }
 
@@ -264,6 +437,20 @@ func TestRenameSessionConflict(t *testing.T) {
 	mkSession(t, c, "b")
 	if err := c.RenameSession("a", "b"); !errors.Is(err, ErrNameInUse) {
 		t.Fatalf("expected ErrNameInUse, got %v", err)
+	}
+}
+
+func TestRenameSessionToUnicodeName(t *testing.T) {
+	c := newTestClient(t)
+	mkSession(t, c, "old")
+	if err := c.RenameSession("old", "新名字"); err != nil {
+		t.Fatalf("RenameSession: %v", err)
+	}
+	if !c.hasSession("新名字") {
+		t.Fatalf("新名字 should exist")
+	}
+	if c.hasSession("old") {
+		t.Fatalf("old should be gone")
 	}
 }
 

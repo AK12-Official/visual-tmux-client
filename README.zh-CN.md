@@ -4,12 +4,18 @@
 
 **Visual Tmux Client** 是一个轻量、自托管的 tmux 网页客户端，可直接在浏览器中管理和使用 tmux 会话。Vue 前端被嵌入单个 Go 二进制文件中，部署时只需要该二进制文件和本机的 `tmux`。
 
-> 项目目前处于早期 `v0.1` 阶段，只管理 Visual Tmux Client 所在机器上的 tmux，暂不支持聚合多台远程主机。
+> 项目目前处于早期 `v0.2` 阶段，只管理 Visual Tmux Client 所在机器上的 tmux，暂不支持聚合多台远程主机。
 
 ## 功能
 
-- 查看、创建、重命名和终止本机 tmux 会话。
-- 使用基于 xterm.js 的完整浏览器终端连接会话。
+- 查看、创建（一键、自动命名）、重命名和终止本机 tmux 会话，支持单会和批量操作。
+- 使用基于 xterm.js 的完整浏览器终端连接会话，分离或断开后可重新附加。
+- 一眼看出谁在说话：有新输出的后台会话卡片高亮，正在查看的会话在终端顶栏和浏览器标签页标题上标记。
+- 终端顶栏：字号调节、全屏、关闭面板。
+- 手动排序（拖拽 + 置顶），侧栏可收起。
+- 分级、自动过期的 Toast 通知。
+- 应用内帮助按钮内置中文 tmux 使用指南。
+- 会话名支持中文等非 ASCII 字符，仅保留 `:` 和 `.` 为禁用字符。
 - 浏览器断开后保留 tmux 会话及其状态。
 - 使用 Bearer Token 认证和短时、一次性的 WebSocket 票据。
 - 将整个网页界面打包进单个应用程序二进制文件。
@@ -28,12 +34,12 @@
 从仓库的 Releases 页面下载对应平台的压缩包，然后运行：
 
 ```sh
-tar -xzf visual-tmux-client_0.1.0_darwin_arm64.tar.gz
-cd visual-tmux-client_0.1.0_darwin_arm64
+tar -xzf visual-tmux-client_0.2.0_darwin_arm64.tar.gz
+cd visual-tmux-client_0.2.0_darwin_arm64
 ./visual-tmux-client
 ```
 
-服务默认监听 `http://127.0.0.1:7690`。如果没有配置 Token，程序启动时会在标准错误输出中打印一个随机生成的 Token。用浏览器打开上述地址，并在登录界面中输入该 Token。
+服务默认监听 `http://127.0.0.1:7690`。启动时会打印访问 Token 和要打开的地址——无论 Token 是随机生成还是来自环境变量，因此你总是能登录。用浏览器打开该地址，并在登录界面中输入该 Token。
 
 如需使用固定 Token：
 

@@ -123,7 +123,7 @@ func TestCreateSessionOutcomes(t *testing.T) {
 	}
 
 	// invalid name -> 400
-	resp = apiRequest(t, ts, "POST", "/api/hosts/local/sessions", token, `{"name":"bad;name"}`)
+	resp = apiRequest(t, ts, "POST", "/api/hosts/local/sessions", token, `{"name":"bad:name"}`)
 	if resp.StatusCode != 400 {
 		t.Fatalf("create invalid: expected 400, got %d", resp.StatusCode)
 	}
@@ -221,5 +221,18 @@ func TestSPAFallback(t *testing.T) {
 	resp = apiRequest(t, ts, "GET", "/api/unknown", "", "")
 	if resp.StatusCode != 404 {
 		t.Fatalf("api unknown: expected 404, got %d", resp.StatusCode)
+	}
+
+	// a real root-level file (the embedded guide) serves as itself rather
+	// than being swallowed by the SPA fallback
+	resp = apiRequest(t, ts, "GET", "/tmux-guide.zh-CN.md", "", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("guide: expected 200, got %d", resp.StatusCode)
+	}
+	if ct = resp.Header.Get("Content-Type"); !strings.Contains(ct, "markdown") {
+		t.Fatalf("expected markdown content type, got %q", ct)
+	}
+	if body := readAll(t, resp); !strings.Contains(string(body), "tmux") {
+		t.Fatal("expected guide content, got something else")
 	}
 }
