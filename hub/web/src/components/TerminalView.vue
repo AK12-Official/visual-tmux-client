@@ -22,6 +22,17 @@ const state = ref<ConnState>('connecting')
 const endedDetail = ref<string | null>(null)
 let session: TerminalSession | null = null
 
+// The name to report upward. It must come from the live attachment, not from
+// `props.session`: a KeepAlive-cached view never re-renders, so after its
+// session is renamed its props stay frozen on the old name, and every state or
+// activity event it emitted would be filed under a name the app no longer knows
+// — silently dropping the sidebar's activity highlight for that session. Before
+// the attachment exists (the first `connecting` fires from inside the
+// constructor) the prop is the only name there is, and it is current then.
+function currentName(): string {
+  return session?.name ?? props.session
+}
+
 function attach(): void {
   if (!el.value) return
   endedDetail.value = null
@@ -31,10 +42,10 @@ function attach(): void {
       onState: (s, detail) => {
         state.value = s
         endedDetail.value = s === 'ended' ? detail ?? null : null
-        emit('state', props.session, s)
+        emit('state', currentName(), s)
       },
       onNotice: (message, level) => emit('notice', message, level),
-      onActivity: () => emit('activity', props.session),
+      onActivity: () => emit('activity', currentName()),
     }, props.fontSize)
   } catch (err) {
     emit('notice', `Terminal init failed: ${String(err)}`)
@@ -51,6 +62,23 @@ function reconnect(): void {
 }
 
 onMounted(attach)
+
+// Follow a rename of the session this view is showing. KeepAlive reuses this
+// instance across the rename (the key is the panel identity, not the name), so
+// the live attachment is not rebuilt: tmux binds a client to the session rather
+// than to its name, so it keeps streaming. The terminal's own copy of the name
+// is retargeted by App.vue (which must also reach the panels parked in the
+// cache, whose props never change); repeating it here is a no-op that keeps
+// this view correct on its own. What only this watcher can do is re-report the
+// state under the new name, or the header would read "connecting" for a
+// connection that never dropped.
+watch(
+  () => props.session,
+  (name) => {
+    session?.setSession(name)
+    emit('state', name, state.value)
+  },
+)
 
 // Live font-size changes from the header apply to the live terminal session.
 watch(
@@ -73,14 +101,14 @@ onBeforeUnmount(() => {
       <div class="terminal-view__ended">
         <template v-if="alive">
           <p class="terminal-view__ended-title">
-            {{ endedDetail ? 'Terminal disconnected' : `Detached from “${session}”` }}
+            {{ endedDetail ? 'Terminal disconnected' : `Detached from “${props.session}”` }}
           </p>
           <p v-if="endedDetail" class="terminal-view__ended-detail">{{ endedDetail }}</p>
           <p v-else class="terminal-view__ended-detail">The session is still running.</p>
           <button class="terminal-view__reconnect" @click="reconnect">Reconnect</button>
         </template>
         <template v-else>
-          <p class="terminal-view__ended-title">Session “{{ session }}” has ended.</p>
+          <p class="terminal-view__ended-title">Session “{{ props.session }}” has ended.</p>
           <p v-if="endedDetail" class="terminal-view__ended-detail">{{ endedDetail }}</p>
         </template>
       </div>

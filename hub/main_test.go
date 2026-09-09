@@ -35,7 +35,7 @@ func TestBrowserURL(t *testing.T) {
 		"0.0.0.0:7690": "http://127.0.0.1:7690",
 		":7690":        "http://127.0.0.1:7690",
 		"[::]:7690":    "http://127.0.0.1:7690",
-		"localhost:80":  "http://localhost:80",
+		"localhost:80": "http://localhost:80",
 		// Not a host:port; degrade to prefixing rather than erroring.
 		"weird": "http://weird",
 	}

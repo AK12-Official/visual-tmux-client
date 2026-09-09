@@ -31,3 +31,22 @@ body {
     height: 100vh;
     background: var(--app-bg);
 }
+
+/* One high-contrast keyboard focus treatment across native controls and the
+   keyboard-operable session rows. */
+:where(button, input, [tabindex]):focus-visible {
+    outline: 2px solid var(--th-accent);
+    outline-offset: 2px;
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}

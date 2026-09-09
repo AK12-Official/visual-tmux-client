@@ -20,7 +20,8 @@ const LEVEL_TAG: Record<string, string> = {
       :key="t.id"
       class="toast"
       :class="`toast--${t.level}`"
-      role="status"
+      :role="t.level === 'error' ? 'alert' : 'status'"
+      aria-atomic="true"
     >
       <span class="toast__tag">{{ LEVEL_TAG[t.level] }}</span>
       <span class="toast__message">{{ t.message }}</span>

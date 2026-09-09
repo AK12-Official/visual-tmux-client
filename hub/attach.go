@@ -29,6 +29,25 @@ const (
 
 const maxDim = 1000 // max accepted terminal cols/rows
 
+// maxInputMessage bounds a single inbound WebSocket message. The library
+// default is 32 KiB, which silently kills the connection with
+// StatusMessageTooBig when a user pastes more than that — the frontend sends a
+// whole paste as ONE binary frame, so this was reachable by ordinary use.
+//
+// 8 MiB is the cap because Conn.Read buffers a full message in memory before
+// returning it (io.ReadAll), so this value IS the per-connection input
+// high-water mark: bounded, not unbounded. It comfortably covers a legitimate
+// paste (a 100k-line log is a few MiB) while refusing a frame sized to exhaust
+// hub memory. The pty write itself is chunked (see writeInput), so a paste this
+// large is drained at the tty's pace rather than buffered again by the hub.
+const maxInputMessage = 8 << 20
+
+// inputChunk is the unit in which a client message is fed to the pty. Writing a
+// multi-MiB paste in one os.File.Write would block in a single uninterruptible
+// syscall until the tty drained it; chunking keeps each write short so the
+// attachment stays responsive to teardown between chunks.
+const inputChunk = 32 * 1024
+
 // serverMessage types are the JSON text frames the server sends to the client.
 type readyMessage struct {
 	Type    string `json:"type"`
@@ -84,24 +103,26 @@ func (q *outputQueue) push(b []byte) {
 // shouldRead is the backpressure gate: it reports whether the output pump may
 // read more from the pty. Reading is paused once the queued byte count reaches
 // the high watermark, and does not resume until it drains below the low
-// watermark (hysteresis, to avoid thrashing at the boundary).
-func (q *outputQueue) shouldRead() bool {
+// watermark (hysteresis, to avoid thrashing at the boundary). It separately
+// reports whether the queue is closed, which is terminal rather than a pause:
+// the pump must stop entirely, since a closed queue never drains again.
+func (q *outputQueue) shouldRead() (read, closed bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.closed {
-		return false
+		return false, true
 	}
 	if q.paused {
 		if q.bytes < outputLowWater {
 			q.paused = false
 		}
-		return false
+		return false, false
 	}
 	if q.bytes >= outputHighWater {
 		q.paused = true
-		return false
+		return false, false
 	}
-	return true
+	return true, false
 }
 
 // pop returns the next chunk, blocking (polling) until one is available or the
@@ -158,6 +179,16 @@ type attachment struct {
 	ptmx *os.File
 	cmd  *exec.Cmd
 
+	// Guards the pty master's lifecycle. pty.Setsize goes through File.Fd(),
+	// which bypasses os.File's internal refcounting, so an ioctl racing a
+	// Close can be issued against an already-recycled descriptor — i.e. some
+	// unrelated file. Every Setsize and the Close itself take this lock and
+	// respect ptyClosed. The blocking Read in outputPump deliberately does NOT
+	// take it (that would deadlock Close); a concurrent Read/Close on os.File
+	// is safe on its own, since Read uses the refcounted path.
+	ptyMu     sync.Mutex
+	ptyClosed bool
+
 	mu    sync.Mutex
 	cols  int
 	rows  int
@@ -201,6 +232,9 @@ func (s *server) attach(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	// Raise the 32 KiB default so an ordinary large paste is not treated as a
+	// protocol violation. See maxInputMessage.
+	c.SetReadLimit(maxInputMessage)
 
 	// Use a background context: r.Context() is cancelled when this handler
 	// returns (net/http cancels the request context after ServeHTTP), which
@@ -270,6 +304,57 @@ func (s *server) attach(w http.ResponseWriter, r *http.Request) {
 	a.forceRepaint()
 }
 
+// setSize resizes the pty master, unless it is already closed. See ptyMu.
+func (a *attachment) setSize(cols, rows int) {
+	a.ptyMu.Lock()
+	defer a.ptyMu.Unlock()
+	if a.ptyClosed || a.ptmx == nil {
+		return
+	}
+	_ = pty.Setsize(a.ptmx, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
+}
+
+// closePty closes the pty master exactly once, excluding concurrent Setsize
+// calls so no ioctl can land on a recycled descriptor. See ptyMu.
+func (a *attachment) closePty() {
+	a.ptyMu.Lock()
+	defer a.ptyMu.Unlock()
+	if a.ptyClosed || a.ptmx == nil {
+		return
+	}
+	a.ptyClosed = true
+	_ = a.ptmx.Close()
+}
+
+// detach ends the attachment's hold on the session: it closes the pty master
+// and signals the `tmux attach-session` child to exit.
+//
+// The Kill is not belt-and-braces, it is the load-bearing part. creack/pty
+// opens the master with syscall.Open + os.NewFile, so the descriptor is not
+// registered with the runtime netpoller; os.File.Close on such a descriptor
+// cannot interrupt a Read that is already in flight (it only drops a
+// reference, deferring the real close(2) until the parked Read returns) and
+// still reports success. Since outputPump is parked in exactly that Read
+// whenever the session is idle, closing alone leaves the child running and any
+// subsequent cmd.Wait blocked forever. Signalling the child makes the slave
+// side hang up, which returns the parked Read with EOF and lets it be reaped.
+//
+// This is not theoretical: on a silent session the parked Read never returns on
+// its own, so the goroutine, the pty fd and the attached tmux client all leak
+// for the hub's lifetime, and the ghost client keeps constraining the real
+// user's window size (the size policy is "latest"). Incidental session output
+// can happen to unpark the Read, which makes the leak timing-dependent and easy
+// to mistake for correct behaviour. See TestDisconnectReleasesSilentSession.
+//
+// Killing the client process only detaches it; the session itself survives,
+// which is what onClientGone requires.
+func (a *attachment) detach() {
+	a.closePty()
+	if a.cmd != nil && a.cmd.Process != nil {
+		_ = a.cmd.Process.Kill()
+	}
+}
+
 // sendText marshals and writes a JSON text frame.
 func (a *attachment) sendText(v any) error {
 	b, err := json.Marshal(v)
@@ -291,13 +376,15 @@ func (a *attachment) sendErrorAndClose(message string, retryable bool) {
 }
 
 // markReadyAndFlush atomically transitions from staging to live and flushes any
-// staged output, preserving production order.
+// staged output, preserving production order. The flush happens while a.mu is
+// still held: releasing it first would let a concurrent deliver() observe
+// ready==true and push fresh pty output onto the queue ahead of the older
+// staged chunks, reordering the byte stream and splitting escape sequences.
 func (a *attachment) markReadyAndFlush() {
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	a.ready = true
-	staged := a.stage.Drain()
-	a.mu.Unlock()
-	for _, chunk := range staged {
+	for _, chunk := range a.stage.Drain() {
 		a.queue.push(chunk)
 	}
 }
@@ -322,8 +409,20 @@ func (a *attachment) outputPump() {
 	for {
 		// Backpressure: pause reading the pty while the writer is behind. This
 		// lets the kernel's pty buffer fill and tmux block on write, rather
-		// than buffering output without bound in the hub.
-		if !a.queue.shouldRead() {
+		// than buffering output without bound in the hub. A closed queue is
+		// terminal: the client is gone (or the hub is shutting down), so stop
+		// pumping instead of spinning forever on a queue that never drains.
+		read, closed := a.queue.shouldRead()
+		if closed {
+			// The queue closed under us (client gone, or hub shutting down).
+			// detach() before reaping: waitChild blocks until the child exits,
+			// and closing the pty alone does not make that happen (see detach).
+			// Both are idempotent, so this is a no-op when the closer did it.
+			a.detach()
+			a.waitChild()
+			return
+		}
+		if !read {
 			time.Sleep(pollInterval)
 			continue
 		}
@@ -348,6 +447,13 @@ func (a *attachment) onOutputEnd() {
 
 // waitChild reaps the attach process and returns its exit code (nil if it was
 // killed by a signal).
+//
+// Both call sites (onOutputEnd and outputPump's closed-queue branch) live in
+// the outputPump goroutine and each returns immediately afterwards, so Wait is
+// never called twice. That invariant is load-bearing: os/exec's Wait is not
+// safe to call concurrently (it carries a known PID-reuse hazard), and a second
+// sequential call would return a bare "Wait was already called" error, which is
+// not an *exec.ExitError and so would be reported here as an unknown exit code.
 func (a *attachment) waitChild() *int {
 	if a.cmd == nil {
 		return nil
@@ -380,7 +486,14 @@ func (a *attachment) writePump() {
 			return
 		}
 		if err := a.c.Write(a.ctx, websocket.MessageBinary, chunk); err != nil {
+			// The client is unreachable, so detach: this releases the tmux
+			// client instead of leaving it attached for the hub's lifetime,
+			// and unblocks outputPump so it can reap the child. Close the
+			// WebSocket too, so the peer gets a close frame and inputPump is
+			// not left parked in Read.
 			a.queue.closeAbnormal()
+			a.detach()
+			_ = a.c.Close(websocket.StatusAbnormalClosure, "write failed")
 			a.finish()
 			return
 		}
@@ -397,10 +510,29 @@ func (a *attachment) inputPump() {
 		}
 		switch msgType {
 		case websocket.MessageBinary:
-			_, _ = a.ptmx.Write(data)
+			a.writeInput(data)
 		case websocket.MessageText:
 			a.handleControl(data)
 		}
+	}
+}
+
+// writeInput feeds client bytes to the pty in bounded chunks. os.File.Write
+// blocks until the tty accepts everything, which is the backpressure we want —
+// a big paste is throttled by the terminal, not buffered by the hub — but a
+// single multi-MiB write would sit in one syscall for the whole drain. Chunking
+// bounds each blocking call and lets teardown be observed in between. A write
+// error means the pty is gone, so there is nothing left to feed.
+func (a *attachment) writeInput(data []byte) {
+	for len(data) > 0 {
+		n := len(data)
+		if n > inputChunk {
+			n = inputChunk
+		}
+		if _, err := a.ptmx.Write(data[:n]); err != nil {
+			return
+		}
+		data = data[n:]
 	}
 }
 
@@ -424,7 +556,7 @@ func (a *attachment) applyResize(cols, rows int) {
 	if cols < 1 || cols > maxDim || rows < 1 || rows > maxDim {
 		return // retain last valid size
 	}
-	_ = pty.Setsize(a.ptmx, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
+	a.setSize(cols, rows)
 	a.mu.Lock()
 	a.cols, a.rows = cols, rows
 	a.mu.Unlock()
@@ -447,32 +579,25 @@ func (a *attachment) forceRepaint() {
 	if rows < 2 {
 		return
 	}
-	_ = pty.Setsize(a.ptmx, &pty.Winsize{Rows: uint16(rows - 1), Cols: uint16(cols)})
-	_ = pty.Setsize(a.ptmx, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
+	a.setSize(cols, rows-1)
+	a.setSize(cols, rows)
 }
 
 // onClientGone runs when the WebSocket read fails (client disconnected). It
-// closes the pty so tmux detaches the client; the session itself survives.
+// detaches so tmux releases the client; the session itself survives.
 func (a *attachment) onClientGone() {
 	a.queue.closeAbnormal()
 	a.cancel()
-	if a.ptmx != nil {
-		_ = a.ptmx.Close()
-	}
+	a.detach()
 	a.finish()
 }
 
-// shutdown terminates the attachment (used on hub shutdown): close the pty,
-// kill the attach process, and close the WebSocket.
+// shutdown terminates the attachment (used on hub shutdown): detach the pty
+// and attach process, and close the WebSocket.
 func (a *attachment) shutdown() {
 	a.queue.closeAbnormal()
 	a.cancel()
-	if a.ptmx != nil {
-		_ = a.ptmx.Close()
-	}
-	if a.cmd != nil && a.cmd.Process != nil {
-		_ = a.cmd.Process.Kill()
-	}
+	a.detach()
 	_ = a.c.Close(websocket.StatusNormalClosure, "hub shutting down")
 	a.finish()
 }

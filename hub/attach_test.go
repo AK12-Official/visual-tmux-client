@@ -254,6 +254,53 @@ func TestAttachInputReachesSession(t *testing.T) {
 	t.Fatalf("input did not reach session; file=%q", string(b))
 }
 
+// A paste larger than the library's 32 KiB default read limit must reach the
+// pty intact instead of killing the connection with StatusMessageTooBig. The
+// frontend sends a whole paste as one binary frame, so this is ordinary use.
+func TestAttachLargePasteReachesSession(t *testing.T) {
+	s, ts, tmux, sock := attachFixture(t)
+	out := fmt.Sprintf("/tmp/hub-paste-%d-%d", os.Getpid(), time.Now().UnixNano())
+	mkSessionCmd(t, tmux, sock, "probe", fmt.Sprintf("cat > %s", out))
+	t.Cleanup(func() { os.Remove(out) })
+	id, _ := s.tickets.issue("probe")
+
+	conn := dialWS(t, ts, fmt.Sprintf("/ws/local/probe?ticket=%s&cols=80&rows=24", id), nil)
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	readFrame(t, conn) // ready
+
+	// Well over the 32 KiB default read limit. The payload is many short lines,
+	// like a real pasted log: the pane's pty is in canonical mode, whose line
+	// discipline caps a single line at MAX_CANON (1 KiB on macOS), so one giant
+	// line would be dropped by the tty regardless of the read limit.
+	const (
+		lines   = 4096
+		lineLen = 63 // + "\n" = 64 bytes per line
+		totalAs = lines * lineLen
+	)
+	line := append(bytes.Repeat([]byte("a"), lineLen), '\n')
+	payload := bytes.Repeat(line, lines)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := conn.Write(ctx, websocket.MessageBinary, payload); err != nil {
+		t.Fatalf("write large paste: %v", err)
+	}
+
+	// The pane echoes as it drains, so the connection must stay alive: a
+	// StatusMessageTooBig teardown would surface here as a read error.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		b, _ := os.ReadFile(out)
+		if bytes.Count(b, []byte("a")) >= totalAs {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	b, _ := os.ReadFile(out)
+	t.Fatalf("large paste did not reach session intact: got %d of %d bytes", bytes.Count(b, []byte("a")), totalAs)
+}
+
 func TestAttachExitOnKill(t *testing.T) {
 	s, ts, tmux, sock := attachFixture(t)
 	mkSessionCmd(t, tmux, sock, "probe", "sh -c 'sleep 60'")

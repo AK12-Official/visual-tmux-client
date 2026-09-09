@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { marked } from 'marked'
 import { notify } from '../toasts'
 
@@ -8,6 +8,9 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 
 const html = ref<string | null>(null)
 const loading = ref(false)
+const panel = ref<HTMLElement | null>(null)
+const closeButton = ref<HTMLButtonElement | null>(null)
+let previousFocus: HTMLElement | null = null
 
 // The guide is static for the lifetime of the page: fetch once, cache the
 // rendered HTML, and never re-fetch on subsequent opens.
@@ -32,7 +35,18 @@ async function ensureGuide(): Promise<void> {
 watch(
   () => props.open,
   async (open) => {
-    if (!open || cachedHtml !== null) return
+    if (!open) {
+      previousFocus?.focus()
+      previousFocus = null
+      return
+    }
+    previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    await nextTick()
+    closeButton.value?.focus()
+    if (cachedHtml !== null) {
+      html.value = cachedHtml
+      return
+    }
     loading.value = true
     try {
       await ensureGuide()
@@ -47,7 +61,26 @@ watch(
 )
 
 function onKey(ev: KeyboardEvent): void {
-  if (ev.key === 'Escape') emit('close')
+  if (props.open && ev.key === 'Escape') emit('close')
+}
+
+function trapFocus(ev: KeyboardEvent): void {
+  if (ev.key !== 'Tab' || !panel.value) return
+  const focusable = Array.from(
+    panel.value.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  )
+  if (focusable.length === 0) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (ev.shiftKey && document.activeElement === first) {
+    ev.preventDefault()
+    last.focus()
+  } else if (!ev.shiftKey && document.activeElement === last) {
+    ev.preventDefault()
+    first.focus()
+  }
 }
 
 onMounted(() => window.addEventListener('keydown', onKey))
@@ -56,13 +89,22 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
 <template>
   <div v-if="open" class="help" @click.self="emit('close')">
-    <div class="help__panel" role="dialog" aria-modal="true" aria-label="tmux 使用指南">
+    <div
+      ref="panel"
+      class="help__panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="help-title"
+      @keydown="trapFocus"
+    >
       <header class="help__header">
-        <span class="help__title">tmux 使用指南</span>
-        <button class="help__close" aria-label="close" @click="emit('close')">✕</button>
+        <span id="help-title" class="help__title">tmux 使用指南</span>
+        <button ref="closeButton" class="help__close" aria-label="Close help" @click="emit('close')">
+          <span aria-hidden="true">✕</span>
+        </button>
       </header>
-      <div class="help__body">
-        <p v-if="loading" class="help__loading">Loading…</p>
+      <div class="help__body" :aria-busy="loading">
+        <p v-if="loading" class="help__loading" role="status">Loading…</p>
         <!-- The content is repo-controlled markdown fetched from the hub
              itself (no user input in the pipeline), so it is rendered as
              HTML directly. -->

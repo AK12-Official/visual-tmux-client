@@ -57,15 +57,22 @@ function isPinned(name: string): boolean {
 }
 
 // Pinning is a flag plus "move to the very front", so a freshly pinned
-// session visibly jumps to the top of the pinned group.
+// session visibly jumps to the top of the pinned group. Unpinning only clears
+// the flag: rewriting order[] there too would drop the session's entry
+// entirely, and applyOrder ranks unknown names last — so unpinning would fling
+// a hand-placed session to the bottom of the list instead of leaving it put.
 function togglePin(name: string): void {
   const pinned = order.value.pinned.filter((n) => n !== name)
-  const rest = order.value.order.filter((n) => n !== name)
-  if (!isPinned(name)) {
+  if (isPinned(name)) {
+    order.value = { ...order.value, pinned }
+  } else {
     pinned.push(name)
-    rest.unshift(name)
+    order.value = {
+      ...order.value,
+      order: [name, ...order.value.order.filter((n) => n !== name)],
+      pinned,
+    }
   }
-  order.value = { ...order.value, order: rest, pinned }
   saveOrder(order.value)
 }
 
@@ -91,6 +98,30 @@ function onDrop(target: string): void {
   const to = list.indexOf(target)
   if (from < 0 || to < 0) return
   list.splice(to, 0, ...list.splice(from, 1))
+  order.value = { ...order.value, order: list }
+  saveOrder(order.value)
+}
+
+// Dragging is convenient with a pointer, but must not be the only way to
+// reorder. These controls move within the pinned or unpinned group because
+// pinning deliberately fixes the group boundary.
+function canMove(name: string, delta: -1 | 1): boolean {
+  const pinned = isPinned(name)
+  const group = ordered.value.filter((s) => isPinned(s.name) === pinned)
+  const index = group.findIndex((s) => s.name === name)
+  return index >= 0 && index + delta >= 0 && index + delta < group.length
+}
+
+function moveBy(name: string, delta: -1 | 1): void {
+  if (!canMove(name, delta)) return
+  const pinned = isPinned(name)
+  const group = ordered.value.filter((s) => isPinned(s.name) === pinned)
+  const index = group.findIndex((s) => s.name === name)
+  const target = group[index + delta].name
+  const list = ordered.value.map((s) => s.name)
+  const from = list.indexOf(name)
+  const to = list.indexOf(target)
+  ;[list[from], list[to]] = [list[to], list[from]]
   order.value = { ...order.value, order: list }
   saveOrder(order.value)
 }
@@ -139,12 +170,20 @@ function submitRename(oldName: string): void {
   const name = renameDraft.value.trim()
   renaming.value = null
   if (!name || name === oldName) return
-  // Rewrite the stored position under the new name so manual order and pins
-  // survive a rename.
+  // Carry the stored position and pin under BOTH names until the server has
+  // ruled: the hub may reject the new name (a reserved or full-width
+  // character), and replacing the entry outright would leave it pointing at a
+  // name that never exists — the pruning watcher would then drop it, silently
+  // losing the session's manual position and pin. Holding both adjacent lets
+  // the watcher prune whichever name loses, so the survivor keeps the slot
+  // either way. A name that already belongs to another live session is not
+  // added: the rename cannot succeed, and that session owns its own slot.
+  const taken = props.sessions.some((s) => s.name === name)
+  const carry = (n: string): string[] => (n === oldName && !taken ? [oldName, name] : [n])
   order.value = {
     ...order.value,
-    order: order.value.order.map((n) => (n === oldName ? name : n)),
-    pinned: order.value.pinned.map((n) => (n === oldName ? name : n)),
+    order: order.value.order.flatMap(carry),
+    pinned: order.value.pinned.flatMap(carry),
   }
   saveOrder(order.value)
   emit('rename', oldName, name)
@@ -176,11 +215,13 @@ const manualMode = computed(() => order.value.mode === 'manual')
         <button
           class="session-list__mode"
           :class="{ 'session-list__mode--on': !manualMode }"
+          :aria-pressed="!manualMode"
           @click="setMode('default')"
         >Default</button>
         <button
           class="session-list__mode"
           :class="{ 'session-list__mode--on': manualMode }"
+          :aria-pressed="manualMode"
           @click="setMode('manual')"
         >Manual</button>
       </div>
@@ -208,7 +249,12 @@ const manualMode = computed(() => order.value.mode === 'manual')
           'session-list__row--drag-over': dragOverName === s.name && dragName !== s.name,
         }"
         :draggable="manualMode && renaming !== s.name"
+        tabindex="0"
+        :aria-label="`Session ${s.name}; ${s.windows} window${s.windows === 1 ? '' : 's'}; ${s.attached ? 'attached' : 'detached'}`"
+        :aria-current="s.name === selected && !selecting ? 'true' : undefined"
         @click="selecting ? toggleCheck(s.name) : emit('select', s.name)"
+        @keydown.enter.self="selecting ? toggleCheck(s.name) : emit('select', s.name)"
+        @keydown.space.self.prevent="selecting ? toggleCheck(s.name) : emit('select', s.name)"
         @dragstart="manualMode && onDragStart(s.name, $event)"
         @dragover.prevent="dragOverName = s.name"
         @dragleave="dragOverName === s.name && (dragOverName = null)"
@@ -232,6 +278,7 @@ const manualMode = computed(() => order.value.mode === 'manual')
               type="checkbox"
               class="session-list__check"
               :checked="checked.has(s.name)"
+              :aria-label="`Select session ${s.name}`"
               tabindex="-1"
               @click.stop
               @change="toggleCheck(s.name)"
@@ -243,14 +290,38 @@ const manualMode = computed(() => order.value.mode === 'manual')
                 v-if="manualMode"
                 class="session-list__icon-btn"
                 :title="isPinned(s.name) ? 'unpin' : 'pin to top'"
+                :aria-label="isPinned(s.name) ? `Unpin ${s.name}` : `Pin ${s.name} to top`"
+                :aria-pressed="isPinned(s.name)"
                 @click="togglePin(s.name)"
-              >{{ isPinned(s.name) ? '★' : '☆' }}</button>
-              <button class="session-list__icon-btn" title="rename" @click="startRename(s.name)">✎</button>
+              ><span aria-hidden="true">{{ isPinned(s.name) ? '★' : '☆' }}</span></button>
+              <button
+                v-if="manualMode"
+                class="session-list__icon-btn"
+                title="move up"
+                :aria-label="`Move ${s.name} up`"
+                :disabled="!canMove(s.name, -1)"
+                @click="moveBy(s.name, -1)"
+              ><span aria-hidden="true">↑</span></button>
+              <button
+                v-if="manualMode"
+                class="session-list__icon-btn"
+                title="move down"
+                :aria-label="`Move ${s.name} down`"
+                :disabled="!canMove(s.name, 1)"
+                @click="moveBy(s.name, 1)"
+              ><span aria-hidden="true">↓</span></button>
+              <button
+                class="session-list__icon-btn"
+                title="rename"
+                :aria-label="`Rename ${s.name}`"
+                @click="startRename(s.name)"
+              ><span aria-hidden="true">✎</span></button>
               <button
                 class="session-list__icon-btn session-list__icon-btn--danger"
                 title="kill"
+                :aria-label="`Kill ${s.name}`"
                 @click="requestKill(s.name)"
-              >✕</button>
+              ><span aria-hidden="true">✕</span></button>
             </span>
           </div>
           <div class="session-list__row-meta">
@@ -467,7 +538,8 @@ const manualMode = computed(() => order.value.mode === 'manual')
   flex: 0 0 auto;
 }
 .session-list__row:hover .session-list__actions,
-.session-list__row--selected .session-list__actions {
+.session-list__row--selected .session-list__actions,
+.session-list__row:focus-within .session-list__actions {
   display: inline-flex;
 }
 .session-list__icon-btn {
@@ -476,7 +548,13 @@ const manualMode = computed(() => order.value.mode === 'manual')
   color: var(--th-text-mid);
   cursor: pointer;
   font-size: 0.85rem;
+  min-width: 24px;
+  min-height: 24px;
   padding: 0 0.2rem;
+}
+.session-list__icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 .session-list__icon-btn:hover {
   color: var(--th-text-hi);

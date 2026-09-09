@@ -197,23 +197,34 @@ func (c *tmuxClient) getSession(name string) (Session, error) {
 	return Session{}, ErrNotFound
 }
 
-// parseSessions parses list-sessions -F output into a Session slice.
+// parseSessions parses list-sessions -F output into a Session slice. The three
+// trailing fields are numeric, so the record is split from the RIGHT: a session
+// name may itself contain "|" (tmux permits it, and validateSessionName does
+// not reserve it), which a left-anchored split would truncate.
+//
+// Lines are NOT whitespace-trimmed: tmux accepts names with leading or trailing
+// spaces (created outside the hub, where validateSessionName does not apply),
+// and trimming would report a name that no longer matches the real session, so
+// every subsequent attach/rename/kill on it would fail with ErrNotFound. Only a
+// trailing CR is stripped, which is line-ending noise rather than name content.
 func parseSessions(stdout string) []Session {
 	out := make([]Session, 0)
-	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
-		line = strings.TrimSpace(line)
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSuffix(line, "\r")
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|", 4)
-		if len(parts) != 4 {
+		parts := strings.Split(line, "|")
+		if len(parts) < 4 {
 			continue
 		}
-		windows, _ := strconv.Atoi(parts[1])
-		attached, _ := strconv.Atoi(parts[2])
-		created, _ := strconv.ParseInt(parts[3], 10, 64)
+		n := len(parts)
+		name := strings.Join(parts[:n-3], "|")
+		windows, _ := strconv.Atoi(parts[n-3])
+		attached, _ := strconv.Atoi(parts[n-2])
+		created, _ := strconv.ParseInt(parts[n-1], 10, 64)
 		out = append(out, Session{
-			Name:     parts[0],
+			Name:     name,
 			Windows:  windows,
 			Attached: attached,
 			Created:  created,
@@ -315,7 +326,11 @@ func (c *tmuxClient) RenameSession(oldName, newName string) error {
 	if c.hasSession(newName) {
 		return ErrNameInUse
 	}
-	_, stderr, code, err := c.exec("rename-session", "-t", exactTarget(oldName), newName)
+	// "--" terminates option parsing: the new name is positional, so a name
+	// beginning with "-" would otherwise be read as a flag ("unknown flag -V").
+	// Such names are creatable (new-session takes the name as -s's argument),
+	// so rename has to accept them too.
+	_, stderr, code, err := c.exec("rename-session", "-t", exactTarget(oldName), "--", newName)
 	if err != nil {
 		return err
 	}

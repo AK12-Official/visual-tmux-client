@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import {
   AuthError,
   clearToken,
@@ -13,7 +13,7 @@ import {
   type Session,
 } from './api'
 import { notify } from './toasts'
-import type { ConnState } from './terminal'
+import { disposeTerminalSession, renameTerminalSession, type ConnState } from './terminal'
 import SessionList from './components/SessionList.vue'
 import TerminalView from './components/TerminalView.vue'
 import ToastStack from './components/ToastStack.vue'
@@ -27,9 +27,55 @@ const authBusy = ref(false)
 const sessions = ref<Session[]>([])
 const listError = ref('')
 const selected = ref<string | null>(null)
-const connStates = ref<Record<string, ConnState>>({})
+
+// Every map keyed by session name uses this, and a session name is arbitrary
+// user text: the hub accepts anything that is valid UTF-8 without `:`, `.`,
+// control characters or full-width lookalikes — which includes `constructor`,
+// `toString`, `valueOf`, `__proto__` and `hasOwnProperty`. On a plain `{}`
+// those names resolve through Object.prototype, so a lookup for a session that
+// has no entry returns an inherited function instead of undefined: the
+// `=== undefined` panel-identity guard never fires (so the panel key becomes a
+// function and a killed session's successor reuses its dead KeepAlive entry),
+// `!!activity[name]` is permanently true, the state pill renders a function
+// body, and `delete` cannot remove what was never an own property. A
+// null-prototype object inherits no names at all.
+//
+// These are paired with shallowRef, not ref: a deep ref wraps the object in a
+// reactive proxy, and that proxy answers `hasOwnProperty` (plus its internal
+// `__v_raw` / `__v_isReactive` / `__v_isReadonly` flags) even on a
+// null-prototype target — re-opening the same hole for those names. Every
+// update below replaces the whole map, so shallow tracking is all that is
+// needed.
+function nameMap<T>(...sources: Array<Record<string, T> | undefined>): Record<string, T> {
+  return Object.assign(Object.create(null) as Record<string, T>, ...sources)
+}
+
+const connStates = shallowRef<Record<string, ConnState>>(nameMap())
 
 const hasToken = computed(() => !!token.value)
+
+// --- Terminal panel identity ---
+// KeepAlive caches one TerminalView per key, and nothing ever evicts an entry.
+// Keying by session name would therefore strand a panel whenever its session is
+// renamed: the name changes, the session does not, so the still-live panel
+// (xterm instance, WebSocket, and the hub-side tmux client, pty and
+// `tmux attach-session` process behind it) stays cached under a name that no
+// longer exists while a second attachment mounts beside it. Keying by a stable
+// per-session id that renames carry over keeps one panel per session, so a
+// rename reuses the existing attachment instead of leaking it.
+const panelIds = shallowRef<Record<string, number>>(nameMap())
+let nextPanelId = 1
+
+function select(name: string): void {
+  if (panelIds.value[name] === undefined) {
+    panelIds.value = nameMap(panelIds.value, { [name]: nextPanelId++ })
+  }
+  selected.value = name
+}
+
+const selectedPanelId = computed(() =>
+  selected.value === null ? null : panelIds.value[selected.value] ?? null,
+)
 
 // Whether the selected session still exists server-side, from the same polled
 // list that renders the sidebar. Drives the terminal's ended overlay: a
@@ -63,18 +109,29 @@ const mainEl = ref<HTMLElement | null>(null)
 // Fullscreen targets the main region (header + terminal) so the controls stay
 // reachable. Size re-negotiation needs no handler here: the terminal's
 // ResizeObserver fires when the region's box changes.
+// Both calls return promises that reject when the browser refuses (no user
+// activation, a permissions policy, or exiting when not fullscreen); an
+// unhandled rejection would trip the global error banner in main.ts.
 function toggleFullscreen(): void {
   if (document.fullscreenElement) {
-    void document.exitFullscreen()
+    document.exitFullscreen().catch(() => {
+      /* already exited */
+    })
   } else {
-    void mainEl.value?.requestFullscreen()
+    mainEl.value?.requestFullscreen().catch(() => {
+      notify('warning', 'The browser refused to enter fullscreen.')
+    })
   }
 }
 
 // Close detaches the view, never the session: the terminal keeps streaming in
 // the KeepAlive cache, so the session stays alive and can still show activity.
 function closePanel(): void {
-  if (document.fullscreenElement) void document.exitFullscreen()
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {
+      /* already exited */
+    })
+  }
   selected.value = null
 }
 
@@ -85,12 +142,12 @@ function closePanel(): void {
 // title) and a decay timer dims it ~2 s after output stops.
 
 const ACTIVITY_DECAY_MS = 2000
-const activity = ref<Record<string, boolean>>({})
+const activity = shallowRef<Record<string, boolean>>(nameMap())
 const activityTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 function onActivity(name: string): void {
   if (!activity.value[name]) {
-    activity.value = { ...activity.value, [name]: true }
+    activity.value = nameMap(activity.value, { [name]: true })
   }
   const timer = activityTimers.get(name)
   if (timer) clearTimeout(timer)
@@ -98,7 +155,7 @@ function onActivity(name: string): void {
     name,
     setTimeout(() => {
       activityTimers.delete(name)
-      const next = { ...activity.value }
+      const next = nameMap(activity.value)
       delete next[name]
       activity.value = next
     }, ACTIVITY_DECAY_MS),
@@ -226,16 +283,51 @@ async function onCreate() {
 async function onRename(oldName: string, newName: string) {
   try {
     await renameSession(oldName, newName)
+    // Carry the panel identity across the rename, so the live attachment for
+    // this session is reused rather than stranded in the KeepAlive cache under
+    // a name that no longer exists (see panelIds).
+    const id = panelIds.value[oldName]
+    if (id !== undefined) {
+      const next = nameMap(panelIds.value, { [newName]: id })
+      delete next[oldName]
+      panelIds.value = next
+    }
+    // Follow the rename: `selected` is the viewed terminal's identity — it
+    // names the ws ticket and the header. Left on the old name, the polled
+    // list no longer contains it, so a live session reads as ended and every
+    // reconnect asks for a ticket the hub answers with session_not_found.
+    if (selected.value === oldName) selected.value = newName
+    // Retarget the attachment itself. For the viewed panel the `session` prop
+    // change would reach it, but a panel parked in the KeepAlive cache never
+    // re-renders, so no prop can: without this its terminal keeps the old name
+    // and its next reconnect asks the hub for a session that no longer exists.
+    renameTerminalSession(oldName, newName)
     await refresh()
   } catch (err) {
     notify('error', err instanceof Error ? err.message : String(err))
   }
 }
 
+// Killing a session retires its panel identity, so a later session that
+// happens to reuse the name gets a fresh panel rather than the dead one still
+// sitting in the KeepAlive cache (which would greet a brand-new session with an
+// "ended" overlay). Retiring the key makes the cached panel unreachable but not
+// gone — KeepAlive only unmounts on eviction, and nothing evicts here — so its
+// terminal is disposed explicitly, or its xterm instance, scrollback and
+// ResizeObserver would be retained for the life of the page.
+function dropPanel(name: string): void {
+  if (panelIds.value[name] === undefined) return
+  const next = nameMap(panelIds.value)
+  delete next[name]
+  panelIds.value = next
+  disposeTerminalSession(name)
+}
+
 async function onKill(name: string) {
   try {
     await killSession(name)
     if (selected.value === name) selected.value = null
+    dropPanel(name)
     await refresh()
   } catch (err) {
     notify('error', err instanceof Error ? err.message : String(err))
@@ -250,6 +342,7 @@ async function onBulkKill(names: string[]) {
     try {
       await killSession(name)
       if (selected.value === name) selected.value = null
+      dropPanel(name)
     } catch {
       failed.push(name)
     }
@@ -261,7 +354,7 @@ async function onBulkKill(names: string[]) {
 }
 
 function onState(session: string, state: ConnState) {
-  connStates.value = { ...connStates.value, [session]: state }
+  connStates.value = nameMap(connStates.value, { [session]: state })
 }
 
 function onNotice(message: string, level: 'error' | 'warning' = 'error') {
@@ -285,7 +378,9 @@ onBeforeUnmount(() => {
       <div class="auth-card">
         <h1 class="auth-card__title">Visual Tmux Client</h1>
         <p class="auth-card__hint">Enter the access token to connect.</p>
+        <label class="sr-only" for="access-token">Access token</label>
         <input
+          id="access-token"
           v-model="tokenInput"
           type="password"
           class="auth-card__input"
@@ -313,15 +408,17 @@ onBeforeUnmount(() => {
             <button
               class="app__sidebar-toggle"
               title="collapse sidebar"
+              aria-label="Collapse session sidebar"
+              :aria-expanded="!sidebarCollapsed"
               @click="toggleSidebar"
-            >«</button>
+            ><span aria-hidden="true">«</span></button>
             <div class="app__sidebar-body">
               <SessionList
                 :sessions="sessions"
                 :error="listError"
                 :selected="selected"
                 :active="activity"
-                @select="selected = $event"
+                @select="select($event)"
                 @create="onCreate"
                 @rename="onRename"
                 @kill="onKill"
@@ -334,9 +431,19 @@ onBeforeUnmount(() => {
             </button>
           </template>
           <div v-else class="app__rail">
-            <button class="app__rail-btn" title="expand sidebar" @click="toggleSidebar">»</button>
-            <button class="app__rail-btn" title="new session" @click="onCreate">+</button>
-            <button class="app__rail-btn" title="help" @click="helpOpen = true">?</button>
+            <button
+              class="app__rail-btn"
+              title="expand sidebar"
+              aria-label="Expand session sidebar"
+              :aria-expanded="!sidebarCollapsed"
+              @click="toggleSidebar"
+            ><span aria-hidden="true">»</span></button>
+            <button class="app__rail-btn" title="new session" aria-label="Create new session" @click="onCreate">
+              <span aria-hidden="true">+</span>
+            </button>
+            <button class="app__rail-btn" title="help" aria-label="Open tmux help" @click="helpOpen = true">
+              <span aria-hidden="true">?</span>
+            </button>
           </div>
         </aside>
 
@@ -357,30 +464,34 @@ onBeforeUnmount(() => {
             <button
               class="app__term-btn"
               title="decrease font size"
+              aria-label="Decrease terminal font size"
               @click="setFontSize(fontSize - 1)"
             >A−</button>
             <span class="app__term-fontsize" aria-live="polite">{{ fontSize }} px</span>
             <button
               class="app__term-btn"
               title="increase font size"
+              aria-label="Increase terminal font size"
               @click="setFontSize(fontSize + 1)"
             >A+</button>
             <button
               class="app__term-btn"
               title="toggle fullscreen"
+              aria-label="Toggle terminal fullscreen"
               @click="toggleFullscreen"
-            >⛶</button>
+            ><span aria-hidden="true">⛶</span></button>
             <button
               class="app__term-btn"
               title="close panel (the session keeps running)"
+              aria-label="Close terminal panel; session keeps running"
               @click="closePanel"
-            >✕</button>
+            ><span aria-hidden="true">✕</span></button>
           </header>
           <div v-if="!selected" class="app__placeholder">Select a session.</div>
           <KeepAlive>
             <TerminalView
-              v-if="selected"
-              :key="selected"
+              v-if="selected && selectedPanelId !== null"
+              :key="selectedPanelId"
               :session="selected"
               :alive="selectedAlive"
               :font-size="fontSize"
@@ -464,6 +575,17 @@ onBeforeUnmount(() => {
   }
   50% {
     opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app__term-dot--live {
+    animation: none;
+    opacity: 1;
+  }
+
+  .app__sidebar {
+    transition: none;
   }
 }
 .app__term-title {
