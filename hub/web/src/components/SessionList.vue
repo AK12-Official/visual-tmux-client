@@ -43,8 +43,8 @@ watch(
   () => props.sessions,
   (sessions) => {
     const names = new Set(sessions.map((s) => s.name))
-    const order2 = order.value.order.filter((n) => names.has(n))
-    const pinned2 = order.value.pinned.filter((n) => names.has(n))
+    const order2 = [...new Set(order.value.order.filter((n) => names.has(n)))]
+    const pinned2 = [...new Set(order.value.pinned.filter((n) => names.has(n)))]
     if (order2.length !== order.value.order.length || pinned2.length !== order.value.pinned.length) {
       order.value = { ...order.value, order: order2, pinned: pinned2 }
       saveOrder(order.value)
@@ -81,6 +81,10 @@ function togglePin(name: string): void {
 const dragName = ref<string | null>(null)
 const dragOverName = ref<string | null>(null)
 
+const vFocus = {
+  mounted: (el: HTMLElement) => el.focus(),
+}
+
 function onDragStart(name: string, ev: DragEvent): void {
   dragName.value = name
   // Some browsers refuse to start a drag without payload data.
@@ -88,11 +92,18 @@ function onDragStart(name: string, ev: DragEvent): void {
   if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move'
 }
 
+function onDragOver(target: string): void {
+  if (!dragName.value || dragName.value === target) return
+  if (isPinned(dragName.value) !== isPinned(target)) return
+  dragOverName.value = target
+}
+
 function onDrop(target: string): void {
   const name = dragName.value
   dragName.value = null
   dragOverName.value = null
   if (!name || name === target) return
+  if (isPinned(name) !== isPinned(target)) return
   const list = ordered.value.map((s) => s.name)
   const from = list.indexOf(name)
   const to = list.indexOf(target)
@@ -256,13 +267,14 @@ const manualMode = computed(() => order.value.mode === 'manual')
         @keydown.enter.self="selecting ? toggleCheck(s.name) : emit('select', s.name)"
         @keydown.space.self.prevent="selecting ? toggleCheck(s.name) : emit('select', s.name)"
         @dragstart="manualMode && onDragStart(s.name, $event)"
-        @dragover.prevent="dragOverName = s.name"
+        @dragover.prevent="onDragOver(s.name)"
         @dragleave="dragOverName === s.name && (dragOverName = null)"
         @drop.prevent="onDrop(s.name)"
         @dragend="dragName = null; dragOverName = null"
       >
         <div v-if="renaming === s.name" class="session-list__rename" @click.stop>
           <input
+            v-focus
             v-model="renameDraft"
             class="session-list__input"
             @keyup.enter="submitRename(s.name)"

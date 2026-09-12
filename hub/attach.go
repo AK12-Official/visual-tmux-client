@@ -83,6 +83,7 @@ type clientMessage struct {
 // the queued byte count reaches the high watermark, and the writer drains it.
 type outputQueue struct {
 	mu       sync.Mutex
+	cond     *sync.Cond
 	chunks   [][]byte
 	bytes    int
 	paused   bool
@@ -90,13 +91,22 @@ type outputQueue struct {
 	exitCode *int // set on pty EOF so the writer can send the exit frame last
 }
 
+func (q *outputQueue) getCond() *sync.Cond {
+	if q.cond == nil {
+		q.cond = sync.NewCond(&q.mu)
+	}
+	return q.cond
+}
+
 func (q *outputQueue) push(b []byte) {
 	if len(b) == 0 {
 		return
 	}
 	q.mu.Lock()
+	cond := q.getCond()
 	q.chunks = append(q.chunks, append([]byte(nil), b...))
 	q.bytes += len(b)
+	cond.Signal()
 	q.mu.Unlock()
 }
 
@@ -125,39 +135,44 @@ func (q *outputQueue) shouldRead() (read, closed bool) {
 	return true, false
 }
 
-// pop returns the next chunk, blocking (polling) until one is available or the
+// pop returns the next chunk, blocking until one is available or the
 // queue is closed. It returns ok=false when closed and empty.
 func (q *outputQueue) pop() ([]byte, bool) {
-	for {
-		q.mu.Lock()
-		if len(q.chunks) > 0 {
-			c := q.chunks[0]
-			q.chunks = q.chunks[1:]
-			q.bytes -= len(c)
-			q.mu.Unlock()
-			return c, true
-		}
-		closed := q.closed
-		q.mu.Unlock()
-		if closed {
-			return nil, false
-		}
-		time.Sleep(pollInterval)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	cond := q.getCond()
+	for len(q.chunks) == 0 && !q.closed {
+		cond.Wait()
 	}
+	if len(q.chunks) > 0 {
+		c := q.chunks[0]
+		q.chunks[0] = nil
+		q.chunks = q.chunks[1:]
+		if len(q.chunks) == 0 {
+			q.chunks = nil
+		}
+		q.bytes -= len(c)
+		return c, true
+	}
+	return nil, false
 }
 
 // closeWithExit marks the queue closed with an exit code.
 func (q *outputQueue) closeWithExit(code *int) {
 	q.mu.Lock()
+	cond := q.getCond()
 	q.closed = true
 	q.exitCode = code
+	cond.Broadcast()
 	q.mu.Unlock()
 }
 
 // closeAbnormal marks the queue closed without an exit code (no exit frame).
 func (q *outputQueue) closeAbnormal() {
 	q.mu.Lock()
+	cond := q.getCond()
 	q.closed = true
+	cond.Broadcast()
 	q.mu.Unlock()
 }
 
@@ -222,13 +237,25 @@ func (s *server) attach(w http.ResponseWriter, r *http.Request) {
 	}
 	session := r.PathValue("session")
 
-	// Origin is validated before any pty is spawned.
-	if !checkOrigin(r.Header.Get("Origin"), s.origin) {
-		http.Error(w, "forbidden origin", http.StatusForbidden)
-		return
+	// Select origin policy: an explicit configured origin takes precedence and
+	// requires an exact match (originless clients allowed); the default empty
+	// configuration relies on the WebSocket library's request-host matching.
+	var acceptOpts *websocket.AcceptOptions
+	if s.origin != "" {
+		if !checkOrigin(r.Header.Get("Origin"), s.origin) {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return
+		}
+		// Application-level origin verification has completed successfully for
+		// the explicitly configured origin (or an originless client). Skip the
+		// library's duplicate Origin check so that requests behind a Host-rewriting
+		// reverse proxy are accepted.
+		acceptOpts = &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		}
 	}
 
-	c, err := websocket.Accept(w, r, nil)
+	c, err := websocket.Accept(w, r, acceptOpts)
 	if err != nil {
 		return
 	}
@@ -355,13 +382,20 @@ func (a *attachment) detach() {
 	}
 }
 
-// sendText marshals and writes a JSON text frame.
+// sendText marshals and writes a JSON text frame, bounded by a 5-second timeout.
 func (a *attachment) sendText(v any) error {
+	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
+	defer cancel()
+	return a.sendTextWithContext(ctx, v)
+}
+
+// sendTextWithContext marshals and writes a JSON text frame with the given context.
+func (a *attachment) sendTextWithContext(ctx context.Context, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return a.c.Write(a.ctx, websocket.MessageText, b)
+	return a.c.Write(ctx, websocket.MessageText, b)
 }
 
 // sendErrorAndClose sends an error text frame then closes with an appropriate
@@ -441,6 +475,7 @@ func (a *attachment) outputPump() {
 // onOutputEnd runs when the pty reaches EOF (session ended) or the master was
 // closed. It reaps the child and tells the writer to send the exit frame last.
 func (a *attachment) onOutputEnd() {
+	a.closePty()
 	code := a.waitChild()
 	a.queue.closeWithExit(code)
 }
@@ -474,27 +509,30 @@ func (a *attachment) waitChild() *int {
 // writePump drains the queue to the WebSocket as binary frames, and sends the
 // exit frame (if any) once the queue is drained, preserving order.
 func (a *attachment) writePump() {
+	defer a.finish()
 	for {
 		chunk, ok := a.queue.pop()
 		if !ok {
 			// closed and drained
 			if code := a.queue.getExitCode(); code != nil {
-				_ = a.sendText(exitMessage{Type: "exit", Code: code})
+				writeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				_ = a.sendTextWithContext(writeCtx, exitMessage{Type: "exit", Code: code})
+				cancel()
 			}
 			_ = a.c.Close(websocket.StatusNormalClosure, "")
-			a.finish()
 			return
 		}
-		if err := a.c.Write(a.ctx, websocket.MessageBinary, chunk); err != nil {
+		writeCtx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+		err := a.c.Write(writeCtx, websocket.MessageBinary, chunk)
+		cancel()
+		if err != nil {
 			// The client is unreachable, so detach: this releases the tmux
 			// client instead of leaving it attached for the hub's lifetime,
 			// and unblocks outputPump so it can reap the child. Close the
-			// WebSocket too, so the peer gets a close frame and inputPump is
-			// not left parked in Read.
+			// WebSocket immediately.
 			a.queue.closeAbnormal()
 			a.detach()
-			_ = a.c.Close(websocket.StatusAbnormalClosure, "write failed")
-			a.finish()
+			_ = a.c.CloseNow()
 			return
 		}
 	}
@@ -525,6 +563,11 @@ func (a *attachment) inputPump() {
 // error means the pty is gone, so there is nothing left to feed.
 func (a *attachment) writeInput(data []byte) {
 	for len(data) > 0 {
+		select {
+		case <-a.ctx.Done():
+			return
+		default:
+		}
 		n := len(data)
 		if n > inputChunk {
 			n = inputChunk

@@ -48,7 +48,11 @@ func (b *Buffer) Write(p []byte) (int, error) {
 	chunk := append([]byte(nil), p...)
 	for b.size+len(chunk) > b.cap && len(b.chunks) > 0 {
 		b.size -= len(b.chunks[0])
+		b.chunks[0] = nil
 		b.chunks = b.chunks[1:]
+	}
+	if len(b.chunks) == 0 {
+		b.chunks = nil
 	}
 	b.chunks = append(b.chunks, chunk)
 	b.size += len(chunk)

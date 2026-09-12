@@ -82,6 +82,17 @@ func TestRequireAuthMiddleware(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("handler should be called once on 200, got %d", calls)
 	}
+
+	// Empty expected token must fail closed even if client provides no token.
+	emptyAuthHandler := requireAuth("", func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("empty expected token must not allow requests")
+	})
+	recEmpty := httptest.NewRecorder()
+	reqEmpty := httptest.NewRequest(http.MethodGet, "/api/hosts/local/sessions", nil)
+	emptyAuthHandler(recEmpty, reqEmpty)
+	if recEmpty.Code != http.StatusUnauthorized {
+		t.Errorf("empty expected token: expected 401, got %d", recEmpty.Code)
+	}
 }
 
 func TestCheckOrigin(t *testing.T) {

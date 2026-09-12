@@ -39,20 +39,27 @@ func newTicketStore() *ticketStore {
 }
 
 // issue creates a single-use ticket bound to session, returning its id and
-// expiry time.
-func (s *ticketStore) issue(session string) (id string, expiresAt time.Time) {
-	id, _ = randomToken(24)
+// expiry time, or an error if entropy generation fails.
+func (s *ticketStore) issue(session string) (id string, expiresAt time.Time, err error) {
+	id, err = randomToken(24)
+	if err != nil {
+		return "", time.Time{}, err
+	}
 	expiresAt = s.now().Add(ticketTTL)
 	s.mu.Lock()
 	s.byID[id] = ticket{session: session, expires: expiresAt}
 	s.mu.Unlock()
-	return id, expiresAt
+	return id, expiresAt, nil
 }
 
 // redeem consumes a ticket. It deletes the ticket from the store BEFORE
 // checking validity, so a replay can never succeed even if the first redeem
-// failed for any reason (single-use regardless of outcome).
+// failed for any reason (single-use regardless of outcome). An empty ticket ID
+// is rejected immediately.
 func (s *ticketStore) redeem(id, session string) error {
+	if id == "" {
+		return ErrTicketInvalid
+	}
 	s.mu.Lock()
 	t, ok := s.byID[id]
 	delete(s.byID, id)

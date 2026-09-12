@@ -1,4 +1,5 @@
 # Agent / tooling directories
+.agents/
 .codex/
 .claude/
 .mcp.json

@@ -16,9 +16,10 @@ import (
 	"github.com/coder/websocket"
 )
 
-// attachFixture starts an isolated tmux server and a hub wired to it, and
-// returns the hub server, the httptest server, the tmux binary, and the socket.
-func attachFixture(t *testing.T) (*server, *httptest.Server, string, string) {
+// attachFixtureWithConfig starts an isolated tmux server and a hub wired to it
+// using the provided configuration, returning the hub server, httptest server,
+// tmux binary, and socket.
+func attachFixtureWithConfig(t *testing.T, cfg *config) (*server, *httptest.Server, string, string) {
 	t.Helper()
 	if !tmuxAvailable(t) {
 		t.Skip("tmux not available")
@@ -30,11 +31,18 @@ func attachFixture(t *testing.T) (*server, *httptest.Server, string, string) {
 	}
 	t.Cleanup(func() { runCommand(tmux, "-L", sock, "kill-server") })
 
-	s := newServer(&config{addr: "127.0.0.1:0", origin: "http://example.com"}, "test-token")
+	s := newServer(cfg, "test-token")
 	s.tmux = &tmuxClient{path: tmux, socket: sock}
 	ts := httptest.NewServer(s.handler())
 	t.Cleanup(ts.Close)
 	return s, ts, tmux, sock
+}
+
+// attachFixture starts an isolated tmux server and a hub wired to it, and
+// returns the hub server, the httptest server, the tmux binary, and the socket.
+func attachFixture(t *testing.T) (*server, *httptest.Server, string, string) {
+	t.Helper()
+	return attachFixtureWithConfig(t, &config{addr: "127.0.0.1:0", origin: "http://example.com"})
 }
 
 func mkSessionCmd(t *testing.T, tmux, sock, name, cmd string) {
@@ -64,11 +72,16 @@ func dialWS(t *testing.T, ts *httptest.Server, path string, header http.Header) 
 	return conn
 }
 
-func dialWSResp(t *testing.T, ts *httptest.Server, path string, header http.Header) (*websocket.Conn, *http.Response, error) {
+func dialWSOpts(t *testing.T, ts *httptest.Server, path string, opts *websocket.DialOptions) (*websocket.Conn, *http.Response, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return websocket.Dial(ctx, wsURL(ts, path), &websocket.DialOptions{HTTPHeader: header})
+	return websocket.Dial(ctx, wsURL(ts, path), opts)
+}
+
+func dialWSResp(t *testing.T, ts *httptest.Server, path string, header http.Header) (*websocket.Conn, *http.Response, error) {
+	t.Helper()
+	return dialWSOpts(t, ts, path, &websocket.DialOptions{HTTPHeader: header})
 }
 
 func readFrame(t *testing.T, conn *websocket.Conn) (websocket.MessageType, []byte) {
@@ -140,7 +153,7 @@ func TestChildEnvScrubbed(t *testing.T) {
 func TestAttachReadyAndSize(t *testing.T) {
 	s, ts, tmux, sock := attachFixture(t)
 	mkSessionCmd(t, tmux, sock, "probe", "")
-	id, _ := s.tickets.issue("probe")
+	id, _, _ := s.tickets.issue("probe")
 
 	conn := dialWS(t, ts, fmt.Sprintf("/ws/local/probe?ticket=%s&cols=100&rows=40", id), nil)
 	defer conn.Close(websocket.StatusNormalClosure, "")
@@ -162,10 +175,10 @@ func TestAttachTicketRefusal(t *testing.T) {
 	s, ts, tmux, sock := attachFixture(t)
 	mkSessionCmd(t, tmux, sock, "probe", "")
 
-	reusedID, _ := s.tickets.issue("probe")
+	reusedID, _, _ := s.tickets.issue("probe")
 	_ = s.tickets.redeem(reusedID, "probe")
 
-	mismatchID, _ := s.tickets.issue("other")
+	mismatchID, _, _ := s.tickets.issue("other")
 
 	cases := []struct {
 		name    string
@@ -201,7 +214,7 @@ func TestAttachByteFidelity(t *testing.T) {
 	s, ts, tmux, sock := attachFixture(t)
 	needle := "日本語🙂"
 	mkSessionCmd(t, tmux, sock, "probe", fmt.Sprintf("printf '%s'; sleep 30", needle))
-	id, _ := s.tickets.issue("probe")
+	id, _, _ := s.tickets.issue("probe")
 
 	conn := dialWS(t, ts, fmt.Sprintf("/ws/local/probe?ticket=%s&cols=80&rows=24", id), nil)
 	defer conn.Close(websocket.StatusNormalClosure, "")
@@ -227,7 +240,7 @@ func TestAttachInputReachesSession(t *testing.T) {
 	out := fmt.Sprintf("/tmp/hub-input-%d", time.Now().UnixNano())
 	mkSessionCmd(t, tmux, sock, "probe", fmt.Sprintf("cat > %s", out))
 	t.Cleanup(func() { os.Remove(out) })
-	id, _ := s.tickets.issue("probe")
+	id, _, _ := s.tickets.issue("probe")
 
 	conn := dialWS(t, ts, fmt.Sprintf("/ws/local/probe?ticket=%s&cols=80&rows=24", id), nil)
 	defer conn.Close(websocket.StatusNormalClosure, "")
@@ -262,7 +275,7 @@ func TestAttachLargePasteReachesSession(t *testing.T) {
 	out := fmt.Sprintf("/tmp/hub-paste-%d-%d", os.Getpid(), time.Now().UnixNano())
 	mkSessionCmd(t, tmux, sock, "probe", fmt.Sprintf("cat > %s", out))
 	t.Cleanup(func() { os.Remove(out) })
-	id, _ := s.tickets.issue("probe")
+	id, _, _ := s.tickets.issue("probe")
 
 	conn := dialWS(t, ts, fmt.Sprintf("/ws/local/probe?ticket=%s&cols=80&rows=24", id), nil)
 	defer conn.Close(websocket.StatusNormalClosure, "")
@@ -304,7 +317,7 @@ func TestAttachLargePasteReachesSession(t *testing.T) {
 func TestAttachExitOnKill(t *testing.T) {
 	s, ts, tmux, sock := attachFixture(t)
 	mkSessionCmd(t, tmux, sock, "probe", "sh -c 'sleep 60'")
-	id, _ := s.tickets.issue("probe")
+	id, _, _ := s.tickets.issue("probe")
 	conn := dialWS(t, ts, fmt.Sprintf("/ws/local/probe?ticket=%s&cols=80&rows=24", id), nil)
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
@@ -330,7 +343,7 @@ func TestAttachExitOnKill(t *testing.T) {
 func TestAttachOriginRejected(t *testing.T) {
 	s, ts, tmux, sock := attachFixture(t)
 	mkSessionCmd(t, tmux, sock, "probe", "")
-	id, _ := s.tickets.issue("probe")
+	id, _, _ := s.tickets.issue("probe")
 
 	_, resp, err := dialWSResp(t, ts, fmt.Sprintf("/ws/local/probe?ticket=%s&cols=80&rows=24", id),
 		http.Header{"Origin": []string{"http://evil.example"}})
@@ -345,7 +358,7 @@ func TestAttachOriginRejected(t *testing.T) {
 func TestAttachResizeKeepsConnectionUsable(t *testing.T) {
 	s, ts, tmux, sock := attachFixture(t)
 	mkSessionCmd(t, tmux, sock, "probe", "sh -c 'sleep 60'")
-	id, _ := s.tickets.issue("probe")
+	id, _, _ := s.tickets.issue("probe")
 	conn := dialWS(t, ts, fmt.Sprintf("/ws/local/probe?ticket=%s&cols=80&rows=24", id), nil)
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
@@ -375,8 +388,8 @@ func TestAttachResizeKeepsConnectionUsable(t *testing.T) {
 func TestAttachConcurrent(t *testing.T) {
 	s, ts, tmux, sock := attachFixture(t)
 	mkSessionCmd(t, tmux, sock, "probe", "sh -c 'sleep 60'")
-	id1, _ := s.tickets.issue("probe")
-	id2, _ := s.tickets.issue("probe")
+	id1, _, _ := s.tickets.issue("probe")
+	id2, _, _ := s.tickets.issue("probe")
 
 	c1 := dialWS(t, ts, fmt.Sprintf("/ws/local/probe?ticket=%s&cols=80&rows=24", id1), nil)
 	defer c1.Close(websocket.StatusNormalClosure, "")
@@ -387,5 +400,45 @@ func TestAttachConcurrent(t *testing.T) {
 	_, d2 := readFrame(t, c2)
 	if frameType(t, d1) != "ready" || frameType(t, d2) != "ready" {
 		t.Fatalf("both attachments should receive ready; got %q and %q", d1, d2)
+	}
+}
+
+func TestAttachWildcardAddrDefaultOriginReadyFrame(t *testing.T) {
+	t.Setenv("VISUAL_TMUX_CLIENT_ORIGIN", "")
+	cfg, err := parseConfig([]string{"--addr", "0.0.0.0:7690"})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+
+	s, ts, tmux, sock := attachFixtureWithConfig(t, cfg)
+	mkSessionCmd(t, tmux, sock, "probe", "")
+	id, _, _ := s.tickets.issue("probe")
+
+	// Connect with actual test-server Origin and a valid session ticket
+	conn, resp, err := dialWSResp(t, ts, fmt.Sprintf("/ws/local/probe?ticket=%s&cols=80&rows=24", id), http.Header{
+		"Origin": []string{ts.URL},
+	})
+	if err != nil {
+		t.Fatalf("dial failed with actual test-server origin: %v (resp=%v)", err, resp)
+	}
+	t.Cleanup(func() { conn.Close(websocket.StatusNormalClosure, "") })
+
+	mt, data := readFrame(t, conn)
+	if mt != websocket.MessageText {
+		t.Fatalf("expected text ready frame, got %d", mt)
+	}
+	var ready readyMessage
+	if err := json.Unmarshal(data, &ready); err != nil {
+		t.Fatalf("unmarshal ready message: %v", err)
+	}
+	if ready.Type != "ready" || ready.Session != "probe" {
+		t.Fatalf("unexpected ready message: %+v", ready)
+	}
+
+	s.mu.Lock()
+	activeAttachments := len(s.attachments)
+	s.mu.Unlock()
+	if activeAttachments != 1 {
+		t.Fatalf("expected 1 active attachment tracked on server, got %d", activeAttachments)
 	}
 }

@@ -101,6 +101,9 @@ func validateSessionName(name string) error {
 		if r == ':' || r == '.' {
 			return fmt.Errorf("%w: name must not contain %q (reserved by tmux target syntax)", ErrInvalidName, r)
 		}
+		if r == '/' || r == '\\' {
+			return fmt.Errorf("%w: name must not contain %q (reserved path separator)", ErrInvalidName, r)
+		}
 		// Full-width lookalikes pass tmux untouched, but they render exactly
 		// like the reserved characters and are one keystroke away in CJK
 		// input methods — reject them so a forbidden-looking name can never
@@ -317,6 +320,9 @@ func (c *tmuxClient) CreateSession(name string) (Session, error) {
 // RenameSession renames an existing session. Returns ErrNotFound for an absent
 // target and ErrNameInUse for a rename onto an existing name.
 func (c *tmuxClient) RenameSession(oldName, newName string) error {
+	if c.err != nil {
+		return c.err
+	}
 	if err := validateSessionName(newName); err != nil {
 		return err
 	}
@@ -338,6 +344,9 @@ func (c *tmuxClient) RenameSession(oldName, newName string) error {
 		if strings.Contains(stderr, "duplicate session") {
 			return ErrNameInUse
 		}
+		if strings.Contains(stderr, "can't find session") {
+			return ErrNotFound
+		}
 		return fmt.Errorf("tmux rename-session: %s", strings.TrimSpace(stderr))
 	}
 	return nil
@@ -346,6 +355,9 @@ func (c *tmuxClient) RenameSession(oldName, newName string) error {
 // KillSession terminates an existing session. Returns ErrNotFound for an
 // absent target.
 func (c *tmuxClient) KillSession(name string) error {
+	if c.err != nil {
+		return c.err
+	}
 	if !c.hasSession(name) {
 		return ErrNotFound
 	}

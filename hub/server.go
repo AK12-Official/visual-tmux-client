@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // webFS embeds the built frontend. `all:` includes files that would otherwise
@@ -99,7 +100,7 @@ func (s *server) untrack(a *attachment) {
 	s.mu.Unlock()
 }
 
-// shutdownAll closes every active attachment, killing its pty process.
+// shutdownAll closes every active attachment concurrently, killing its pty process.
 func (s *server) shutdownAll() {
 	s.mu.Lock()
 	list := make([]*attachment, 0, len(s.attachments))
@@ -107,8 +108,26 @@ func (s *server) shutdownAll() {
 		list = append(list, a)
 	}
 	s.mu.Unlock()
+
+	var wg sync.WaitGroup
 	for _, a := range list {
-		a.shutdown()
+		wg.Add(1)
+		go func(att *attachment) {
+			defer wg.Done()
+			att.shutdown()
+		}(a)
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		for _, a := range list {
+			_ = a.c.CloseNow()
+		}
 	}
 }
 

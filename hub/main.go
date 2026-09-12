@@ -20,7 +20,7 @@ var version = "dev"
 // config holds runtime configuration resolved from flags and environment.
 type config struct {
 	addr   string // listen address (host:port)
-	origin string // allowed WebSocket origin; empty means "use the bind address"
+	origin string // allowed WebSocket origin; empty means match request host and port
 	token  string // shared bearer token
 }
 
@@ -34,7 +34,7 @@ func usage(fs *flag.FlagSet) func() {
 		fs.PrintDefaults()
 		fmt.Fprintf(out, "\nEnvironment:\n")
 		fmt.Fprintf(out, "  VISUAL_TMUX_CLIENT_TOKEN      shared bearer token; printed at startup, generated if unset\n")
-		fmt.Fprintf(out, "  VISUAL_TMUX_CLIENT_ORIGIN     allowed WebSocket origin; defaults to the bind address\n")
+		fmt.Fprintf(out, "  VISUAL_TMUX_CLIENT_ORIGIN     allowed WebSocket origin; defaults to matching the request host and port\n")
 		fmt.Fprintf(out, "  VISUAL_TMUX_CLIENT_TMUX_PATH  path to the tmux binary; defaults to $PATH lookup\n")
 	}
 }
@@ -59,9 +59,6 @@ func parseConfig(args []string) (*config, error) {
 		addr:   *addr,
 		origin: os.Getenv("VISUAL_TMUX_CLIENT_ORIGIN"),
 		token:  os.Getenv("VISUAL_TMUX_CLIENT_TOKEN"),
-	}
-	if cfg.origin == "" {
-		cfg.origin = "http://" + cfg.addr
 	}
 	return cfg, nil
 }
@@ -138,8 +135,10 @@ func run() error {
 	go srv.tickets.runSweeper(sweepCtx, 10*time.Second)
 
 	httpServer := &http.Server{
-		Addr:    cfg.addr,
-		Handler: srv.handler(),
+		Addr:              cfg.addr,
+		Handler:           srv.handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	sigCtx, stopSig := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

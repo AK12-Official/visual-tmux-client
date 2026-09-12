@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 )
 
@@ -63,8 +64,9 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 	if !s.requireLocalHost(w, r) {
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req createSessionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -86,6 +88,7 @@ func (s *server) renameSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	oldName := r.PathValue("name")
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req renameSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request")
@@ -124,6 +127,7 @@ type wsTicketRequest struct {
 // issueTicket handles POST /api/ws-ticket. Requires bearer auth (enforced by
 // the router) and rejects a ticket request for a nonexistent session.
 func (s *server) issueTicket(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req wsTicketRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request")
@@ -133,11 +137,19 @@ func (s *server) issueTicket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "host_not_found")
 		return
 	}
+	if s.tmux.err != nil {
+		writeError(w, http.StatusServiceUnavailable, "tmux_unavailable")
+		return
+	}
 	if !s.tmux.hasSession(req.Session) {
 		writeError(w, http.StatusNotFound, "session_not_found")
 		return
 	}
-	id, expiresAt := s.tickets.issue(req.Session)
+	id, expiresAt, err := s.tickets.issue(req.Session)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "ticket_generation_failed")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ticket":    id,
 		"expiresAt": expiresAt.UTC().Format("2006-01-02T15:04:05Z"),
