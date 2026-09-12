@@ -309,12 +309,10 @@ func (s *server) attach(w http.ResponseWriter, r *http.Request) {
 	a.cols, a.rows = cols, rows
 	a.mu.Unlock()
 
-	// Defensive for older tmux: window-size latest is already the default on
-	// 3.7b. A non-zero exit must not fail the attachment. Done once per hub
-	// run, NOT per attach: setting the global option repaints every tmux
-	// client on the server, which would light up every background session's
-	// activity indicator with output the user did not cause.
-	s.pinWindowSizePolicy()
+	// Ensure global options (window-size latest and mouse on) are active.
+	// The call checks whether mouse is already on before setting options, avoiding
+	// redundant repaints that would light up background session activity indicators.
+	s.ensureGlobalOptions()
 
 	// Start pumping output before sending ready, so output produced between
 	// spawn and ready is staged (and later flushed) rather than lost.

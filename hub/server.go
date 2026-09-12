@@ -29,8 +29,8 @@ type server struct {
 	mu          sync.Mutex
 	attachments map[*attachment]struct{}
 
-	// Guards the one-time window-size policy pin; see pinWindowSizePolicy.
-	sizePolicyOnce sync.Once
+	// Guards option synchronization; see ensureGlobalOptions.
+	optionsMu sync.Mutex
 }
 
 func newServer(cfg *config, token string) *server {
@@ -44,15 +44,26 @@ func newServer(cfg *config, token string) *server {
 	}
 }
 
-// pinWindowSizePolicy sets tmux's global window-size policy to "latest" once
-// per hub run, on the first attachment. Older tmux defaults differ, and the
-// policy governs how the sessions we attach resize. It must NOT run on every
-// attachment: setting a global tmux option repaints every client on the
-// server, which our background attachments would report as activity.
+// ensureGlobalOptions configures tmux's global options (`window-size latest` and `mouse on`).
+// Setting global tmux options repaints every client on the server, which background attachments
+// would report as activity. Therefore, the hub inspects whether mouse support is already active
+// via `show-options -gv mouse` before issuing set-option commands. When already active, no command
+// is executed and clients are not repainted.
+func (s *server) ensureGlobalOptions() {
+	s.optionsMu.Lock()
+	defer s.optionsMu.Unlock()
+
+	out, _, code, err := s.tmux.exec("show-options", "-gv", "mouse")
+	if err == nil && code == 0 && strings.TrimSpace(out) == "on" {
+		return
+	}
+	_, _, _, _ = s.tmux.exec("set-option", "-g", "window-size", "latest")
+	_, _, _, _ = s.tmux.exec("set-option", "-g", "mouse", "on")
+}
+
+// pinWindowSizePolicy is retained as a helper forwarding to ensureGlobalOptions.
 func (s *server) pinWindowSizePolicy() {
-	s.sizePolicyOnce.Do(func() {
-		_, _, _, _ = s.tmux.exec("set-option", "-g", "window-size", "latest")
-	})
+	s.ensureGlobalOptions()
 }
 
 // auth wraps a handler with the bearer-token middleware.

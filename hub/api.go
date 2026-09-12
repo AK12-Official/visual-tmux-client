@@ -75,6 +75,7 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 		s.writeTmuxError(w, err)
 		return
 	}
+	s.ensureGlobalOptions()
 	writeJSON(w, http.StatusCreated, sess)
 }
 
