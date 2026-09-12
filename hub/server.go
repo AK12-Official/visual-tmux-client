@@ -59,6 +59,41 @@ func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return requireAuth(s.token, next)
 }
 
+// requestOriginAllowed enforces the default same-origin WebSocket policy using
+// the host the browser actually requested. This matters for wildcard listen
+// addresses such as 0.0.0.0:7690: that address is a bind target, not a browser
+// origin, so comparing Origin against it rejects every legitimate remote
+// client. Both http and https are accepted here so a TLS-terminating reverse
+// proxy can preserve Host while forwarding to the hub over plain HTTP.
+func requestOriginAllowed(origin, requestHost string) bool {
+	if origin == "" {
+		return true
+	}
+	return origin == "http://"+requestHost || origin == "https://"+requestHost
+}
+
+// attachRoute applies the dynamic same-origin policy when no explicit
+// VISUAL_TMUX_CLIENT_ORIGIN was configured. Explicit origins keep the existing
+// exact-match check inside attach. For the default policy, after validating
+// against r.Host we remove Origin from a cloned request so attach's legacy
+// exact-origin guard treats the request like an already-validated non-browser
+// client instead of comparing it to an empty configured origin.
+func (s *server) attachRoute(w http.ResponseWriter, r *http.Request) {
+	if s.origin == "" {
+		origin := r.Header.Get("Origin")
+		if !requestOriginAllowed(origin, r.Host) {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return
+		}
+		if origin != "" {
+			r = r.Clone(r.Context())
+			r.Header = r.Header.Clone()
+			r.Header.Del("Origin")
+		}
+	}
+	s.attach(w, r)
+}
+
 // handler builds the HTTP router.
 func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
@@ -67,7 +102,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("PATCH /api/hosts/{hostId}/sessions/{name}", s.auth(s.renameSession))
 	mux.HandleFunc("DELETE /api/hosts/{hostId}/sessions/{name}", s.auth(s.killSession))
 	mux.HandleFunc("POST /api/ws-ticket", s.auth(s.issueTicket))
-	mux.HandleFunc("GET /ws/{hostId}/{session}", s.attach)
+	mux.HandleFunc("GET /ws/{hostId}/{session}", s.attachRoute)
 	mux.Handle("/", s.spaHandler())
 	return mux
 }
@@ -99,7 +134,7 @@ func (s *server) untrack(a *attachment) {
 	s.mu.Unlock()
 }
 
-// shutdownAll closes every active attachment, killing its pty process.
+// shutdownAll closes every active attachment, killing their pty process.
 func (s *server) shutdownAll() {
 	s.mu.Lock()
 	list := make([]*attachment, 0, len(s.attachments))
@@ -114,7 +149,7 @@ func (s *server) shutdownAll() {
 
 // spaHandler serves the embedded frontend. Content-hashed assets under /assets/
 // are served with a long immutable cache lifetime; other real files present in
-// dist (e.g. the embedded tmux guide that vite copies from public/) are served
+// dist (e.g. the embedded guide that vite copies from public/) are served
 // as themselves; every remaining non-API, non-WS path falls back to index.html
 // (SPA fallback). Unknown /api/ and /ws/ paths are 404 rather than falling
 // through to index.html.
