@@ -134,7 +134,7 @@ func (s *server) untrack(a *attachment) {
 	s.mu.Unlock()
 }
 
-// shutdownAll closes every active attachment, killing their pty process.
+// shutdownAll closes every active attachment, killing its pty process.
 func (s *server) shutdownAll() {
 	s.mu.Lock()
 	list := make([]*attachment, 0, len(s.attachments))
@@ -149,7 +149,7 @@ func (s *server) shutdownAll() {
 
 // spaHandler serves the embedded frontend. Content-hashed assets under /assets/
 // are served with a long immutable cache lifetime; other real files present in
-// dist (e.g. the embedded guide that vite copies from public/) are served
+// dist (e.g. the embedded tmux guide that vite copies from public/) are served
 // as themselves; every remaining non-API, non-WS path falls back to index.html
 // (SPA fallback). Unknown /api/ and /ws/ paths are 404 rather than falling
 // through to index.html.
