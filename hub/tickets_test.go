@@ -8,7 +8,10 @@ import (
 
 func TestTicketRedeemOnce(t *testing.T) {
 	s := newTicketStore()
-	id, _ := s.issue("probe")
+	id, _, err := s.issue("probe")
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
 	if err := s.redeem(id, "probe"); err != nil {
 		t.Fatalf("first redeem: %v", err)
 	}
@@ -17,11 +20,21 @@ func TestTicketRedeemOnce(t *testing.T) {
 	}
 }
 
+func TestTicketRedeemEmptyID(t *testing.T) {
+	s := newTicketStore()
+	if err := s.redeem("", "probe"); !errors.Is(err, ErrTicketInvalid) {
+		t.Fatalf("expected ErrTicketInvalid for empty ticket ID, got %v", err)
+	}
+}
+
 func TestTicketExpired(t *testing.T) {
 	s := newTicketStore()
 	base := time.Now()
 	s.now = func() time.Time { return base }
-	id, _ := s.issue("probe")
+	id, _, err := s.issue("probe")
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
 	s.now = func() time.Time { return base.Add(ticketTTL + time.Second) }
 	if err := s.redeem(id, "probe"); !errors.Is(err, ErrTicketExpired) {
 		t.Fatalf("expected ErrTicketExpired, got %v", err)
@@ -30,7 +43,10 @@ func TestTicketExpired(t *testing.T) {
 
 func TestTicketSessionMismatch(t *testing.T) {
 	s := newTicketStore()
-	id, _ := s.issue("a")
+	id, _, err := s.issue("a")
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
 	if err := s.redeem(id, "b"); !errors.Is(err, ErrTicketMismatch) {
 		t.Fatalf("expected ErrTicketMismatch, got %v", err)
 	}
@@ -40,7 +56,10 @@ func TestTicketSessionMismatch(t *testing.T) {
 // consumes the ticket: the ticket is gone regardless of outcome.
 func TestTicketDeletedBeforeValidityCheck(t *testing.T) {
 	s := newTicketStore()
-	id, _ := s.issue("a")
+	id, _, err := s.issue("a")
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
 	// redeem for the wrong session -> mismatch, but ticket consumed
 	_ = s.redeem(id, "b")
 	// redeeming again (even for the right session) fails as invalid/used
@@ -53,8 +72,8 @@ func TestTicketSweep(t *testing.T) {
 	s := newTicketStore()
 	base := time.Now()
 	s.now = func() time.Time { return base }
-	s.issue("a")
-	s.issue("b")
+	_, _, _ = s.issue("a")
+	_, _, _ = s.issue("b")
 	if s.len() != 2 {
 		t.Fatalf("expected 2 live tickets, got %d", s.len())
 	}
@@ -69,10 +88,10 @@ func TestTicketSweepKeepsFresh(t *testing.T) {
 	s := newTicketStore()
 	base := time.Now()
 	s.now = func() time.Time { return base }
-	s.issue("a") // expires base + 30s
+	_, _, _ = s.issue("a") // expires base + 30s
 	s.now = func() time.Time { return base.Add(40 * time.Second) }
-	s.issue("b") // expires base + 40s + 30s = base + 70s
-	s.sweep()    // now = base + 40s: "a" (base+30s) expired, "b" still fresh
+	_, _, _ = s.issue("b") // expires base + 40s + 30s = base + 70s
+	s.sweep()              // now = base + 40s: "a" (base+30s) expired, "b" still fresh
 	if s.len() != 1 {
 		t.Fatalf("expected 1 fresh ticket to survive sweep, got %d", s.len())
 	}

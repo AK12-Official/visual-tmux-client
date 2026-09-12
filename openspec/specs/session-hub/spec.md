@@ -33,7 +33,7 @@ The hub SHALL expose an operation that returns the tmux sessions currently prese
 
 The hub SHALL expose an operation that creates a new detached tmux session. The caller MAY supply a name; when no name is supplied the hub SHALL generate a unique one. A created session SHALL start in the invoking user's home directory.
 
-A caller-supplied name SHALL be valid when all of the following hold: it is non-empty; it is valid UTF-8 containing no control characters; it contains neither `:` nor `.` (which tmux's own name and target syntax reserves) nor their full-width lookalikes `：` and `．` (which render identically to the reserved characters); it has no leading or trailing whitespace; and it is at most 64 characters long, counted in code points. The hub SHALL accept any valid name, including names outside ASCII such as CJK text.
+A caller-supplied name SHALL be valid when all of the following hold: it is non-empty; it is valid UTF-8 containing no control characters; it contains neither `:` nor `.` (which tmux's own name and target syntax reserves), neither `/` nor `\` (reserved path separators), nor full-width lookalikes `：` and `．` (which render identically to the reserved characters); it has no leading or trailing whitespace; and it is at most 64 characters long, counted in code points. The hub SHALL accept any valid name, including names outside ASCII such as CJK text.
 
 #### Scenario: Create with an explicit name
 
@@ -62,7 +62,7 @@ A caller-supplied name SHALL be valid when all of the following hold: it is non-
 
 #### Scenario: Name is rejected
 
-- **WHEN** a caller requests session creation with a name that contains a control character, `:` or `.` or their full-width lookalikes, leading or trailing whitespace, or that exceeds 64 code points
+- **WHEN** a caller requests session creation with a name that contains a control character, `:`, `.`, `/`, `\` or full-width lookalikes, leading or trailing whitespace, or that exceeds 64 code points
 - **THEN** the hub does not invoke tmux and returns a validation error naming the constraint that was violated
 
 ### Requirement: Session renaming
@@ -257,12 +257,72 @@ The hub SHALL authorize terminal attachment using a short-lived, single-use tick
 
 ### Requirement: Cross-origin connection rejection
 
-The hub SHALL reject terminal connections whose declared origin is not one it is configured to serve, so that a page on an unrelated site cannot open a terminal on the user's behalf.
+The hub SHALL reject terminal connections whose declared origin is not authorized by its effective origin policy, so that a page on an unrelated site cannot open a terminal on the user's behalf. With `VISUAL_TMUX_CLIENT_ORIGIN` unset or empty, the hub SHALL authorize browser HTTP and HTTPS origins whose host and port match the request Host, comparing the host-and-port strings case-insensitively, independently of the listening address and backend transport scheme. This default policy SHALL NOT infer a public host from forwarded headers.
+
+With a non-empty `VISUAL_TMUX_CLIENT_ORIGIN`, the hub SHALL require every non-empty declared Origin to equal the configured value exactly. This explicit policy SHALL take precedence over request-host matching and SHALL permit the configured origin when a reverse proxy forwards a different Host. In either mode, an absent or empty Origin SHALL remain compatible with non-browser clients. Origin acceptance SHALL NOT replace the existing session-bound single-use ticket authorization.
+
+For an otherwise valid WebSocket upgrade request to a supported terminal route, origin rejection SHALL return HTTP 403 before upgrading the connection, redeeming its ticket, or attaching to a session.
 
 #### Scenario: Foreign origin
 
-- **WHEN** a terminal connection arrives declaring an origin the hub is not configured to serve
-- **THEN** the hub refuses the connection before attaching to any session
+- **WHEN** a terminal connection arrives declaring an origin the effective policy does not authorize
+- **THEN** the hub returns HTTP 403 before upgrading or attaching to any session
+- **AND** a valid ticket supplied with the rejected request remains unconsumed
+
+#### Scenario: Wildcard listening address
+
+- **WHEN** the hub is configured to listen on `0.0.0.0:7690` with no explicit origin and a browser uses the actual server IP and port for both Origin and request Host with a valid ticket for an existing session
+- **THEN** the hub accepts the connection and attaches to that session, emitting the terminal ready message
+
+#### Scenario: IPv6 and hostname matching
+
+- **WHEN** no explicit origin is configured and a valid browser origin's host-and-port equals request Host case-insensitively, including bracketed IPv6 addresses
+- **THEN** origin validation permits the connection subject to ticket authorization
+
+#### Scenario: Different port
+
+- **WHEN** no explicit origin is configured and Origin specifies the same hostname but a different port from request Host
+- **THEN** the hub rejects the origin with HTTP 403
+
+#### Scenario: TLS termination with preserved Host
+
+- **WHEN** no explicit origin is configured and an HTTPS browser origin matches the public Host preserved by a proxy forwarding HTTP to the hub
+- **THEN** origin validation permits the connection subject to ticket authorization
+
+#### Scenario: Forwarded headers do not authorize a foreign origin
+
+- **WHEN** no explicit origin is configured and a foreign Origin matches a forwarded-host header but not request Host
+- **THEN** the hub rejects the origin with HTTP 403
+
+#### Scenario: Explicit origin with rewritten Host
+
+- **WHEN** Origin exactly equals the configured public origin and a proxy forwards a different internal Host
+- **THEN** origin validation permits the connection subject to ticket authorization
+
+#### Scenario: Explicit origin overrides request-host matching
+
+- **WHEN** an explicit origin is configured and a different declared Origin matches request Host
+- **THEN** the hub rejects the origin with HTTP 403
+
+#### Scenario: Explicit origin includes the scheme
+
+- **WHEN** the configured origin uses HTTPS and the declared origin differs only by using HTTP
+- **THEN** the hub rejects the origin with HTTP 403
+
+#### Scenario: Originless client
+
+- **WHEN** a client omits Origin or supplies an empty Origin under either policy
+- **THEN** origin validation permits the connection subject to ticket authorization
+
+#### Scenario: Opaque or unparseable origin under the default policy
+
+- **WHEN** no explicit origin is configured and a client declares `null` or an origin that cannot be parsed as a URL
+- **THEN** the hub rejects the origin with HTTP 403
+
+#### Scenario: Allowed origin does not authorize a terminal
+
+- **WHEN** a client passes origin validation but supplies a missing, expired, reused, or wrong-session ticket
+- **THEN** the hub refuses terminal attachment and starts no PTY for that request
 
 ### Requirement: Output backpressure
 

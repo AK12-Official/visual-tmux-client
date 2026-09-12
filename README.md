@@ -15,7 +15,7 @@
 - Manual session ordering with drag reorder and pin-to-top, plus a collapsible session sidebar.
 - Leveled, auto-expiring toast notifications for action results and terminal events.
 - Built-in Chinese tmux guide available from the in-app help button.
-- Session names accept non-ASCII text such as Chinese; only `:` and `.` are reserved.
+- Session names accept non-ASCII text such as Chinese (up to 64 characters); `:`/`.`, `/`/`\`, full-width lookalikes, edge whitespace, and control characters are reserved/disallowed.
 - Preserve terminal state across browser disconnects by leaving tmux sessions running.
 - Use bearer-token authentication and short-lived, single-use WebSocket tickets.
 - Ship the web UI inside one dependency-free application binary.
@@ -55,7 +55,7 @@ Run `./visual-tmux-client --help` to see all flags and environment variables.
 | --- | --- | --- |
 | `--addr` | `127.0.0.1:7690` | HTTP listen address |
 | `VISUAL_TMUX_CLIENT_TOKEN` | generated at startup | Shared bearer token used by the browser UI |
-| `VISUAL_TMUX_CLIENT_ORIGIN` | `http://<listen-address>` | Exact browser origin allowed for WebSocket upgrades |
+| `VISUAL_TMUX_CLIENT_ORIGIN` | Unset (matches request host and port) | Allowed browser origin for WebSocket upgrades; defaults to request host and port. Set to an exact origin (e.g. `https://tmux.example.com`) when behind a reverse proxy that rewrites `Host`, or preserve public `Host` at the proxy |
 | `VISUAL_TMUX_CLIENT_TMUX_PATH` | resolved from `PATH` | Explicit path to the tmux executable |
 
 The default loopback binding is intentional. If you expose the service to another machine, put it behind HTTPS, use a strong stable token, and set `VISUAL_TMUX_CLIENT_ORIGIN` to the exact public origin. See [SECURITY.md](SECURITY.md) before exposing it to a network.

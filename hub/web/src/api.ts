@@ -25,11 +25,19 @@ export function getToken(): string | null {
 }
 
 export function setToken(token: string): void {
-  localStorage.setItem(TOKEN_KEY, token)
+  try {
+    localStorage.setItem(TOKEN_KEY, token)
+  } catch {
+    /* ignore storage quota */
+  }
 }
 
 export function clearToken(): void {
-  localStorage.removeItem(TOKEN_KEY)
+  try {
+    localStorage.removeItem(TOKEN_KEY)
+  } catch {
+    /* ignore storage quota */
+  }
 }
 
 // The token travels in an Authorization header, and browsers only accept

@@ -101,7 +101,11 @@ const fontSize = ref(loadFontSize())
 function setFontSize(px: number): void {
   const clamped = Math.min(FONT_MAX, Math.max(FONT_MIN, px))
   fontSize.value = clamped
-  localStorage.setItem(FONT_SIZE_KEY, String(clamped))
+  try {
+    localStorage.setItem(FONT_SIZE_KEY, String(clamped))
+  } catch {
+    /* ignore storage quota */
+  }
 }
 
 const mainEl = ref<HTMLElement | null>(null)
@@ -180,7 +184,11 @@ const sidebarCollapsed = ref(localStorage.getItem(SIDEBAR_KEY) === '1')
 
 function toggleSidebar(): void {
   sidebarCollapsed.value = !sidebarCollapsed.value
-  localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed.value ? '1' : '0')
+  try {
+    localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed.value ? '1' : '0')
+  } catch {
+    /* ignore storage quota */
+  }
 }
 
 // --- In-app help ---
@@ -201,13 +209,35 @@ function stopPolling() {
   }
 }
 
+let refreshSeq = 0
+
 async function refresh() {
   if (!hasToken.value) return
+  const seq = ++refreshSeq
   try {
-    sessions.value = await listSessions()
+    const list = await listSessions()
+    if (seq !== refreshSeq) return
+    sessions.value = list
     listError.value = ''
     startPolling()
+
+    // Prune dead panels for sessions that disappeared externally (e.g. killed via CLI).
+    const liveNames = new Set(list.map((s) => s.name))
+    const deadNames = new Set<string>()
+    for (const name of Object.keys(panelIds.value)) {
+      if (!liveNames.has(name) && selected.value !== name) deadNames.add(name)
+    }
+    for (const name of Object.keys(connStates.value)) {
+      if (!liveNames.has(name) && selected.value !== name) deadNames.add(name)
+    }
+    for (const name of Object.keys(activity.value)) {
+      if (!liveNames.has(name) && selected.value !== name) deadNames.add(name)
+    }
+    for (const name of deadNames) {
+      dropPanel(name)
+    }
   } catch (err) {
+    if (seq !== refreshSeq) return
     if (err instanceof AuthError) {
       handleAuthFailure()
     } else {
@@ -216,12 +246,24 @@ async function refresh() {
   }
 }
 
+function cleanupSessionState() {
+  for (const name of Object.keys(panelIds.value)) {
+    disposeTerminalSession(name)
+  }
+  panelIds.value = nameMap()
+  connStates.value = nameMap()
+  activity.value = nameMap()
+  for (const timer of activityTimers.values()) clearTimeout(timer)
+  activityTimers.clear()
+}
+
 function handleAuthFailure() {
   stopPolling()
   clearToken()
   token.value = ''
   selected.value = null
   sessions.value = []
+  cleanupSessionState()
   authError.value = 'Authentication failed. Re-enter the token.'
 }
 
@@ -267,6 +309,7 @@ function logout() {
   token.value = ''
   selected.value = null
   sessions.value = []
+  cleanupSessionState()
 }
 
 // One-click creation: the hub assigns the default name (made unique by its
@@ -292,6 +335,30 @@ async function onRename(oldName: string, newName: string) {
       delete next[oldName]
       panelIds.value = next
     }
+    if (connStates.value[oldName] !== undefined) {
+      const nextStates = nameMap(connStates.value, { [newName]: connStates.value[oldName] })
+      delete nextStates[oldName]
+      connStates.value = nextStates
+    }
+    if (activity.value[oldName] !== undefined) {
+      const nextAct = nameMap(activity.value, { [newName]: activity.value[oldName] })
+      delete nextAct[oldName]
+      activity.value = nextAct
+    }
+    const timer = activityTimers.get(oldName)
+    if (timer) {
+      clearTimeout(timer)
+      activityTimers.delete(oldName)
+      activityTimers.set(
+        newName,
+        setTimeout(() => {
+          activityTimers.delete(newName)
+          const next = nameMap(activity.value)
+          delete next[newName]
+          activity.value = next
+        }, ACTIVITY_DECAY_MS),
+      )
+    }
     // Follow the rename: `selected` is the viewed terminal's identity — it
     // names the ws ticket and the header. Left on the old name, the polled
     // list no longer contains it, so a live session reads as ended and every
@@ -316,10 +383,26 @@ async function onRename(oldName: string, newName: string) {
 // terminal is disposed explicitly, or its xterm instance, scrollback and
 // ResizeObserver would be retained for the life of the page.
 function dropPanel(name: string): void {
-  if (panelIds.value[name] === undefined) return
-  const next = nameMap(panelIds.value)
-  delete next[name]
-  panelIds.value = next
+  if (panelIds.value[name] !== undefined) {
+    const next = nameMap(panelIds.value)
+    delete next[name]
+    panelIds.value = next
+  }
+  if (connStates.value[name] !== undefined) {
+    const nextStates = nameMap(connStates.value)
+    delete nextStates[name]
+    connStates.value = nextStates
+  }
+  if (activity.value[name] !== undefined) {
+    const nextAct = nameMap(activity.value)
+    delete nextAct[name]
+    activity.value = nextAct
+  }
+  const timer = activityTimers.get(name)
+  if (timer) {
+    clearTimeout(timer)
+    activityTimers.delete(name)
+  }
   disposeTerminalSession(name)
 }
 
@@ -465,6 +548,7 @@ onBeforeUnmount(() => {
               class="app__term-btn"
               title="decrease font size"
               aria-label="Decrease terminal font size"
+              :disabled="fontSize <= FONT_MIN"
               @click="setFontSize(fontSize - 1)"
             >A−</button>
             <span class="app__term-fontsize" aria-live="polite">{{ fontSize }} px</span>
@@ -472,6 +556,7 @@ onBeforeUnmount(() => {
               class="app__term-btn"
               title="increase font size"
               aria-label="Increase terminal font size"
+              :disabled="fontSize >= FONT_MAX"
               @click="setFontSize(fontSize + 1)"
             >A+</button>
             <button
@@ -500,11 +585,11 @@ onBeforeUnmount(() => {
               @activity="onActivity"
             />
           </KeepAlive>
-          <ToastStack />
         </main>
       </div>
     </template>
 
+    <ToastStack />
     <HelpModal :open="helpOpen" @close="helpOpen = false" />
   </div>
 </template>
@@ -633,6 +718,12 @@ onBeforeUnmount(() => {
 .app__term-btn:hover {
   color: var(--th-text-hi);
   border-color: var(--th-text-lo);
+}
+.app__term-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+  border-color: var(--th-border);
+  color: var(--th-text-lo);
 }
 .app__term-fontsize {
   font-size: 0.72rem;

@@ -24,8 +24,8 @@ export function loadOrder(): OrderState {
     if ((v.mode === 'default' || v.mode === 'manual') && Array.isArray(v.order) && Array.isArray(v.pinned)) {
       return {
         mode: v.mode,
-        order: v.order.filter((n): n is string => typeof n === 'string'),
-        pinned: v.pinned.filter((n): n is string => typeof n === 'string'),
+        order: [...new Set(v.order.filter((n): n is string => typeof n === 'string' && n.length > 0))],
+        pinned: [...new Set(v.pinned.filter((n): n is string => typeof n === 'string' && n.length > 0))],
       }
     }
   } catch {
@@ -35,7 +35,11 @@ export function loadOrder(): OrderState {
 }
 
 export function saveOrder(state: OrderState): void {
-  localStorage.setItem(ORDER_KEY, JSON.stringify(state))
+  try {
+    localStorage.setItem(ORDER_KEY, JSON.stringify(state))
+  } catch {
+    /* ignore storage quota / restricted storage */
+  }
 }
 
 /** applyOrder sorts sessions for display in manual mode: pinned sessions

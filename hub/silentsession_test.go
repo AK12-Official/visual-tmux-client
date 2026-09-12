@@ -42,7 +42,7 @@ func TestDisconnectReleasesSilentSession(t *testing.T) {
 	runCommand(tmux, "-L", sock, "set-option", "-g", "status", "off")
 	runCommand(tmux, "-L", sock, "set-option", "-g", "status-interval", "0")
 
-	id, _ := s.tickets.issue("quiet")
+	id, _, _ := s.tickets.issue("quiet")
 	conn := dialWS(t, ts, fmt.Sprintf("/ws/local/quiet?ticket=%s&cols=80&rows=24", id), nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

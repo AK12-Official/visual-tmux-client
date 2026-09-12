@@ -57,10 +57,10 @@ func bearerToken(r *http.Request) string {
 
 // requireAuth returns middleware enforcing the shared bearer token. A request
 // that fails authentication never reaches the wrapped handler, so no tmux
-// process is ever spawned on a 401.
+// process is ever spawned on a 401. An empty expected token fails closed.
 func requireAuth(expected string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !constantTimeEqual(bearerToken(r), expected) {
+		if expected == "" || !constantTimeEqual(bearerToken(r), expected) {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -69,9 +69,10 @@ func requireAuth(expected string, next http.HandlerFunc) http.HandlerFunc {
 }
 
 // checkOrigin reports whether a WebSocket upgrade's Origin header is
-// acceptable. Requests without an Origin (non-browser clients such as curl and
-// CLI websocket tools) are allowed; a declared origin must equal the configured
-// public origin exactly, so a page on an unrelated site cannot open a terminal.
+// acceptable for an explicitly configured origin. Requests without an Origin
+// (non-browser clients such as curl and CLI websocket tools) are allowed; a
+// declared origin must equal the configured public origin exactly, so a page
+// on an unrelated site cannot open a terminal.
 func checkOrigin(origin, configured string) bool {
 	if origin == "" {
 		return true

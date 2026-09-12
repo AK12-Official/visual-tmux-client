@@ -3,8 +3,11 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/coder/websocket"
 )
 
 func TestStartupBanner(t *testing.T) {
@@ -49,13 +52,25 @@ func TestBrowserURL(t *testing.T) {
 }
 
 func TestParseConfigOriginPolicy(t *testing.T) {
-	t.Setenv("VISUAL_TMUX_CLIENT_ORIGIN", "")
+	if orig, set := os.LookupEnv("VISUAL_TMUX_CLIENT_ORIGIN"); set {
+		os.Unsetenv("VISUAL_TMUX_CLIENT_ORIGIN")
+		t.Cleanup(func() { os.Setenv("VISUAL_TMUX_CLIENT_ORIGIN", orig) })
+	}
 	cfg, err := parseConfig([]string{"--addr", "0.0.0.0:7690"})
 	if err != nil {
-		t.Fatalf("parseConfig: %v", err)
+		t.Fatalf("parseConfig unset origin: %v", err)
 	}
 	if cfg.origin != "" {
-		t.Fatalf("default origin should be dynamic same-origin, got %q", cfg.origin)
+		t.Fatalf("unset origin should be empty, got %q", cfg.origin)
+	}
+
+	t.Setenv("VISUAL_TMUX_CLIENT_ORIGIN", "")
+	cfg, err = parseConfig([]string{"--addr", "0.0.0.0:7690"})
+	if err != nil {
+		t.Fatalf("parseConfig empty origin: %v", err)
+	}
+	if cfg.origin != "" {
+		t.Fatalf("empty origin should be empty, got %q", cfg.origin)
 	}
 
 	t.Setenv("VISUAL_TMUX_CLIENT_ORIGIN", "https://tmux.example.com")
@@ -68,34 +83,27 @@ func TestParseConfigOriginPolicy(t *testing.T) {
 	}
 }
 
-func TestRequestOriginAllowed(t *testing.T) {
-	const host = "192.0.2.10:7690"
-	for _, origin := range []string{"", "http://" + host, "https://" + host} {
-		if !requestOriginAllowed(origin, host) {
-			t.Errorf("expected origin %q to be allowed for host %q", origin, host)
-		}
+func TestDefaultOriginRealRouteSameHost(t *testing.T) {
+	s := newServer(&config{addr: "127.0.0.1:0", origin: ""}, "token")
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	conn, resp, err := dialWSResp(t, ts, "/ws/local/demo", http.Header{
+		"Origin": []string{ts.URL},
+	})
+	if err != nil {
+		t.Fatalf("real-route same-host handshake failed: %v", err)
 	}
-	for _, origin := range []string{
-		"http://evil.example",
-		"http://evil.example:7690",
-		"http://192.0.2.11:7690",
-	} {
-		if requestOriginAllowed(origin, host) {
-			t.Errorf("expected foreign origin %q to be rejected for host %q", origin, host)
-		}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("expected status 101, got %d", resp.StatusCode)
 	}
-}
 
-func TestAttachRouteRejectsForeignOriginBeforeUpgrade(t *testing.T) {
-	s := &server{origin: ""}
-	req := httptest.NewRequest(http.MethodGet, "http://192.0.2.10:7690/ws/local/demo", nil)
-	req.Host = "192.0.2.10:7690"
-	req.Header.Set("Origin", "http://evil.example:7690")
-	rec := httptest.NewRecorder()
-
-	s.attachRoute(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("foreign origin: expected 403, got %d", rec.Code)
+	mt, data := readFrame(t, conn)
+	if mt != websocket.MessageText {
+		t.Fatalf("expected text frame, got %d", mt)
+	}
+	if frameType(t, data) != "error" {
+		t.Fatalf("expected error frame, got %s", frameType(t, data))
 	}
 }

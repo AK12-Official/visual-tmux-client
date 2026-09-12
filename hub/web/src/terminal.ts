@@ -7,7 +7,7 @@
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
-import { issueTicket } from './api'
+import { issueTicket, AuthError } from './api'
 
 export type ConnState = 'connecting' | 'connected' | 'reconnecting' | 'ended'
 
@@ -261,6 +261,8 @@ export class TerminalSession {
         }
         this.attempt = 0
         this.hooks.onState('connected')
+        const { cols, rows } = this.proposedSize()
+        this.sendResize(cols, rows)
       }
       ws.onmessage = (ev) => {
         if (gen !== this.generation) return
@@ -273,7 +275,10 @@ export class TerminalSession {
       }
       ws.onclose = () => {
         if (gen !== this.generation) return
-        if (!this.ended && !this.disposed) this.scheduleReconnect()
+        if (!this.ended && !this.disposed) {
+          this.hooks.onState('reconnecting')
+          this.scheduleReconnect()
+        }
       }
       ws.onerror = () => {
         // onclose follows and drives reconnection
@@ -281,21 +286,29 @@ export class TerminalSession {
     } catch (err) {
       if (this.disposed || gen !== this.generation) return
       const message = err instanceof Error ? err.message : String(err)
+      if (err instanceof AuthError || message.includes('AUTH_FAILED')) {
+        this.ended = true
+        this.hooks.onState('ended', 'Authentication failed')
+        this.hooks.onNotice('Session connection ended: authentication failed.')
+        return
+      }
       if (message.includes('session_not_found')) {
         // The session is gone; no retry can ever succeed. End instead of
         // retrying quietly forever (the spec forbids silent indefinite retry).
         this.ended = true
-        this.hooks.onState('ended')
+        this.hooks.onState('ended', `Session "${this.session}" no longer exists.`)
         this.hooks.onNotice(`Session "${this.session}" no longer exists.`)
         return
       }
-      this.hooks.onNotice(message)
+      if (this.attempt === 0) {
+        this.hooks.onNotice(message)
+      }
       this.scheduleReconnect()
     }
   }
 
   private handleControl(raw: string): void {
-    let msg: { type: string; message?: string; retryable?: boolean }
+    let msg: { type: string; message?: string; retryable?: boolean; code?: number | null }
     try {
       msg = JSON.parse(raw)
     } catch {
@@ -306,7 +319,10 @@ export class TerminalSession {
         break
       case 'exit':
         this.ended = true
-        this.hooks.onState('ended')
+        this.hooks.onState(
+          'ended',
+          msg.code != null && msg.code !== 0 ? `Process exited with code ${msg.code}` : undefined,
+        )
         break
       case 'error':
         if (msg.message) this.hooks.onNotice(msg.message)

@@ -15,7 +15,7 @@
 - 手动排序（拖拽 + 置顶），侧栏可收起。
 - 分级、自动过期的 Toast 通知。
 - 应用内帮助按钮内置中文 tmux 使用指南。
-- 会话名支持中文等非 ASCII 字符，仅保留 `:` 和 `.` 为禁用字符。
+- 会话名支持中文等非 ASCII 字符（最长 64 字符）；禁用 `:`、`.`、`/`、`\`、全角同形字符、首尾空格和控制字符。
 - 浏览器断开后保留 tmux 会话及其状态。
 - 使用 Bearer Token 认证和短时、一次性的 WebSocket 票据。
 - 将整个网页界面打包进单个应用程序二进制文件。
@@ -55,7 +55,7 @@ VISUAL_TMUX_CLIENT_TOKEN="$(openssl rand -base64 32)" ./visual-tmux-client
 | --- | --- | --- |
 | `--addr` | `127.0.0.1:7690` | HTTP 监听地址 |
 | `VISUAL_TMUX_CLIENT_TOKEN` | 启动时随机生成 | 浏览器界面使用的共享 Bearer Token |
-| `VISUAL_TMUX_CLIENT_ORIGIN` | `http://<监听地址>` | 允许发起 WebSocket 连接的准确浏览器来源 |
+| `VISUAL_TMUX_CLIENT_ORIGIN` | 未设置（匹配请求的主机与端口） | 允许发起 WebSocket 连接的浏览器来源；默认匹配请求的主机与端口。当反向代理重写 `Host` 时，可设置为准确的公网来源（如 `https://tmux.example.com`），或在代理层保留公网 `Host` |
 | `VISUAL_TMUX_CLIENT_TMUX_PATH` | 从 `PATH` 中查找 | 指定 tmux 可执行文件路径 |
 
 默认只监听回环地址是有意的安全设计。如需通过其他机器访问，请在服务前部署 HTTPS 反向代理、使用高强度固定 Token，并将 `VISUAL_TMUX_CLIENT_ORIGIN` 设置为准确的公网 HTTPS 来源。暴露到网络前请先阅读 [SECURITY.md](SECURITY.md)。
