@@ -8,6 +8,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { issueTicket, AuthError } from './api'
+import { getConfig } from './config'
 
 export type ConnState = 'connecting' | 'connected' | 'reconnecting' | 'ended'
 
@@ -46,12 +47,21 @@ const THEME = {
   brightWhite: '#ffffff',
 }
 
-const RESIZE_DEBOUNCE_MS = 100
-const MAX_RECONNECT_DELAY_MS = 3000
-const BASE_RECONNECT_DELAY_MS = 500
-// Activity events only drive a highlight, so a coarse throttle is enough and
-// keeps the hook cheap even under heavy output.
-const ACTIVITY_THROTTLE_MS = 500
+export function computeReconnectDelay(
+  attempt: number,
+  reconnectCfg = getConfig().web.reconnect,
+): number {
+  const safeAttempt = Math.max(0, Number.isFinite(attempt) ? Math.floor(attempt) : 0)
+  return Math.min(reconnectCfg.max_delay, reconnectCfg.initial_delay * Math.pow(2, safeAttempt))
+}
+
+export function shouldThrottleActivity(
+  lastActivityAt: number,
+  now: number,
+  throttle = getConfig().web.activity_throttle,
+): boolean {
+  return now - lastActivityAt < throttle
+}
 
 // Every live attachment, so a rename can reach the ones whose view is parked in
 // the KeepAlive cache. A deactivated component never re-renders, so no prop can
@@ -94,22 +104,30 @@ export class TerminalSession {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private observer: ResizeObserver
   private lastActivityAt = 0
+  private container: HTMLElement
+  private session: string
+  private hooks: TerminalHooks
 
   constructor(
-    private container: HTMLElement,
-    private session: string,
-    private hooks: TerminalHooks,
-    fontSize = 13,
+    container: HTMLElement,
+    session: string,
+    hooks: TerminalHooks,
+    fontSize?: number,
   ) {
+    this.container = container
+    this.session = session
+    this.hooks = hooks
     liveSessions.add(this)
+    const termCfg = getConfig().web.terminal
+    const resolvedFontSize = fontSize ?? termCfg.font_size
     this.term = new Terminal({
       // The unicode API (unicode11 addon + term.unicode.activeVersion) is a
       // proposed API in xterm 6.x; accessing it throws unless this is set.
       allowProposedApi: true,
-      scrollback: 5000,
+      scrollback: termCfg.scrollback,
       fontFamily:
         'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-      fontSize,
+      fontSize: resolvedFontSize,
       theme: THEME,
     })
     this.fit = new FitAddon()
@@ -149,7 +167,8 @@ export class TerminalSession {
       // banner and aborts the rest of xterm's key handling. Swallow the key in
       // that case too, because falling through would send 0x03 (SIGINT) to the
       // shell, which is emphatically not what a copy gesture asked for.
-      const clipboard = navigator.clipboard as Clipboard | undefined
+      const clipboard =
+        typeof navigator !== 'undefined' ? (navigator.clipboard as Clipboard | undefined) : undefined
       if (!clipboard) {
         this.hooks.onNotice(
           'Copy failed: the browser exposes no clipboard outside a secure context (HTTPS or localhost).',
@@ -168,7 +187,7 @@ export class TerminalSession {
     // Container resize -> debounced fit -> term.onResize reports the new size.
     this.observer = new ResizeObserver(() => {
       if (this.resizeTimer) clearTimeout(this.resizeTimer)
-      this.resizeTimer = setTimeout(() => this.refit(), RESIZE_DEBOUNCE_MS)
+      this.resizeTimer = setTimeout(() => this.refit(), getConfig().web.resize_debounce)
     })
     this.observer.observe(container)
 
@@ -176,17 +195,46 @@ export class TerminalSession {
       this.sendResize(cols, rows)
     })
 
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', this.handleOnline)
+      window.addEventListener('offline', this.handleOffline)
+    }
+
     this.refit()
     void this.connect()
   }
 
-  private refit(): void {
-    if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
+  private handleOnline = (): void => {
+    if (this.disposed || this.ended) return
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) return
+    this.attempt = 0
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    this.hooks.onState('reconnecting', 'Network restored, reconnecting…')
+    void this.connect()
+  }
+
+  private handleOffline = (): void => {
+    if (this.disposed || this.ended) return
+    this.hooks.onState('reconnecting', 'Network offline')
+  }
+
+  refit(): void {
+    if (this.disposed) return
+    if (this.container && this.container.clientWidth > 0 && this.container.clientHeight > 0) {
       try {
         this.fit.fit()
       } catch {
-        // transient zero-size layout glitch
+        // transient zero-size or detachment layout glitch
       }
+    }
+  }
+
+  focus(): void {
+    if (!this.disposed && this.term && typeof this.term.focus === 'function') {
+      this.term.focus()
     }
   }
 
@@ -216,7 +264,7 @@ export class TerminalSession {
   private fireActivity(): void {
     if (!this.hooks.onActivity) return
     const now = Date.now()
-    if (now - this.lastActivityAt < ACTIVITY_THROTTLE_MS) return
+    if (shouldThrottleActivity(this.lastActivityAt, now)) return
     this.lastActivityAt = now
     this.hooks.onActivity()
   }
@@ -227,12 +275,24 @@ export class TerminalSession {
   // reconnecting in the background) — negotiating NaN/0 would resize tmux to
   // a bogus geometry for every client. Fall back to xterm's live grid.
   private proposedSize(): { cols: number; rows: number } {
-    const d = this.fit.proposeDimensions()
-    if (d && Number.isFinite(d.cols) && Number.isFinite(d.rows) && d.cols >= 1 && d.rows >= 1) {
-      return { cols: d.cols, rows: d.rows }
+    try {
+      const d = this.fit.proposeDimensions()
+      if (d && Number.isFinite(d.cols) && Number.isFinite(d.rows)) {
+        const cols = Math.floor(d.cols)
+        const rows = Math.floor(d.rows)
+        if (cols >= 1 && rows >= 1) {
+          return { cols, rows }
+        }
+      }
+    } catch {
+      // fit addon may throw if container is detached, hidden, or zero-sized
     }
-    if (this.term.cols >= 1 && this.term.rows >= 1) {
-      return { cols: this.term.cols, rows: this.term.rows }
+    if (this.term && Number.isFinite(this.term.cols) && Number.isFinite(this.term.rows)) {
+      const cols = Math.floor(this.term.cols)
+      const rows = Math.floor(this.term.rows)
+      if (cols >= 1 && rows >= 1) {
+        return { cols, rows }
+      }
     }
     return { cols: 80, rows: 24 }
   }
@@ -251,6 +311,18 @@ export class TerminalSession {
       const url =
         `${proto}://${location.host}/ws/local/${encodeURIComponent(this.session)}` +
         `?ticket=${encodeURIComponent(ticket)}&cols=${cols}&rows=${rows}`
+      if (this.ws) {
+        this.ws.onopen = null
+        this.ws.onmessage = null
+        this.ws.onclose = null
+        this.ws.onerror = null
+        try {
+          this.ws.close()
+        } catch {
+          /* ignore */
+        }
+        this.ws = null
+      }
       const ws = new WebSocket(url)
       ws.binaryType = 'arraybuffer'
       this.ws = ws
@@ -308,12 +380,16 @@ export class TerminalSession {
   }
 
   private handleControl(raw: string): void {
-    let msg: { type: string; message?: string; retryable?: boolean; code?: number | null }
+    let parsed: unknown
     try {
-      msg = JSON.parse(raw)
+      parsed = JSON.parse(raw)
     } catch {
       return
     }
+    if (!parsed || typeof parsed !== 'object') return
+    const msg = parsed as { type?: unknown; message?: unknown; retryable?: unknown; code?: unknown }
+    if (typeof msg.type !== 'string') return
+
     switch (msg.type) {
       case 'ready':
         break
@@ -321,17 +397,19 @@ export class TerminalSession {
         this.ended = true
         this.hooks.onState(
           'ended',
-          msg.code != null && msg.code !== 0 ? `Process exited with code ${msg.code}` : undefined,
+          typeof msg.code === 'number' && msg.code !== 0 ? `Process exited with code ${msg.code}` : undefined,
         )
         break
-      case 'error':
-        if (msg.message) this.hooks.onNotice(msg.message)
-        if (!msg.retryable) {
+      case 'error': {
+        const errorMsg = typeof msg.message === 'string' ? msg.message : 'Unknown server error'
+        this.hooks.onNotice(errorMsg)
+        if (msg.retryable === false) {
           this.ended = true
           // Carry the refusal reason so the ended overlay can explain itself.
-          this.hooks.onState('ended', msg.message)
+          this.hooks.onState('ended', errorMsg)
         }
         break
+      }
       case 'pong':
         break
     }
@@ -339,7 +417,7 @@ export class TerminalSession {
 
   private scheduleReconnect(): void {
     if (this.ended || this.disposed) return
-    const delay = Math.min(MAX_RECONNECT_DELAY_MS, BASE_RECONNECT_DELAY_MS * Math.pow(2, this.attempt))
+    const delay = computeReconnectDelay(this.attempt)
     this.attempt++
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = setTimeout(() => {
@@ -364,7 +442,14 @@ export class TerminalSession {
   }
 
   private sendResize(cols: number, rows: number): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (
+      Number.isInteger(cols) &&
+      Number.isInteger(rows) &&
+      cols >= 1 &&
+      rows >= 1 &&
+      this.ws &&
+      this.ws.readyState === WebSocket.OPEN
+    ) {
       this.ws.send(JSON.stringify({ type: 'resize', cols, rows }))
     }
   }
@@ -377,7 +462,15 @@ export class TerminalSession {
     if (this.resizeTimer) clearTimeout(this.resizeTimer)
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.observer.disconnect()
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('online', this.handleOnline)
+      window.removeEventListener('offline', this.handleOffline)
+    }
     if (this.ws) {
+      this.ws.onopen = null
+      this.ws.onmessage = null
+      this.ws.onclose = null
+      this.ws.onerror = null
       try {
         this.ws.close()
       } catch {

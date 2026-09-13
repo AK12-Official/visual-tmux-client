@@ -20,12 +20,19 @@ export function loadOrder(): OrderState {
   try {
     const raw = localStorage.getItem(ORDER_KEY)
     if (!raw) return { mode: 'default', order: [], pinned: [] }
-    const v = JSON.parse(raw) as Partial<OrderState>
-    if ((v.mode === 'default' || v.mode === 'manual') && Array.isArray(v.order) && Array.isArray(v.pinned)) {
-      return {
-        mode: v.mode,
-        order: [...new Set(v.order.filter((n): n is string => typeof n === 'string' && n.length > 0))],
-        pinned: [...new Set(v.pinned.filter((n): n is string => typeof n === 'string' && n.length > 0))],
+    const v = JSON.parse(raw) as unknown
+    if (v && typeof v === 'object') {
+      const parsed = v as Partial<OrderState>
+      if (
+        (parsed.mode === 'default' || parsed.mode === 'manual') &&
+        Array.isArray(parsed.order) &&
+        Array.isArray(parsed.pinned)
+      ) {
+        return {
+          mode: parsed.mode,
+          order: [...new Set(parsed.order.filter((n): n is string => typeof n === 'string' && n.length > 0))],
+          pinned: [...new Set(parsed.pinned.filter((n): n is string => typeof n === 'string' && n.length > 0))],
+        }
       }
     }
   } catch {

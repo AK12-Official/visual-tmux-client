@@ -14,7 +14,7 @@ const LEVEL_TAG: Record<string, string> = {
   <!-- aria-live so screen readers announce arrivals; the stack grows upward:
        the container is anchored at the bottom and each new toast is appended,
        pushing the earlier ones up. -->
-  <div class="toast-stack" aria-live="polite">
+  <div class="toast-stack" role="region" aria-label="Notifications" aria-live="polite">
     <div
       v-for="t in toasts"
       :key="t.id"
@@ -25,7 +25,7 @@ const LEVEL_TAG: Record<string, string> = {
     >
       <span class="toast__tag">{{ LEVEL_TAG[t.level] }}</span>
       <span class="toast__message">{{ t.message }}</span>
-      <button class="toast__close" aria-label="dismiss" @click="dismiss(t.id)">✕</button>
+      <button class="toast__close" type="button" aria-label="Dismiss notification" @click="dismiss(t.id)">✕</button>
     </div>
   </div>
 </template>

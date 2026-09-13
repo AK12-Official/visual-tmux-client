@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { marked } from 'marked'
 import { notify } from '../toasts'
 
 const props = defineProps<{ open: boolean }>()
@@ -20,7 +19,10 @@ let load: Promise<void> | null = null
 async function ensureGuide(): Promise<void> {
   load ??= (async () => {
     try {
-      const res = await fetch('/tmux-guide.zh-CN.md')
+      const [{ marked }, res] = await Promise.all([
+        import('marked'),
+        fetch('/tmux-guide.zh-CN.md'),
+      ])
       if (!res.ok) throw new Error(`guide: ${res.status} ${res.statusText}`)
       const md = await res.text()
       cachedHtml = marked.parse(md, { async: false }) as string
@@ -98,8 +100,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       @keydown="trapFocus"
     >
       <header class="help__header">
-        <span id="help-title" class="help__title">tmux 使用指南</span>
-        <button ref="closeButton" class="help__close" aria-label="Close help" @click="emit('close')">
+        <h2 id="help-title" class="help__title">tmux 使用指南</h2>
+        <button ref="closeButton" type="button" class="help__close" aria-label="Close help" @click="emit('close')">
           <span aria-hidden="true">✕</span>
         </button>
       </header>
@@ -142,6 +144,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   border-bottom: 1px solid var(--th-border);
 }
 .help__title {
+  margin: 0;
   font-weight: 600;
   font-size: 0.95rem;
 }

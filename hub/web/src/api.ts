@@ -73,7 +73,7 @@ async function authFetch(path: string, init?: RequestInit): Promise<Response> {
 
 async function errorText(res: Response): Promise<string> {
   try {
-    const body = await res.json()
+    const body = (await res.json()) as { error?: unknown } | null
     if (body && typeof body.error === 'string') return body.error
   } catch {
     /* non-JSON error body */
@@ -81,11 +81,15 @@ async function errorText(res: Response): Promise<string> {
   return `${res.status} ${res.statusText}`
 }
 
+interface SessionsResponse {
+  sessions?: Session[]
+}
+
 export async function listSessions(): Promise<Session[]> {
   const res = await authFetch('/api/hosts/local/sessions')
   if (!res.ok) throw new Error(await errorText(res))
-  const data = await res.json()
-  return data.sessions ?? []
+  const data = (await res.json()) as SessionsResponse | null
+  return Array.isArray(data?.sessions) ? data.sessions : []
 }
 
 export async function createSession(name?: string): Promise<void> {
@@ -113,6 +117,10 @@ export async function killSession(name: string): Promise<void> {
   if (!res.ok) throw new Error(await errorText(res))
 }
 
+interface TicketResponse {
+  ticket?: unknown
+}
+
 /** Issue a single-use, 30s, session-bound WebSocket ticket. */
 export async function issueTicket(session: string): Promise<string> {
   const res = await authFetch('/api/ws-ticket', {
@@ -121,7 +129,9 @@ export async function issueTicket(session: string): Promise<string> {
     body: JSON.stringify({ hostId: 'local', session }),
   })
   if (!res.ok) throw new Error(await errorText(res))
-  const data = await res.json()
-  if (!data.ticket) throw new Error('no ticket in response')
-  return data.ticket as string
+  const data = (await res.json()) as TicketResponse | null
+  if (!data || typeof data.ticket !== 'string' || !data.ticket) {
+    throw new Error('no ticket in response')
+  }
+  return data.ticket
 }

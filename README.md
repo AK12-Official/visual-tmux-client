@@ -19,7 +19,8 @@
 - Preserve terminal state across browser disconnects by leaving tmux sessions running.
 - Use bearer-token authentication and short-lived, single-use WebSocket tickets.
 - Ship the web UI inside one dependency-free application binary.
-- Shut down cleanly without killing the underlying tmux sessions.
+- Structured external YAML configuration with environment variable and CLI flag overrides.
+- Shut down cleanly with a two-phase graceful budget without killing underlying tmux sessions.
 
 ## Requirements
 
@@ -34,31 +35,119 @@ Building from source additionally requires Go 1.26.3+ and Node.js 24+.
 Download the archive for your platform from the repository's Releases page, then:
 
 ```sh
-tar -xzf visual-tmux-client_0.2.0_darwin_arm64.tar.gz
-cd visual-tmux-client_0.2.0_darwin_arm64
+tar -xzf visual-tmux-client_0.2.0_linux_amd64.tar.gz
+cd visual-tmux-client_0.2.0_linux_amd64
 ./visual-tmux-client
 ```
 
-The server listens on `http://127.0.0.1:7690` by default. At startup it prints its access token and the URL to open — whether the token was generated or taken from the environment — so you can always sign in. Open the URL and paste that token into the sign-in screen.
+The server listens on `http://127.0.0.1:7690` by default. At startup it prints its access token and the URL to open — whether the token was generated, loaded from a configuration file, or taken from the environment — so you can always sign in. Open the URL and paste that token into the sign-in screen.
 
-To use a stable token:
+To use a stable token via environment variable:
 
 ```sh
 VISUAL_TMUX_CLIENT_TOKEN="$(openssl rand -base64 32)" ./visual-tmux-client
+```
+
+Or pass a custom YAML configuration file:
+
+```sh
+./visual-tmux-client --config configs/visual-tmux-client.example.yaml
 ```
 
 Run `./visual-tmux-client --help` to see all flags and environment variables.
 
 ## Configuration
 
-| Setting | Default | Description |
-| --- | --- | --- |
-| `--addr` | `127.0.0.1:7690` | HTTP listen address |
-| `VISUAL_TMUX_CLIENT_TOKEN` | generated at startup | Shared bearer token used by the browser UI |
-| `VISUAL_TMUX_CLIENT_ORIGIN` | Unset (matches request host and port) | Allowed browser origin for WebSocket upgrades; defaults to request host and port. Set to an exact origin (e.g. `https://tmux.example.com`) when behind a reverse proxy that rewrites `Host`, or preserve public `Host` at the proxy |
-| `VISUAL_TMUX_CLIENT_TMUX_PATH` | resolved from `PATH` | Explicit path to the tmux executable |
+Visual Tmux Client supports external YAML configuration, environment variables, and CLI flags.
 
-The default loopback binding is intentional. If you expose the service to another machine, put it behind HTTPS, use a strong stable token, and set `VISUAL_TMUX_CLIENT_ORIGIN` to the exact public origin. See [SECURITY.md](SECURITY.md) before exposing it to a network.
+### Precedence
+
+Settings are resolved in strict priority order:
+1. **Command-line flags** (highest precedence, e.g. `--addr`, `--config`)
+2. **Environment variables** (`VISUAL_TMUX_CLIENT_*`)
+3. **Configuration file** (`--config <path>`, `VISUAL_TMUX_CLIENT_CONFIG`, or `./visual-tmux-client.yaml`)
+4. **Built-in defaults** (lowest precedence)
+
+If configuration values are changed in YAML, restart the server to apply backend changes; active browser sessions receive updated web configuration upon page refresh.
+
+### Command-line Flags
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-addr` | `string` | `127.0.0.1:7690` | Listen address (`host:port`) |
+| `-config` | `string` | `""` | Path to YAML configuration file |
+| `-version` | `bool` | `false` | Print version and exit |
+
+### Environment Variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `VISUAL_TMUX_CLIENT_CONFIG` | Unset | Path to the YAML configuration file |
+| `VISUAL_TMUX_CLIENT_ADDR` | `127.0.0.1:7690` | Listen address (`host:port`) |
+| `VISUAL_TMUX_CLIENT_TOKEN` | Generated at startup | Shared bearer token used by the browser UI |
+| `VISUAL_TMUX_CLIENT_ORIGIN` | Unset | Allowed WebSocket origin; defaults to matching request host |
+| `VISUAL_TMUX_CLIENT_TMUX_PATH` | Resolved from `PATH` | Path to the tmux executable binary |
+
+### YAML Configuration File
+
+A fully commented template is provided in `configs/visual-tmux-client.example.yaml`:
+
+```yaml
+version: 1
+
+server:
+  addr: "127.0.0.1:7690"
+  read_header_timeout: "10s"
+  idle_timeout: "120s"
+  max_request_body_bytes: 65536 # 64 KiB
+
+auth:
+  token: "" # Generated at startup if empty
+  ticket_ttl: "30s"
+  ticket_sweep_interval: "10s"
+
+tmux:
+  path: "" # Resolved from $PATH if empty
+
+websocket:
+  origin: "" # Strict same-host if empty; or set exact origin (e.g. "https://tmux.example.com")
+  max_input_message_bytes: 8388608 # 8 MiB
+  control_write_timeout: "5s"
+  output_write_timeout: "10s"
+  exit_write_timeout: "3s"
+
+terminal:
+  max_dimension: 1000
+  staging_buffer_bytes: 2097152 # 2 MiB
+  output_high_water_bytes: 1048576 # 1 MiB
+  output_low_water_bytes: 131072 # 128 KiB
+  backpressure_poll_interval: "100ms"
+
+shutdown:
+  attachment_timeout: "3s"
+  http_timeout: "10s"
+
+web:
+  session_poll_interval: "5s"
+  activity_decay: "2s"
+  activity_throttle: "500ms"
+  resize_debounce: "100ms"
+  reconnect:
+    initial_delay: "500ms"
+    max_delay: "3s"
+  terminal:
+    scrollback: 5000
+    font_size: 13
+    min_font_size: 8
+    max_font_size: 24
+  notifications:
+    max_toasts: 5
+    error_lifetime: "8s"
+    warning_lifetime: "5s"
+    info_lifetime: "3s"
+```
+
+The default loopback binding is intentional. If you expose the service to another machine, put it behind HTTPS, use a strong stable token, and set `origin` to the exact public origin. See [SECURITY.md](SECURITY.md) before exposing it to a network.
 
 ## Build from source
 
@@ -67,12 +156,16 @@ make build
 ./hub/visual-tmux-client
 ```
 
-`make build` installs locked frontend dependencies, builds the Vue application, and embeds it into the Go binary. Other useful commands:
+`make build` installs locked frontend dependencies, builds the Vue application, and compiles `hub/cmd/visual-tmux-client` with embedded static assets.
+
+Other useful commands:
 
 ```sh
-make test       # frontend type/build check, Go tests, and go vet
-make package    # package the current OS/architecture under release/
-make clean      # remove generated build output
+make test       # Frontend tests, Go unit/integration tests, and go vet
+make lint       # golangci-lint quality checks (pinned v2.13.2)
+make fmt        # Format Go source files with project conventions
+make package    # Build release tarballs under release/
+make clean      # Remove generated build output and caches
 ```
 
 To create multiple archives locally, pass space-separated Go targets:
@@ -85,16 +178,30 @@ Pushing a `v*` tag runs the GitHub Actions release workflow, builds those four t
 
 ## Architecture
 
-The Go service exposes a small authenticated JSON API for session management and a WebSocket endpoint backed by a pseudo-terminal. The browser first exchanges its bearer token for a 30-second, single-use ticket; the long-lived token is never placed in a WebSocket URL. The compiled Vue assets are served from Go's embedded filesystem.
-
-Project layout:
+Visual Tmux Client is organized into clean functional packages with strict dependency directions:
 
 ```text
-hub/              Go server, tmux integration, and tests
-hub/web/          Vue + TypeScript frontend
-openspec/specs/   behavior and design specifications
-scripts/          release packaging helpers
+cmd/visual-tmux-client/  Entry point, CLI flag parsing, and exit code handling
+internal/app/            Application composition root, signals, and two-phase shutdown
+internal/config/         Configuration models, strict YAML decoding, loader, and provenance
+internal/auth/           Bearer token verification, timing-safe equality, ticket store
+internal/session/        Session domain model, name validation, service, Backend interface
+internal/tmux/           Tmux command runner, PTY allocation, socket isolation, environment scrubbing
+internal/terminal/       Terminal backpressure buffer, ring staging, attachment pump
+internal/transport/http/ REST API routing, DTO mapping, bearer middleware, SPA static handler
+internal/transport/ws/   WebSocket handshake, origin validation, framing, peer adapter
+web/                     Vue 3 frontend (Vite + TypeScript + xterm.js)
+configs/                 Example configuration templates
 ```
+
+The browser UI fetches public runtime parameters from `GET /api/client-config` prior to mounting. Session authentication exchanges the long-lived Bearer token for a single-use 30-second ticket, ensuring credentials are never exposed in WebSocket URLs or process arguments.
+
+### Rollback Strategy
+
+Visual Tmux Client retains full backwards compatibility:
+- Starting the binary without a YAML configuration file automatically operates with the documented built-in defaults.
+- All command-line flags and environment variables from previous versions continue to function identically.
+- If rolling back to an earlier binary release, simply stop the server, replace the executable, and restart. Running tmux sessions are fully preserved across restarts and downgrades.
 
 ## Contributing
 
