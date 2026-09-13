@@ -219,32 +219,41 @@ const manualMode = computed(() => order.value.mode === 'manual')
 
 <template>
   <div class="session-list">
-    <button class="session-list__create-btn" @click="emit('create')">+ New session</button>
+    <button class="session-list__create-btn" type="button" @click="emit('create')">+ New session</button>
 
     <div v-if="!selecting" class="session-list__toolbar">
-      <div class="session-list__modes" role="group" aria-label="sort mode">
+      <div class="session-list__modes" role="group" aria-label="Sort mode">
         <button
           class="session-list__mode"
+          type="button"
           :class="{ 'session-list__mode--on': !manualMode }"
           :aria-pressed="!manualMode"
           @click="setMode('default')"
         >Default</button>
         <button
           class="session-list__mode"
+          type="button"
           :class="{ 'session-list__mode--on': manualMode }"
           :aria-pressed="manualMode"
           @click="setMode('manual')"
         >Manual</button>
       </div>
-      <button class="session-list__tool" title="batch select" @click="toggleSelectMode">Select</button>
+      <button
+        class="session-list__tool"
+        type="button"
+        title="batch select"
+        aria-label="Toggle batch selection mode"
+        :aria-pressed="selecting"
+        @click="toggleSelectMode"
+      >Select</button>
     </div>
 
-    <div v-if="error" class="session-list__error">
+    <div v-if="error" class="session-list__error" role="alert" aria-live="polite">
       <span>{{ error }}</span>
-      <button class="session-list__btn" @click="emit('retry')">Retry</button>
+      <button class="session-list__btn" type="button" @click="emit('retry')">Retry</button>
     </div>
 
-    <div v-else-if="sessions.length === 0" class="session-list__empty">
+    <div v-else-if="sessions.length === 0" class="session-list__empty" role="status">
       No sessions. Create one above.
     </div>
 
@@ -276,11 +285,14 @@ const manualMode = computed(() => order.value.mode === 'manual')
           <input
             v-focus
             v-model="renameDraft"
+            type="text"
             class="session-list__input"
+            aria-label="Rename session"
             @keyup.enter="submitRename(s.name)"
             @keyup.esc="renaming = null"
           />
-          <button class="session-list__btn" @click="submitRename(s.name)">OK</button>
+          <button class="session-list__btn" type="button" @click="submitRename(s.name)">OK</button>
+          <button class="session-list__btn" type="button" aria-label="Cancel rename" @click="renaming = null">Cancel</button>
         </div>
 
         <template v-else>
@@ -301,6 +313,7 @@ const manualMode = computed(() => order.value.mode === 'manual')
               <button
                 v-if="manualMode"
                 class="session-list__icon-btn"
+                type="button"
                 :title="isPinned(s.name) ? 'unpin' : 'pin to top'"
                 :aria-label="isPinned(s.name) ? `Unpin ${s.name}` : `Pin ${s.name} to top`"
                 :aria-pressed="isPinned(s.name)"
@@ -309,6 +322,7 @@ const manualMode = computed(() => order.value.mode === 'manual')
               <button
                 v-if="manualMode"
                 class="session-list__icon-btn"
+                type="button"
                 title="move up"
                 :aria-label="`Move ${s.name} up`"
                 :disabled="!canMove(s.name, -1)"
@@ -317,6 +331,7 @@ const manualMode = computed(() => order.value.mode === 'manual')
               <button
                 v-if="manualMode"
                 class="session-list__icon-btn"
+                type="button"
                 title="move down"
                 :aria-label="`Move ${s.name} down`"
                 :disabled="!canMove(s.name, 1)"
@@ -324,12 +339,14 @@ const manualMode = computed(() => order.value.mode === 'manual')
               ><span aria-hidden="true">↓</span></button>
               <button
                 class="session-list__icon-btn"
+                type="button"
                 title="rename"
                 :aria-label="`Rename ${s.name}`"
                 @click="startRename(s.name)"
               ><span aria-hidden="true">✎</span></button>
               <button
                 class="session-list__icon-btn session-list__icon-btn--danger"
+                type="button"
                 title="kill"
                 :aria-label="`Kill ${s.name}`"
                 @click="requestKill(s.name)"
@@ -344,27 +361,28 @@ const manualMode = computed(() => order.value.mode === 'manual')
       </li>
     </ul>
 
-    <div v-if="selecting" class="session-list__batch">
+    <div v-if="selecting" class="session-list__batch" role="region" aria-label="Batch actions">
       <template v-if="!confirmingBulk">
         <span class="session-list__batch-count">{{ checked.size }} selected</span>
         <button
           class="session-list__btn session-list__btn--danger"
+          type="button"
           :disabled="checked.size === 0"
           @click="confirmingBulk = true"
         >Kill</button>
-        <button class="session-list__btn" @click="toggleSelectMode">Cancel</button>
+        <button class="session-list__btn" type="button" @click="toggleSelectMode">Cancel</button>
       </template>
       <template v-else>
         <span>Kill {{ checked.size }} session{{ checked.size === 1 ? '' : 's' }}?</span>
-        <button class="session-list__btn session-list__btn--danger" @click="confirmBulkKill">Kill</button>
-        <button class="session-list__btn" @click="confirmingBulk = false">Cancel</button>
+        <button class="session-list__btn session-list__btn--danger" type="button" @click="confirmBulkKill">Kill</button>
+        <button class="session-list__btn" type="button" @click="confirmingBulk = false">Cancel</button>
       </template>
     </div>
 
-    <div v-else-if="confirmingKill" class="session-list__confirm">
+    <div v-else-if="confirmingKill" class="session-list__confirm" role="alertdialog" aria-label="Confirm session termination">
       <span>Kill session "{{ confirmingKill }}"?</span>
-      <button class="session-list__btn session-list__btn--danger" @click="confirmKill">Kill</button>
-      <button class="session-list__btn" @click="confirmingKill = null">Cancel</button>
+      <button class="session-list__btn session-list__btn--danger" type="button" @click="confirmKill">Kill</button>
+      <button class="session-list__btn" type="button" @click="confirmingKill = null">Cancel</button>
     </div>
   </div>
 </template>

@@ -1,0 +1,62 @@
+# Visual Tmux Client Configuration Example
+# All durations must be unit-bearing strings (e.g. 5s, 500ms, 1m).
+
+version: 1
+
+server:
+  # HTTP listen address (host:port)
+  addr: "127.0.0.1:7690"
+  read_header_timeout: "10s"
+  idle_timeout: "120s"
+  max_request_body_bytes: 65536 # 64 KiB
+
+auth:
+  # Bearer authentication token.
+  # If left empty, an ephemeral token is generated and printed to stderr at startup.
+  # Can also be set via VISUAL_TMUX_CLIENT_AUTH_TOKEN environment variable.
+  token: ""
+  ticket_ttl: "30s"
+  ticket_sweep_interval: "10s"
+
+tmux:
+  # Path to tmux executable. If left empty, resolved from system PATH.
+  path: ""
+
+websocket:
+  # Allowed Origin URL (e.g. "https://tmux.example.com").
+  # If left empty, defaults to matching request host and port.
+  origin: ""
+  max_input_message_bytes: 8388608 # 8 MiB (permits large terminal paste)
+  control_write_timeout: "5s"
+  output_write_timeout: "10s"
+  exit_write_timeout: "3s"
+
+terminal:
+  max_dimension: 1000
+  staging_buffer_bytes: 2097152 # 2 MiB
+  output_high_water_bytes: 1048576 # 1 MiB
+  output_low_water_bytes: 131072 # 128 KiB
+  backpressure_poll_interval: "100ms"
+
+shutdown:
+  attachment_timeout: "3s"
+  http_timeout: "10s"
+
+web:
+  session_poll_interval: "5s"
+  activity_decay: "2s"
+  activity_throttle: "500ms"
+  resize_debounce: "100ms"
+  reconnect:
+    initial_delay: "500ms"
+    max_delay: "3s"
+  terminal:
+    scrollback: 5000
+    font_size: 13
+    min_font_size: 8
+    max_font_size: 24
+  notifications:
+    max_toasts: 5
+    error_lifetime: "8s"
+    warning_lifetime: "5s"
+    info_lifetime: "3s"

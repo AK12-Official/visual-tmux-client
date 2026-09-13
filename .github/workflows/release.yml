@@ -34,7 +34,7 @@ jobs:
           go-version-file: hub/go.mod
           cache-dependency-path: hub/go.sum
       - name: Build web UI
-        run: npm ci && npm run build
+        run: npm ci && npm run build && npm test
         working-directory: hub/web
       - name: Build archive
         env:
@@ -44,8 +44,10 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           name="visual-tmux-client_${version}_${GOOS}_${GOARCH}"
           mkdir -p "staging/$name"
-          (cd hub && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$version" -o "../staging/$name/visual-tmux-client" .)
+          (cd hub && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$version" -o "../staging/$name/visual-tmux-client" ./cmd/visual-tmux-client)
           cp README.md README.zh-CN.md LICENSE "staging/$name/"
+          mkdir -p "staging/$name/configs"
+          cp configs/visual-tmux-client.example.yaml "staging/$name/configs/"
           tar -C staging -czf "$name.tar.gz" "$name"
       - uses: actions/upload-artifact@v7
         with:

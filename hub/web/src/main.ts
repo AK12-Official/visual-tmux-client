@@ -1,7 +1,8 @@
-import {createApp} from 'vue'
+import { createApp } from 'vue'
 import App from './App.vue'
-import './style.css';
+import './style.css'
 import '@xterm/xterm/css/xterm.css'
+import { bootstrapApp } from './bootstrap'
 
 // Global error surface: surface any uncaught JS error / rejection as a
 // visible banner so runtime failures are diagnosable without the console.
@@ -20,4 +21,12 @@ window.addEventListener('unhandledrejection', (e) => {
   }
 })
 
-createApp(App).mount('#app')
+// In browser runtime, auto-bootstrap against #app element.
+if (typeof document !== 'undefined') {
+  const root = document.getElementById('app')
+  if (root) {
+    void bootstrapApp(root, undefined, (el) => {
+      createApp(App).mount(el)
+    })
+  }
+}

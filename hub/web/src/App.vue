@@ -14,6 +14,7 @@ import {
 } from './api'
 import { notify } from './toasts'
 import { disposeTerminalSession, renameTerminalSession, type ConnState } from './terminal'
+import { getConfig, resolveFontSize } from './config'
 import SessionList from './components/SessionList.vue'
 import TerminalView from './components/TerminalView.vue'
 import ToastStack from './components/ToastStack.vue'
@@ -87,19 +88,27 @@ const selectedAlive = computed(() =>
 // --- Terminal header: font size (persisted), fullscreen, close ---
 
 const FONT_SIZE_KEY = 'vtc:font-size'
-const FONT_MIN = 8
-const FONT_MAX = 24
-const FONT_DEFAULT = 13
+const termConfig = computed(() => getConfig().web.terminal)
 
 function loadFontSize(): number {
-  const v = Number.parseInt(localStorage.getItem(FONT_SIZE_KEY) ?? '', 10)
-  return v >= FONT_MIN && v <= FONT_MAX ? v : FONT_DEFAULT
+  const cfg = getConfig().web.terminal
+  const raw = localStorage.getItem(FONT_SIZE_KEY)
+  const resolved = resolveFontSize(raw, cfg)
+  if (raw !== null && String(resolved) !== raw) {
+    try {
+      localStorage.setItem(FONT_SIZE_KEY, String(resolved))
+    } catch {
+      /* ignore storage quota */
+    }
+  }
+  return resolved
 }
 
 const fontSize = ref(loadFontSize())
 
 function setFontSize(px: number): void {
-  const clamped = Math.min(FONT_MAX, Math.max(FONT_MIN, px))
+  const cfg = getConfig().web.terminal
+  const clamped = Math.min(cfg.max_font_size, Math.max(cfg.min_font_size, px))
   fontSize.value = clamped
   try {
     localStorage.setItem(FONT_SIZE_KEY, String(clamped))
@@ -145,7 +154,6 @@ function closePanel(): void {
 // session's card (or, for the viewed session, the header dot and the tab
 // title) and a decay timer dims it ~2 s after output stops.
 
-const ACTIVITY_DECAY_MS = 2000
 const activity = shallowRef<Record<string, boolean>>(nameMap())
 const activityTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
@@ -162,7 +170,7 @@ function onActivity(name: string): void {
       const next = nameMap(activity.value)
       delete next[name]
       activity.value = next
-    }, ACTIVITY_DECAY_MS),
+    }, getConfig().web.activity_decay),
   )
 }
 
@@ -199,7 +207,7 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 
 function startPolling() {
   if (pollTimer) return
-  pollTimer = setInterval(() => void refresh(), 5000)
+  pollTimer = setInterval(() => void refresh(), getConfig().web.session_poll_interval)
 }
 
 function stopPolling() {
@@ -356,7 +364,7 @@ async function onRename(oldName: string, newName: string) {
           const next = nameMap(activity.value)
           delete next[newName]
           activity.value = next
-        }, ACTIVITY_DECAY_MS),
+        }, getConfig().web.activity_decay),
       )
     }
     // Follow the rename: `selected` is the viewed terminal's identity — it
@@ -444,14 +452,27 @@ function onNotice(message: string, level: 'error' | 'warning' = 'error') {
   notify(level, message)
 }
 
+function onOnline() {
+  if (hasToken.value) {
+    void refresh()
+  }
+}
+
+function onOffline() {
+  notify('warning', 'Network connection offline')
+}
+
 onMounted(() => {
   if (hasToken.value) void refresh()
+  window.addEventListener('online', onOnline)
+  window.addEventListener('offline', onOffline)
 })
 
 onBeforeUnmount(() => {
   stopPolling()
-  for (const timer of activityTimers.values()) clearTimeout(timer)
-  activityTimers.clear()
+  window.removeEventListener('online', onOnline)
+  window.removeEventListener('offline', onOffline)
+  cleanupSessionState()
 })
 </script>
 
@@ -472,17 +493,17 @@ onBeforeUnmount(() => {
           :disabled="authBusy"
           @keyup.enter="submitToken"
         />
-        <button class="auth-card__btn" :disabled="authBusy" @click="submitToken">
+        <button class="auth-card__btn" type="button" :disabled="authBusy" @click="submitToken">
           {{ authBusy ? 'Connecting…' : 'Connect' }}
         </button>
-        <p v-if="authError" class="auth-card__error">{{ authError }}</p>
+        <p v-if="authError" class="auth-card__error" role="alert" aria-live="assertive">{{ authError }}</p>
       </div>
     </div>
 
     <template v-else>
       <header class="app__bar">
         <span class="app__title">Visual Tmux Client</span>
-        <button class="app__logout" @click="logout">Disconnect</button>
+        <button class="app__logout" type="button" aria-label="Disconnect and clear credentials" @click="logout">Disconnect</button>
       </header>
 
       <div class="app__body">
@@ -490,6 +511,7 @@ onBeforeUnmount(() => {
           <template v-if="!sidebarCollapsed">
             <button
               class="app__sidebar-toggle"
+              type="button"
               title="collapse sidebar"
               aria-label="Collapse session sidebar"
               :aria-expanded="!sidebarCollapsed"
@@ -509,22 +531,23 @@ onBeforeUnmount(() => {
                 @retry="refresh"
               />
             </div>
-            <button class="app__help-btn" title="tmux 使用指南" @click="helpOpen = true">
+            <button class="app__help-btn" type="button" title="tmux 使用指南" @click="helpOpen = true">
               ? Help
             </button>
           </template>
           <div v-else class="app__rail">
             <button
               class="app__rail-btn"
+              type="button"
               title="expand sidebar"
               aria-label="Expand session sidebar"
               :aria-expanded="!sidebarCollapsed"
               @click="toggleSidebar"
             ><span aria-hidden="true">»</span></button>
-            <button class="app__rail-btn" title="new session" aria-label="Create new session" @click="onCreate">
+            <button class="app__rail-btn" type="button" title="new session" aria-label="Create new session" @click="onCreate">
               <span aria-hidden="true">+</span>
             </button>
-            <button class="app__rail-btn" title="help" aria-label="Open tmux help" @click="helpOpen = true">
+            <button class="app__rail-btn" type="button" title="help" aria-label="Open tmux help" @click="helpOpen = true">
               <span aria-hidden="true">?</span>
             </button>
           </div>
@@ -542,31 +565,37 @@ onBeforeUnmount(() => {
             <span
               class="app__term-state"
               :class="`app__term-state--${connStates[selected] ?? 'connecting'}`"
+              role="status"
+              aria-live="polite"
             >{{ connStates[selected] ?? 'connecting' }}</span>
             <span class="app__term-spacer"></span>
             <button
               class="app__term-btn"
+              type="button"
               title="decrease font size"
               aria-label="Decrease terminal font size"
-              :disabled="fontSize <= FONT_MIN"
+              :disabled="fontSize <= termConfig.min_font_size"
               @click="setFontSize(fontSize - 1)"
             >A−</button>
-            <span class="app__term-fontsize" aria-live="polite">{{ fontSize }} px</span>
+            <span class="app__term-fontsize" aria-live="polite" aria-label="Current font size">{{ fontSize }} px</span>
             <button
               class="app__term-btn"
+              type="button"
               title="increase font size"
               aria-label="Increase terminal font size"
-              :disabled="fontSize >= FONT_MAX"
+              :disabled="fontSize >= termConfig.max_font_size"
               @click="setFontSize(fontSize + 1)"
             >A+</button>
             <button
               class="app__term-btn"
+              type="button"
               title="toggle fullscreen"
               aria-label="Toggle terminal fullscreen"
               @click="toggleFullscreen"
             ><span aria-hidden="true">⛶</span></button>
             <button
               class="app__term-btn"
+              type="button"
               title="close panel (the session keeps running)"
               aria-label="Close terminal panel; session keeps running"
               @click="closePanel"

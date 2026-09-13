@@ -27,6 +27,17 @@ jobs:
       - name: Build web UI
         run: npm ci && npm run build
         working-directory: hub/web
+      - name: Test web UI
+        run: npm test
+        working-directory: hub/web
+      - name: Install golangci-lint
+        run: ./scripts/install-golangci-lint.sh /usr/local/bin
+      - name: Verify golangci-lint config
+        run: golangci-lint config verify --config ../.golangci.yml
+        working-directory: hub
+      - name: Lint Go packages
+        run: golangci-lint run --config ../.golangci.yml ./...
+        working-directory: hub
       - name: Test Go packages
         run: go test ./...
         working-directory: hub
@@ -34,5 +45,5 @@ jobs:
         run: go vet ./...
         working-directory: hub
       - name: Build application
-        run: go build -trimpath -o visual-tmux-client .
+        run: go build -trimpath -o visual-tmux-client ./cmd/visual-tmux-client
         working-directory: hub

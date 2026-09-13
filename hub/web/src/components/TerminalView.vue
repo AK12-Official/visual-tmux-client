@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { TerminalSession, type ConnState, type NoticeLevel } from '../terminal'
 
 const props = defineProps<{
@@ -38,17 +38,22 @@ function attach(): void {
   endedDetail.value = null
   state.value = 'connecting'
   try {
-    session = new TerminalSession(el.value, props.session, {
-      onState: (s, detail) => {
-        state.value = s
-        endedDetail.value = s === 'ended' ? detail ?? null : null
-        emit('state', currentName(), s)
+    session = new TerminalSession(
+      el.value,
+      props.session,
+      {
+        onState: (s, detail) => {
+          state.value = s
+          endedDetail.value = s === 'ended' ? detail ?? null : null
+          emit('state', currentName(), s)
+        },
+        onNotice: (message, level) => emit('notice', message, level),
+        onActivity: () => emit('activity', currentName()),
       },
-      onNotice: (message, level) => emit('notice', message, level),
-      onActivity: () => emit('activity', currentName()),
-    }, props.fontSize)
+      props.fontSize,
+    )
   } catch (err) {
-    emit('notice', `Terminal init failed: ${String(err)}`)
+    emit('notice', `Terminal init failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
@@ -62,6 +67,11 @@ function reconnect(): void {
 }
 
 onMounted(attach)
+
+onActivated(() => {
+  session?.refit()
+  session?.focus()
+})
 
 // Follow a rename of the session this view is showing. KeepAlive reuses this
 // instance across the rename (the key is the panel identity, not the name), so
@@ -97,15 +107,15 @@ onBeforeUnmount(() => {
 <template>
   <div class="terminal-view">
     <div ref="el" class="terminal-view__surface"></div>
-    <div v-if="state === 'ended'" class="terminal-view__overlay">
-      <div class="terminal-view__ended">
+    <div v-if="state === 'ended'" class="terminal-view__overlay" role="region" aria-label="Terminal status">
+      <div class="terminal-view__ended" role="alert">
         <template v-if="alive">
           <p class="terminal-view__ended-title">
             {{ endedDetail ? 'Terminal disconnected' : `Detached from “${props.session}”` }}
           </p>
           <p v-if="endedDetail" class="terminal-view__ended-detail">{{ endedDetail }}</p>
           <p v-else class="terminal-view__ended-detail">The session is still running.</p>
-          <button class="terminal-view__reconnect" @click="reconnect">Reconnect</button>
+          <button class="terminal-view__reconnect" type="button" @click="reconnect">Reconnect</button>
         </template>
         <template v-else>
           <p class="terminal-view__ended-title">Session “{{ props.session }}” has ended.</p>
