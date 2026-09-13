@@ -44,6 +44,54 @@ func TestEnsureGlobalOptionsConfiguresMouse(t *testing.T) {
 	}
 }
 
+func TestEnsureGlobalOptionsWhenMouseAlreadyOn(t *testing.T) {
+	s, _, tmux, sock := attachFixture(t)
+	mkSessionCmd(t, tmux, sock, "mouse-already-on-test", "")
+
+	// Simulate user config: mouse on, but window-size smallest
+	runCommand(tmux, "-L", sock, "set-option", "-g", "mouse", "on")
+	runCommand(tmux, "-L", sock, "set-option", "-g", "window-size", "smallest")
+
+	s.ensureGlobalOptions()
+
+	outWin, _, codeWin, errWin := runCommand(tmux, "-L", sock, "show-options", "-gv", "window-size")
+	if errWin != nil || codeWin != 0 || strings.TrimSpace(outWin) != "latest" {
+		t.Fatalf("expected window-size to be updated to latest, got code=%d out=%q err=%v", codeWin, outWin, errWin)
+	}
+
+	outMouse, _, codeMouse, errMouse := runCommand(tmux, "-L", sock, "show-options", "-gv", "mouse")
+	if errMouse != nil || codeMouse != 0 || strings.TrimSpace(outMouse) != "on" {
+		t.Fatalf("expected mouse to remain on, got code=%d out=%q err=%v", codeMouse, outMouse, errMouse)
+	}
+}
+
+func TestEnsureGlobalOptionsAfterServerRestart(t *testing.T) {
+	s, _, tmux, sock := attachFixture(t)
+	mkSessionCmd(t, tmux, sock, "first-srv-test", "")
+
+	s.ensureGlobalOptions()
+
+	// Kill server completely
+	runCommand(tmux, "-L", sock, "kill-server")
+	time.Sleep(100 * time.Millisecond)
+
+	// Start a fresh session on the same socket (new daemon with defaults)
+	mkSessionCmd(t, tmux, sock, "second-srv-test", "")
+
+	out, _, _, _ := runCommand(tmux, "-L", sock, "show-options", "-gv", "mouse")
+	if strings.TrimSpace(out) != "off" {
+		t.Fatalf("expected fresh daemon to start with mouse off, got %q", out)
+	}
+
+	// ensureGlobalOptions must detect that the new server is not configured and set it
+	s.ensureGlobalOptions()
+
+	out, _, code, err := runCommand(tmux, "-L", sock, "show-options", "-gv", "mouse")
+	if err != nil || code != 0 || strings.TrimSpace(out) != "on" {
+		t.Fatalf("expected mouse to be on on restarted daemon, got code=%d out=%q err=%v", code, out, err)
+	}
+}
+
 func TestCreateSessionConfiguresMouse(t *testing.T) {
 	_, ts, tmux, sock := attachFixture(t)
 
@@ -95,6 +143,54 @@ func TestAttachConfiguresMouse(t *testing.T) {
 	}
 }
 
+func TestAttachDoesNotRepaintExistingAttachment(t *testing.T) {
+	s, ts, tmux, sock := attachFixture(t)
+
+	mkSessionCmd(t, tmux, sock, "sess-1", "sleep 3600")
+	mkSessionCmd(t, tmux, sock, "sess-2", "sleep 3600")
+
+	// First attach ensures global options
+	ticket1, _, _ := s.tickets.issue("sess-1")
+	conn1 := dialWS(t, ts, fmt.Sprintf("/ws/local/sess-1?ticket=%s&cols=80&rows=24", ticket1), nil)
+	defer conn1.CloseNow()
+
+	ctxReady, cancelReady := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelReady()
+	if _, _, err := conn1.Read(ctxReady); err != nil {
+		t.Fatalf("read ready frame conn1: %v", err)
+	}
+
+	// Drain any initial output from attach
+	time.Sleep(300 * time.Millisecond)
+	for {
+		ctxDrain, cancelDrain := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		_, _, err := conn1.Read(ctxDrain)
+		cancelDrain()
+		if err != nil {
+			break
+		}
+	}
+
+	// Now attach second session
+	ticket2, _, _ := s.tickets.issue("sess-2")
+	conn2 := dialWS(t, ts, fmt.Sprintf("/ws/local/sess-2?ticket=%s&cols=80&rows=24", ticket2), nil)
+	defer conn2.CloseNow()
+
+	ctxReady2, cancelReady2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelReady2()
+	if _, _, err := conn2.Read(ctxReady2); err != nil {
+		t.Fatalf("read ready frame conn2: %v", err)
+	}
+
+	// Ensure conn1 receives no spurious output
+	ctxCheck, cancelCheck := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancelCheck()
+	_, data, err := conn1.Read(ctxCheck)
+	if err == nil {
+		t.Fatalf("expected no spurious repaint on conn1, got frame: %q", string(data))
+	}
+}
+
 func TestEndToEndMouseWheelScroll(t *testing.T) {
 	s, ts, tmux, sock := attachFixture(t)
 
@@ -110,7 +206,7 @@ func TestEndToEndMouseWheelScroll(t *testing.T) {
 	resp.Body.Close()
 
 	// Produce 100 lines so output exceeds the 24-row viewport
-	runCommand(tmux, "-L", sock, "send-keys", "-t", "=scroll-test", "seq 1 100", "Enter")
+	runCommand(tmux, "-L", sock, "send-keys", "-t", "=scroll-test:", "seq 1 100", "Enter")
 	time.Sleep(300 * time.Millisecond)
 
 	ticket, _, _ := s.tickets.issue("scroll-test")
@@ -125,11 +221,20 @@ func TestEndToEndMouseWheelScroll(t *testing.T) {
 		t.Fatalf("read ready frame: %v", err)
 	}
 
-	// Wait for output to settle
+	// Background drain keeps the WebSocket read buffer from filling up
+	readCtx, readCancel := context.WithCancel(context.Background())
+	defer readCancel()
+	go func() {
+		for {
+			if _, _, err := conn.Read(readCtx); err != nil {
+				return
+			}
+		}
+	}()
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify pane is not in copy-mode initially
-	out, _, _, _ := runCommand(tmux, "-L", sock, "display-message", "-p", "-t", "scroll-test", "#{pane_in_mode}")
+	// Verify pane is not in copy-mode initially using exact target syntax
+	out, _, _, _ := runCommand(tmux, "-L", sock, "display-message", "-p", "-t", "=scroll-test:", "#{pane_in_mode}")
 	if strings.TrimSpace(out) != "0" {
 		t.Fatalf("expected pane_in_mode to be 0 initially, got %q", out)
 	}
@@ -143,12 +248,12 @@ func TestEndToEndMouseWheelScroll(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Verify tmux has entered copy-mode
-	out, _, _, _ = runCommand(tmux, "-L", sock, "display-message", "-p", "-t", "scroll-test", "#{pane_in_mode}")
+	out, _, _, _ = runCommand(tmux, "-L", sock, "display-message", "-p", "-t", "=scroll-test:", "#{pane_in_mode}")
 	if strings.TrimSpace(out) != "1" {
 		t.Fatalf("expected pane_in_mode to be 1 after wheel up, got %q", out)
 	}
 
-	outMode, _, _, _ := runCommand(tmux, "-L", sock, "display-message", "-p", "-t", "scroll-test", "#{pane_mode}")
+	outMode, _, _, _ := runCommand(tmux, "-L", sock, "display-message", "-p", "-t", "=scroll-test:", "#{pane_mode}")
 	if strings.TrimSpace(outMode) != "copy-mode" {
 		t.Fatalf("expected pane_mode to be copy-mode, got %q", outMode)
 	}
@@ -163,7 +268,7 @@ func TestEndToEndMouseWheelScroll(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Verify tmux has exited copy-mode automatically when reaching the bottom
-	out, _, _, _ = runCommand(tmux, "-L", sock, "display-message", "-p", "-t", "scroll-test", "#{pane_in_mode}")
+	out, _, _, _ = runCommand(tmux, "-L", sock, "display-message", "-p", "-t", "=scroll-test:", "#{pane_in_mode}")
 	if strings.TrimSpace(out) != "0" {
 		t.Fatalf("expected pane_in_mode to be 0 after wheel down to bottom, got %q", out)
 	}

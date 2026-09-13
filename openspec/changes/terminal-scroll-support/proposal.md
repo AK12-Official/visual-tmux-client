@@ -18,7 +18,7 @@ When a tmux session produces output exceeding the visible terminal viewport (suc
 ### Modified Capabilities
 
 - `session-hub`: The hub SHALL configure the tmux server with mouse support enabled (`mouse on`), ensuring terminal clients can use mouse wheel and trackpad scroll gestures to navigate session scrollback history.
-- `web-session-manager`: The terminal view SHALL support scrolling up and down through session history and context via mouse wheel and trackpad gestures without breaking text copy or terminal keyboard interaction.
+- `web-session-manager`: The terminal view SHALL support scrolling up and down through session history and context via mouse wheel and trackpad gestures, and clarify that text selection under mouse tracking uses Shift-drag (or platform modifier drag) without being consumed by the session as mouse input.
 
 ## Impact
 

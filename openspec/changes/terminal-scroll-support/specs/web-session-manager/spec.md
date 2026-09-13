@@ -1,3 +1,24 @@
+## MODIFIED Requirements
+
+### Requirement: Terminal text copy
+
+The client SHALL let the user select terminal text with the mouse (using Shift-drag or platform modifier drag when terminal mouse reporting is active) and copy it, without that selection being consumed by the session as mouse input. Copying SHALL NOT interfere with sending an interrupt to the session when no selection exists.
+
+#### Scenario: Select and copy
+
+- **WHEN** the user selects terminal text (using Shift-drag when mouse reporting is active) and issues the copy command
+- **THEN** the selected text is placed on the system clipboard
+
+#### Scenario: Copy shortcut with no selection
+
+- **WHEN** the user issues the copy shortcut with nothing selected
+- **THEN** the corresponding control character is sent to the session instead of a copy being performed
+
+#### Scenario: Clipboard write is blocked
+
+- **WHEN** the browser refuses the clipboard write
+- **THEN** the client tells the user the copy did not happen rather than indicating success
+
 ## ADDED Requirements
 
 ### Requirement: Terminal session scrolling

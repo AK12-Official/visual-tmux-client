@@ -22,12 +22,12 @@ In `hub/server.go`, the server currently executes `pinWindowSizePolicy` using `s
 ### 1. Safe Idempotent Option Verification (`ensureGlobalOptions`)
 
 Instead of a one-time `sync.Once` that never fires again after a tmux server restart, the hub will use `ensureGlobalOptions`:
-- Query `show-options -gv mouse`.
-- If the output is `"on"`, the options are already active and no action is taken. Querying options produces no pty output and causes no client repaints.
-- If the output is not `"on"` (or returns an error/empty on a new tmux server), the hub executes:
-  `set-option -g window-size latest`
-  `set-option -g mouse on`
-- A mutex guards the check-and-set sequence to prevent race conditions across concurrent attachments.
+- Early exit if tmux resolution failed (`s.tmux.err != nil`).
+- Inspect `window-size` and `mouse` independently via `show-options -gv`:
+  - If `window-size` is not `"latest"`, set `set-option -g window-size latest`.
+  - If `mouse` is not `"on"`, set `set-option -g mouse on`.
+- If an option is already at its desired value, no `set-option` command is executed for it, preventing spurious tmux client repaints and unnecessary process forks.
+- A mutex (`optionsMu`) guards the check-and-set sequence to prevent race conditions across concurrent attachments.
 
 *Alternatives considered:*
 - Statically running `set-option -g` on every attach: causes tmux to repaint all attached clients, lighting up activity indicators in background panels.

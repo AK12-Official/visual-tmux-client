@@ -46,19 +46,25 @@ func newServer(cfg *config, token string) *server {
 
 // ensureGlobalOptions configures tmux's global options (`window-size latest` and `mouse on`).
 // Setting global tmux options repaints every client on the server, which background attachments
-// would report as activity. Therefore, the hub inspects whether mouse support is already active
-// via `show-options -gv mouse` before issuing set-option commands. When already active, no command
-// is executed and clients are not repainted.
+// would report as activity. Therefore, the hub inspects each option independently via `show-options -gv`
+// before issuing `set-option` commands. If an option is already at its desired value, no command
+// is executed for it and attached clients are not repainted.
 func (s *server) ensureGlobalOptions() {
+	if s.tmux.err != nil {
+		return
+	}
 	s.optionsMu.Lock()
 	defer s.optionsMu.Unlock()
 
-	out, _, code, err := s.tmux.exec("show-options", "-gv", "mouse")
-	if err == nil && code == 0 && strings.TrimSpace(out) == "on" {
-		return
+	winOut, _, winCode, winErr := s.tmux.exec("show-options", "-gv", "window-size")
+	if winErr != nil || winCode != 0 || strings.TrimSpace(winOut) != "latest" {
+		_, _, _, _ = s.tmux.exec("set-option", "-g", "window-size", "latest")
 	}
-	_, _, _, _ = s.tmux.exec("set-option", "-g", "window-size", "latest")
-	_, _, _, _ = s.tmux.exec("set-option", "-g", "mouse", "on")
+
+	mouseOut, _, mouseCode, mouseErr := s.tmux.exec("show-options", "-gv", "mouse")
+	if mouseErr != nil || mouseCode != 0 || strings.TrimSpace(mouseOut) != "on" {
+		_, _, _, _ = s.tmux.exec("set-option", "-g", "mouse", "on")
+	}
 }
 
 // pinWindowSizePolicy is retained as a helper forwarding to ensureGlobalOptions.
