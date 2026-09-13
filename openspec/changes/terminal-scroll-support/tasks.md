@@ -1,6 +1,6 @@
 ## 1. Hub Global Options and Mouse Support
 
-- [x] 1.1 Implement `ensureGlobalOptions` in `hub/server.go` to idempotently check and configure `window-size latest` and `mouse on` using `show-options -gv mouse` check.
+- [x] 1.1 Implement `ensureGlobalOptions` in `hub/server.go` to independently and idempotently check and configure `window-size latest` and `mouse on` via `show-options -gv` checks.
 - [x] 1.2 Invoke `ensureGlobalOptions` on WebSocket attachment in `hub/attach.go` and on session creation in `hub/api.go`.
 - [x] 1.3 Add automated unit tests in `hub/` verifying `ensureGlobalOptions` sets `mouse on` and avoids redundant set commands when already active.
 
