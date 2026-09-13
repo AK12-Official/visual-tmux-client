@@ -4,12 +4,13 @@
 
 **Visual Tmux Client** is a small, self-hosted web interface for managing and using tmux sessions from a browser. The Vue frontend is embedded in a single Go binary, so deployment only needs the binary and a local `tmux` installation.
 
-> The project is currently an early `v0.2` release. It manages tmux on the same machine where Visual Tmux Client runs; remote-host aggregation is not implemented.
+> The project is currently an early `v0.3` release. It manages tmux on the same machine where Visual Tmux Client runs; remote-host aggregation is not implemented.
 
 ## Features
 
 - List, create (one click, auto-named), rename, and terminate local tmux sessions — individually or in batches.
 - Attach to a session in a full browser terminal powered by xterm.js, and re-attach after a detach or a disconnect.
+- Native mouse wheel scrolling enabled by default for attached terminals.
 - See which session is talking: background sessions with recent output get a highlighted card; the viewed session is marked in the terminal header and the browser tab title.
 - Terminal header with font-size controls, fullscreen, and panel close.
 - Manual session ordering with drag reorder and pin-to-top, plus a collapsible session sidebar.
@@ -35,8 +36,8 @@ Building from source additionally requires Go 1.26.3+ and Node.js 24+.
 Download the archive for your platform from the repository's Releases page, then:
 
 ```sh
-tar -xzf visual-tmux-client_0.2.0_linux_amd64.tar.gz
-cd visual-tmux-client_0.2.0_linux_amd64
+tar -xzf visual-tmux-client_0.3.0_linux_amd64.tar.gz
+cd visual-tmux-client_0.3.0_linux_amd64
 ./visual-tmux-client
 ```
 

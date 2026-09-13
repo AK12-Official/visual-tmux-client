@@ -4,12 +4,13 @@
 
 **Visual Tmux Client** 是一个轻量级、自托管的 Web 界面，用于通过浏览器管理和使用 tmux 会话。Vue 前端直接打包嵌入在单个 Go 二进制文件中，因此运行环境只需要该二进制文件和本机已安装的 `tmux`。
 
-> 本项目目前处于早期的 `v0.2` 版本。它管理运行 Visual Tmux Client 的同一台机器上的 tmux；暂未实现多主机汇聚。
+> 本项目目前处于早期的 `v0.3` 版本。它管理运行 Visual Tmux Client 的同一台机器上的 tmux；暂未实现多主机汇聚。
 
 ## 特性
 
 - 查看、创建（一键生成自动命名的会话）、重命名及终止本地 tmux 会话，支持单会话或批量操作。
 - 在由 xterm.js 驱动的完整浏览器终端中连接会话，支持在断开或主动 detach 后随时重新连接。
+- 默认启用鼠标支持，连接终端可直接使用鼠标滚轮浏览 tmux 历史输出。
 - 观察哪个会话正在输出：有新输出的后台会话卡片会高亮提示；当前查看的会话会在终端顶部栏及浏览器标签页标题中显示活动圆点。
 - 终端顶部栏提供字号调节、全屏切换及关闭面板操作。
 - 支持通过拖拽手动调整会话顺序与置顶固定，左侧会话栏可自由折叠。
@@ -35,8 +36,8 @@
 从项目的 Releases 页面下载适合当前平台的压缩包，然后执行：
 
 ```sh
-tar -xzf visual-tmux-client_0.2.0_linux_amd64.tar.gz
-cd visual-tmux-client_0.2.0_linux_amd64
+tar -xzf visual-tmux-client_0.3.0_linux_amd64.tar.gz
+cd visual-tmux-client_0.3.0_linux_amd64
 ./visual-tmux-client
 ```
 
