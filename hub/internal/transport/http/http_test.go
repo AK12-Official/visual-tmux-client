@@ -190,6 +190,24 @@ func TestSessionEndpoints(t *testing.T) {
 		t.Fatalf("expected 201, got %d", rec.Code)
 	}
 
+	// 2b. Create nameless (empty JSON body {})
+	var receivedName string
+	svc.createFn = func(name string) (*session.Session, error) {
+		receivedName = name
+		return &session.Session{Name: "session-auto-1", Windows: 1}, nil
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/hosts/local/sessions", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer tok")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for nameless create, got %d", rec.Code)
+	}
+	if receivedName != "" {
+		t.Errorf("expected empty name for nameless create, got %q", receivedName)
+	}
+	svc.createFn = nil
+
 	// 3. Create invalid name
 	svc.createFn = func(name string) (*session.Session, error) {
 		return nil, session.ErrInvalidName

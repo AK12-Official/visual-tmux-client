@@ -18,9 +18,12 @@ func (s *Service) ListSessions(ctx context.Context) ([]Session, error) {
 }
 
 // CreateSession validates the requested session name before instructing the backend to create it.
+// When name is empty, validation is skipped so the backend can generate a unique name.
 func (s *Service) CreateSession(ctx context.Context, name string) (*Session, error) {
-	if err := ValidateSessionName(name); err != nil {
-		return nil, err
+	if name != "" {
+		if err := ValidateSessionName(name); err != nil {
+			return nil, err
+		}
 	}
 	return s.backend.Create(ctx, name)
 }
@@ -74,6 +77,9 @@ func (s *Service) GetSession(ctx context.Context, name string) (*Session, error)
 
 // HasSession checks if a session exists.
 func (s *Service) HasSession(ctx context.Context, name string) bool {
+	if err := ValidateSessionName(name); err != nil {
+		return false
+	}
 	if fc, ok := s.backend.(fastChecker); ok {
 		return fc.HasSession(ctx, name)
 	}

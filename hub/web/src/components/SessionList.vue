@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { Session } from '../api'
+import { notify } from '../toasts'
 import {
   applyOrder,
   loadOrder,
@@ -9,13 +10,19 @@ import {
   type OrderState,
 } from '../ordering'
 
-const props = defineProps<{
-  sessions: Session[]
-  error: string
-  selected: string | null
-  /** Sessions with terminal output in the last few seconds. */
-  active: Record<string, boolean>
-}>()
+const props = withDefaults(
+  defineProps<{
+    sessions: Session[]
+    error: string
+    selected: string | null
+    /** Sessions with terminal output in the last few seconds. */
+    active: Record<string, boolean>
+    creating?: boolean
+  }>(),
+  {
+    creating: false,
+  },
+)
 
 const emit = defineEmits<{
   (e: 'select', name: string): void
@@ -177,10 +184,26 @@ function startRename(name: string): void {
   renameDraft.value = name
 }
 
+function validateSessionName(name: string, oldName: string): string | null {
+  if (!name) return 'Session name cannot be empty'
+  if (name.length > 64) return 'Session name cannot exceed 64 characters'
+  if (/[:./\\：．;；]/.test(name)) return 'Session name contains reserved characters (:, ., /, \\, ;, or full-width lookalikes)'
+  if (props.sessions.some((s) => s.name === name && s.name !== oldName)) return 'Session name already in use'
+  return null
+}
+
 function submitRename(oldName: string): void {
   const name = renameDraft.value.trim()
+  if (name === oldName) {
+    renaming.value = null
+    return
+  }
+  const err = validateSessionName(name, oldName)
+  if (err) {
+    notify('error', err)
+    return
+  }
   renaming.value = null
-  if (!name || name === oldName) return
   // Carry the stored position and pin under BOTH names until the server has
   // ruled: the hub may reject the new name (a reserved or full-width
   // character), and replacing the entry outright would leave it pointing at a
@@ -214,12 +237,34 @@ function confirmKill(): void {
   confirmingKill.value = null
 }
 
+// Prune batch selection, active confirmation, and rename draft when sessions disappear
+watch(
+  () => props.sessions,
+  (sessions) => {
+    const names = new Set(sessions.map((s) => s.name))
+    if (checked.value.size > 0) {
+      const nextChecked = new Set([...checked.value].filter((n) => names.has(n)))
+      if (nextChecked.size !== checked.value.size) {
+        checked.value = nextChecked
+      }
+    }
+    if (confirmingKill.value !== null && !names.has(confirmingKill.value)) {
+      confirmingKill.value = null
+    }
+    if (renaming.value !== null && !names.has(renaming.value)) {
+      renaming.value = null
+    }
+  },
+)
+
 const manualMode = computed(() => order.value.mode === 'manual')
 </script>
 
 <template>
   <div class="session-list">
-    <button class="session-list__create-btn" type="button" @click="emit('create')">+ New session</button>
+    <button class="session-list__create-btn" type="button" :disabled="creating" @click="emit('create')">
+      {{ creating ? 'Creating…' : '+ New session' }}
+    </button>
 
     <div v-if="!selecting" class="session-list__toolbar">
       <div class="session-list__modes" role="group" aria-label="Sort mode">

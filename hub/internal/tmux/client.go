@@ -73,7 +73,21 @@ func (c *Client) Exec(ctx context.Context, args ...string) (stdout, stderr strin
 	return outBuf.String(), errBuf.String(), 0, nil
 }
 
-// EnsureGlobalOptions configures tmux's global options (`window-size latest` and `mouse on`).
+// These defaults apply to the selected tmux server. Explicit session/window
+// overrides still take precedence over the global session/window defaults.
+var globalOptions = []struct {
+	scope string
+	name  string
+	value string
+}{
+	{"-g", "window-size", "latest"},
+	{"-g", "mouse", "on"},
+	{"-s", "exit-unattached", "off"},
+	{"-g", "destroy-unattached", "off"},
+	{"-gw", "remain-on-exit", "failed"},
+}
+
+// EnsureGlobalOptions applies display and session preservation defaults.
 // Inspects each option before setting to avoid redundant client repaints.
 func (c *Client) EnsureGlobalOptions(ctx context.Context) error {
 	if c.err != nil {
@@ -82,17 +96,23 @@ func (c *Client) EnsureGlobalOptions(ctx context.Context) error {
 	c.optionsMu.Lock()
 	defer c.optionsMu.Unlock()
 
-	winOut, _, winCode, winErr := c.Exec(ctx, "show-options", "-gv", "window-size")
-	if winErr != nil || winCode != 0 || strings.TrimSpace(winOut) != "latest" {
-		if _, _, _, err := c.Exec(ctx, "set-option", "-g", "window-size", "latest"); err != nil {
-			return fmt.Errorf("set-option window-size: %w", err)
+	for _, option := range globalOptions {
+		out, stderr, code, err := c.Exec(ctx, "show-options", option.scope+"v", option.name)
+		if err != nil {
+			return fmt.Errorf("show-option %s: %w", option.name, err)
 		}
-	}
-
-	mouseOut, _, mouseCode, mouseErr := c.Exec(ctx, "show-options", "-gv", "mouse")
-	if mouseErr != nil || mouseCode != 0 || strings.TrimSpace(mouseOut) != "on" {
-		if _, _, _, err := c.Exec(ctx, "set-option", "-g", "mouse", "on"); err != nil {
-			return fmt.Errorf("set-option mouse: %w", err)
+		if code != 0 {
+			return fmt.Errorf("show-option %s: %s", option.name, strings.TrimSpace(stderr))
+		}
+		if strings.TrimSpace(out) == option.value {
+			continue
+		}
+		_, stderr, code, err = c.Exec(ctx, "set-option", option.scope, option.name, option.value)
+		if err != nil {
+			return fmt.Errorf("set-option %s: %w", option.name, err)
+		}
+		if code != 0 {
+			return fmt.Errorf("set-option %s: %s", option.name, strings.TrimSpace(stderr))
 		}
 	}
 	return nil
@@ -162,6 +182,9 @@ func homeDirectory() string {
 
 // Create starts a new detached tmux session with global options applied.
 func (c *Client) Create(ctx context.Context, name string) (*session.Session, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
 	if name == "" {
 		generated, err := c.generateUniqueName(ctx)
 		if err != nil {
@@ -174,11 +197,16 @@ func (c *Client) Create(ctx context.Context, name string) (*session.Session, err
 		return nil, session.ErrNameInUse
 	}
 
-	if err := c.EnsureGlobalOptions(ctx); err != nil {
-		return nil, fmt.Errorf("ensure global options: %w", err)
+	// One command queue keeps a newly started server alive and installs defaults
+	// before its first pane can exit. A failed set-option aborts the queue.
+	args := []string{"start-server"}
+	for _, option := range globalOptions {
+		args = append(args, ";", "set-option", option.scope, option.name, option.value)
 	}
-
-	_, stderr, code, err := c.Exec(ctx, "new-session", "-d", "-s", name, "-c", homeDirectory())
+	args = append(args, ";", "new-session", "-d", "-s", name, "-c", homeDirectory())
+	c.optionsMu.Lock()
+	_, stderr, code, err := c.Exec(ctx, args...)
+	c.optionsMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("exec new-session: %w", err)
 	}
@@ -193,8 +221,14 @@ func (c *Client) Create(ctx context.Context, name string) (*session.Session, err
 
 // Rename renames an existing tmux session.
 func (c *Client) Rename(ctx context.Context, oldName, newName string) error {
+	if c.err != nil {
+		return c.err
+	}
 	if !c.HasSession(ctx, oldName) {
 		return session.ErrNotFound
+	}
+	if oldName == newName {
+		return nil
 	}
 	if c.HasSession(ctx, newName) {
 		return session.ErrNameInUse
@@ -218,6 +252,9 @@ func (c *Client) Rename(ctx context.Context, oldName, newName string) error {
 
 // Kill terminates an existing tmux session.
 func (c *Client) Kill(ctx context.Context, name string) error {
+	if c.err != nil {
+		return c.err
+	}
 	if !c.HasSession(ctx, name) {
 		return session.ErrNotFound
 	}

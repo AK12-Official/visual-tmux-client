@@ -9,6 +9,25 @@ import (
 // MaxSessionNameRunes bounds session-name length counted in code points, not bytes.
 const MaxSessionNameRunes = 64
 
+func validateRune(r rune) error {
+	if unicode.IsControl(r) {
+		return fmt.Errorf("%w: name contains a control character", ErrInvalidName)
+	}
+	if r == ':' || r == '.' {
+		return fmt.Errorf("%w: name must not contain %q (reserved by tmux target syntax)", ErrInvalidName, r)
+	}
+	if r == '/' || r == '\\' {
+		return fmt.Errorf("%w: name must not contain %q (reserved path separator)", ErrInvalidName, r)
+	}
+	if r == '：' || r == '．' {
+		return fmt.Errorf("%w: name must not contain full-width %q", ErrInvalidName, r)
+	}
+	if r == ';' || r == '；' {
+		return fmt.Errorf("%w: name must not contain %q (reserved tmux command separator)", ErrInvalidName, r)
+	}
+	return nil
+}
+
 // ValidateSessionName enforces rules to keep names unambiguous:
 // no reserved tmux delimiters (: .), path separators (/ \), full-width lookalikes,
 // control characters, or leading/trailing whitespace.
@@ -24,17 +43,8 @@ func ValidateSessionName(name string) error {
 		return fmt.Errorf("%w: name is longer than %d characters", ErrInvalidName, MaxSessionNameRunes)
 	}
 	for _, r := range runes {
-		if unicode.IsControl(r) {
-			return fmt.Errorf("%w: name contains a control character", ErrInvalidName)
-		}
-		if r == ':' || r == '.' {
-			return fmt.Errorf("%w: name must not contain %q (reserved by tmux target syntax)", ErrInvalidName, r)
-		}
-		if r == '/' || r == '\\' {
-			return fmt.Errorf("%w: name must not contain %q (reserved path separator)", ErrInvalidName, r)
-		}
-		if r == '：' || r == '．' {
-			return fmt.Errorf("%w: name must not contain full-width %q", ErrInvalidName, r)
+		if err := validateRune(r); err != nil {
+			return err
 		}
 	}
 	if unicode.IsSpace(runes[0]) || unicode.IsSpace(runes[len(runes)-1]) {

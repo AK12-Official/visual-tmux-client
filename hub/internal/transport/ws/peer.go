@@ -4,13 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/coder/websocket"
 )
 
 // ConnPeer adapts a *websocket.Conn to the terminal.Peer interface.
 type ConnPeer struct {
-	conn *websocket.Conn
+	conn    *websocket.Conn
+	writeMu sync.Mutex
 }
 
 // NewConnPeer wraps a WebSocket connection.
@@ -24,11 +26,15 @@ func (p *ConnPeer) SendText(ctx context.Context, v any) error {
 	if err != nil {
 		return fmt.Errorf("marshal text message: %w", err)
 	}
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 	return p.conn.Write(ctx, websocket.MessageText, b)
 }
 
 // SendBinary writes raw bytes as a binary frame.
 func (p *ConnPeer) SendBinary(ctx context.Context, data []byte) error {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 	return p.conn.Write(ctx, websocket.MessageBinary, data)
 }
 

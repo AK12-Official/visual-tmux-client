@@ -44,7 +44,7 @@ Rules are defined in root `.golangci.yml`:
 - **`lll`**: Maximum 120 characters per line (tab-width: 4), applicable to all Go source and test files.
 - **`funlen`**: Maximum 80 lines and 50 statements per function (excluding comments).
 - **`gocyclo`**: Cyclomatic complexity threshold is 15.
-- **`mnd`**: Magic numbers in business logic are disallowed. Named semantic constants must be defined. Only `internal/config/defaults.go` is exempt from `mnd`.
+- **`mnd`**: Magic numbers in business logic are disallowed. Named semantic constants must be defined. Excluded for test files and `internal/config/defaults.go`.
 - **`goconst`**: Repeated strings of length >= 3 occurring 3 or more times require a shared constant.
 - **`errcheck`**: Unhandled errors and discarding via blank identifier `_` are strictly checked (`check-blank: true`).
 - **`errorlint`**: Strict error wrapping and comparison checks.

@@ -6,6 +6,17 @@
 
 > 本项目目前处于早期的 `v0.3` 版本。它管理运行 Visual Tmux Client 的同一台机器上的 tmux；暂未实现多主机汇聚。
 
+## 会话保留默认值
+
+VTC 创建或连接会话时，会在所连接的 tmux 服务上设置全局默认值：
+`exit-unattached off`、`destroy-unattached off`、`remain-on-exit failed`。
+断开浏览器或关闭 VTC 不会因此销毁会话；窗格中的程序异常退出时保留输出和退出状态，正常 `exit` 仍会关闭窗格。
+这些全局默认值也影响同一 tmux 服务上没有单独覆盖设置的其他会话和窗口。
+已有的会话、窗口或窗格级覆盖值保持优先。空服务仍沿用 tmux 的 `exit-empty` 设置。
+
+异常退出后，可在 tmux 命令提示符（`Ctrl+b` 后按 `:`）中运行 `respawn-pane` 重新启动当前窗格。
+这些设置不能阻止显式的 `kill-session`、`kill-server` 或系统重启；测试使用独立 socket，清理只针对测试服务。
+
 ## 特性
 
 - 查看、创建（一键生成自动命名的会话）、重命名及终止本地 tmux 会话，支持单会话或批量操作。
@@ -16,7 +27,7 @@
 - 支持通过拖拽手动调整会话顺序与置顶固定，左侧会话栏可自由折叠。
 - 操作反馈与终端事件通过分级、自动过期的 Toast 浮层提示。
 - 内置中文 tmux 指南，点击应用内的帮助按钮即可查阅。
-- 会话名称支持包括中文在内的非 ASCII 字符（最多 64 字符）；保留/禁用 `:`、`.`、`/`、`\`、全角易混淆符号、边缘空白及控制字符。
+- 会话名称支持包括中文在内的非 ASCII 字符（最多 64 字符）；保留/禁用 `:`、`.`、`/`、`\`、`;`、全角易混淆符号（`：`、`．`、`；`）、边缘空白及控制字符。
 - 浏览器断开不会影响后台会话，tmux 会话持续运行。
 - 采用 Bearer Token 认证与短期、一次性的 WebSocket 凭据（ticket）。
 - Web 前端完整内嵌于单一无依赖的 Go 应用程序二进制中。
@@ -36,8 +47,8 @@
 从项目的 Releases 页面下载适合当前平台的压缩包，然后执行：
 
 ```sh
-tar -xzf visual-tmux-client_0.3.0_linux_amd64.tar.gz
-cd visual-tmux-client_0.3.0_linux_amd64
+tar -xzf visual-tmux-client_0.3.1_linux_amd64.tar.gz
+cd visual-tmux-client_0.3.1_linux_amd64
 ./visual-tmux-client
 ```
 
@@ -182,17 +193,17 @@ TARGETS="darwin/arm64 darwin/amd64 linux/arm64 linux/amd64" make package
 Visual Tmux Client 采用严格的分层设计与单一方向依赖：
 
 ```text
-cmd/visual-tmux-client/  主入口，CLI 参数解析与退出码处理
-internal/app/            应用组装根（composition root）、信号捕获与两阶段优雅关闭
-internal/config/         强类型配置结构、严格 YAML 解码、多源加载器与来源追踪
-internal/auth/           Bearer Token 校验、抗时序攻击恒定时间比较、一次性票据池
-internal/session/        会话业务模型、名称规范校验、业务领域服务与 Backend 接口
-internal/tmux/           Tmux 命令执行、PTY 进程管理、Socket 隔离与环境敏感信息清理
-internal/terminal/       终端输出背压缓冲、环形暂存队列、连接 Pump 调度协调
-internal/transport/http/ REST API 路由、DTO 映射、鉴权中间件与嵌入式 SPA 静态托管
-internal/transport/ws/   WebSocket 握手、Origin 校验矩阵、二进制流协议与 Peer 适配器
-web/                     Vue 3 浏览器前端（Vite + TypeScript + xterm.js）
-configs/                 示例配置文件模板
+hub/cmd/visual-tmux-client/  主入口，CLI 参数解析与退出码处理
+hub/internal/app/            应用组装根（composition root）、信号捕获与两阶段优雅关闭
+hub/internal/config/         强类型配置结构、严格 YAML 解码、多源加载器与来源追踪
+hub/internal/auth/           Bearer Token 校验、抗时序攻击恒定时间比较、一次性票据池
+hub/internal/session/        会话业务模型、名称规范校验、业务领域服务与 Backend 接口
+hub/internal/tmux/           Tmux 命令执行、PTY 进程管理、Socket 隔离与环境敏感信息清理
+hub/internal/terminal/       终端输出背压缓冲、环形暂存队列、连接 Pump 调度协调
+hub/internal/transport/http/ REST API 路由、DTO 映射、鉴权中间件与嵌入式 SPA 静态托管
+hub/internal/transport/ws/   WebSocket 握手、Origin 校验矩阵、二进制流协议与 Peer 适配器
+hub/web/                     Vue 3 浏览器前端（Vite + TypeScript + xterm.js）
+configs/                     示例配置文件模板
 ```
 
 浏览器启动时首先访问 `GET /api/client-config` 获取公开运行参数再挂载界面。终端连接前通过 REST API 用长期 Token 兑换 30 秒单次有效的临时票据，确保敏感凭据绝不泄露在 WebSocket URL 或进程参数中。

@@ -71,14 +71,21 @@ async function authFetch(path: string, init?: RequestInit): Promise<Response> {
   return res
 }
 
-async function errorText(res: Response): Promise<string> {
+export async function errorText(res: Response): Promise<string> {
   try {
-    const body = (await res.json()) as { error?: unknown } | null
-    if (body && typeof body.error === 'string') return body.error
+    const text = await res.text()
+    try {
+      const body = JSON.parse(text) as { error?: unknown; message?: unknown } | null
+      if (body && typeof body.error === 'string') return body.error
+      if (body && typeof body.message === 'string') return body.message
+    } catch {
+      const trimmed = text.trim()
+      if (trimmed) return trimmed.slice(0, 200)
+    }
   } catch {
-    /* non-JSON error body */
+    /* stream read failure */
   }
-  return `${res.status} ${res.statusText}`
+  return res.statusText ? `${res.status} ${res.statusText}` : `${res.status}`
 }
 
 interface SessionsResponse {
@@ -92,22 +99,25 @@ export async function listSessions(): Promise<Session[]> {
   return Array.isArray(data?.sessions) ? data.sessions : []
 }
 
-export async function createSession(name?: string): Promise<void> {
+export async function createSession(name?: string): Promise<Session> {
+  const trimmed = name?.trim()
   const res = await authFetch('/api/hosts/local/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(name ? { name } : {}),
+    body: JSON.stringify(trimmed ? { name: trimmed } : {}),
   })
   if (!res.ok) throw new Error(await errorText(res))
+  return (await res.json()) as Session
 }
 
-export async function renameSession(oldName: string, newName: string): Promise<void> {
+export async function renameSession(oldName: string, newName: string): Promise<Session> {
   const res = await authFetch(`/api/hosts/local/sessions/${encodeURIComponent(oldName)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: newName }),
   })
   if (!res.ok) throw new Error(await errorText(res))
+  return (await res.json()) as Session
 }
 
 export async function killSession(name: string): Promise<void> {

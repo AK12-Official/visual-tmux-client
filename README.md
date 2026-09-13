@@ -6,6 +6,19 @@
 
 > The project is currently an early `v0.3` release. It manages tmux on the same machine where Visual Tmux Client runs; remote-host aggregation is not implemented.
 
+## Session preservation defaults
+
+When creating or attaching to a session, VTC sets global defaults on the selected tmux server:
+`exit-unattached off`, `destroy-unattached off`, and `remain-on-exit failed`.
+Browser disconnects and VTC shutdown leave sessions running. A failed pane program retains its output and exit status;
+a successful `exit` still closes the pane. These defaults also affect other sessions and windows on the same server
+that have no local overrides. Explicit session, window, and pane overrides retain precedence.
+The server's existing `exit-empty` setting is unchanged.
+
+After a failure, run `respawn-pane` in the tmux command prompt (`Ctrl+b`, then `:`) to restart the current pane.
+These settings cannot prevent explicit `kill-session`, `kill-server`, or a system restart.
+Tests use isolated sockets and target only their own server during cleanup.
+
 ## Features
 
 - List, create (one click, auto-named), rename, and terminate local tmux sessions — individually or in batches.
@@ -16,7 +29,7 @@
 - Manual session ordering with drag reorder and pin-to-top, plus a collapsible session sidebar.
 - Leveled, auto-expiring toast notifications for action results and terminal events.
 - Built-in Chinese tmux guide available from the in-app help button.
-- Session names accept non-ASCII text such as Chinese (up to 64 characters); `:`/`.`, `/`/`\`, full-width lookalikes, edge whitespace, and control characters are reserved/disallowed.
+- Session names accept non-ASCII text such as Chinese (up to 64 characters); `:`, `.`, `/`, `\`, `;`, full-width lookalikes (`：`, `．`, `；`), edge whitespace, and control characters are reserved/disallowed.
 - Preserve terminal state across browser disconnects by leaving tmux sessions running.
 - Use bearer-token authentication and short-lived, single-use WebSocket tickets.
 - Ship the web UI inside one dependency-free application binary.
@@ -36,8 +49,8 @@ Building from source additionally requires Go 1.26.3+ and Node.js 24+.
 Download the archive for your platform from the repository's Releases page, then:
 
 ```sh
-tar -xzf visual-tmux-client_0.3.0_linux_amd64.tar.gz
-cd visual-tmux-client_0.3.0_linux_amd64
+tar -xzf visual-tmux-client_0.3.1_linux_amd64.tar.gz
+cd visual-tmux-client_0.3.1_linux_amd64
 ./visual-tmux-client
 ```
 
@@ -182,17 +195,17 @@ Pushing a `v*` tag runs the GitHub Actions release workflow, builds those four t
 Visual Tmux Client is organized into clean functional packages with strict dependency directions:
 
 ```text
-cmd/visual-tmux-client/  Entry point, CLI flag parsing, and exit code handling
-internal/app/            Application composition root, signals, and two-phase shutdown
-internal/config/         Configuration models, strict YAML decoding, loader, and provenance
-internal/auth/           Bearer token verification, timing-safe equality, ticket store
-internal/session/        Session domain model, name validation, service, Backend interface
-internal/tmux/           Tmux command runner, PTY allocation, socket isolation, environment scrubbing
-internal/terminal/       Terminal backpressure buffer, ring staging, attachment pump
-internal/transport/http/ REST API routing, DTO mapping, bearer middleware, SPA static handler
-internal/transport/ws/   WebSocket handshake, origin validation, framing, peer adapter
-web/                     Vue 3 frontend (Vite + TypeScript + xterm.js)
-configs/                 Example configuration templates
+hub/cmd/visual-tmux-client/  Entry point, CLI flag parsing, and exit code handling
+hub/internal/app/            Application composition root, signals, and two-phase shutdown
+hub/internal/config/         Configuration models, strict YAML decoding, loader, and provenance
+hub/internal/auth/           Bearer token verification, timing-safe equality, ticket store
+hub/internal/session/        Session domain model, name validation, service, Backend interface
+hub/internal/tmux/           Tmux command runner, PTY allocation, socket isolation, environment scrubbing
+hub/internal/terminal/       Terminal backpressure buffer, ring staging, attachment pump
+hub/internal/transport/http/ REST API routing, DTO mapping, bearer middleware, SPA static handler
+hub/internal/transport/ws/   WebSocket handshake, origin validation, framing, peer adapter
+hub/web/                     Vue 3 frontend (Vite + TypeScript + xterm.js)
+configs/                     Example configuration templates
 ```
 
 The browser UI fetches public runtime parameters from `GET /api/client-config` prior to mounting. Session authentication exchanges the long-lived Bearer token for a single-use 30-second ticket, ensuring credentials are never exposed in WebSocket URLs or process arguments.

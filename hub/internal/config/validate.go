@@ -41,8 +41,11 @@ const (
 	minScrollback = 0
 	maxScrollback = 100000
 
-	minFontSizeBound = 1
-	maxFontSizeBound = 256
+	minBrowserTimerDuration  = 100 * time.Millisecond
+	minReconnectInitialDelay = 50 * time.Millisecond
+
+	minFontSizeBound = 6
+	maxFontSizeBound = 72
 
 	minToasts = 2
 	maxToasts = 100
@@ -444,11 +447,11 @@ func validateShutdownConfig(s *ShutdownConfig) error {
 
 func validateWebTimers(w *WebConfig) error {
 	if err := validateBrowserDuration("web.session_poll_interval",
-		w.SessionPollInterval, minGeneralDuration, maxBrowserDuration); err != nil {
+		w.SessionPollInterval, minBrowserTimerDuration, maxBrowserDuration); err != nil {
 		return err
 	}
 	if err := validateBrowserDuration("web.activity_decay",
-		w.ActivityDecay, minGeneralDuration, maxActivityDecay); err != nil {
+		w.ActivityDecay, minBrowserTimerDuration, maxActivityDecay); err != nil {
 		return err
 	}
 	if err := validateBrowserDuration("web.activity_throttle",
@@ -461,12 +464,12 @@ func validateWebTimers(w *WebConfig) error {
 		return err
 	}
 	if err := validateBrowserDuration("web.reconnect.initial_delay",
-		w.Reconnect.InitialDelay, minGeneralDuration, w.Reconnect.MaxDelay.Duration()); err != nil {
+		w.Reconnect.InitialDelay, minReconnectInitialDelay, w.Reconnect.MaxDelay.Duration()); err != nil {
 		return fmt.Errorf("field \"web.reconnect.initial_delay\": must satisfy initial_delay <= max_delay (%s): %w",
 			w.Reconnect.MaxDelay.Duration(), err)
 	}
 	return validateBrowserDuration("web.reconnect.max_delay",
-		w.Reconnect.MaxDelay, minGeneralDuration, maxBrowserDuration)
+		w.Reconnect.MaxDelay, minReconnectInitialDelay, maxBrowserDuration)
 }
 
 func validateWebTerminal(w *WebTerminalConfig) error {
@@ -495,15 +498,15 @@ func validateWebNotifications(n *NotificationsConfig) error {
 			n.MaxToasts, minToasts, maxToasts)
 	}
 	if err := validateBrowserDuration("web.notifications.error_lifetime",
-		n.ErrorLifetime, minGeneralDuration, maxBrowserDuration); err != nil {
+		n.ErrorLifetime, minBrowserTimerDuration, maxBrowserDuration); err != nil {
 		return err
 	}
 	if err := validateBrowserDuration("web.notifications.warning_lifetime",
-		n.WarningLifetime, minGeneralDuration, maxBrowserDuration); err != nil {
+		n.WarningLifetime, minBrowserTimerDuration, maxBrowserDuration); err != nil {
 		return err
 	}
 	return validateBrowserDuration("web.notifications.info_lifetime",
-		n.InfoLifetime, minGeneralDuration, maxBrowserDuration)
+		n.InfoLifetime, minBrowserTimerDuration, maxBrowserDuration)
 }
 
 func validateWebConfig(w *WebConfig) error {
@@ -526,11 +529,11 @@ func validateDuration(field string, d Duration, min, max time.Duration) error {
 
 func validateBrowserDuration(field string, d Duration, min, max time.Duration) error {
 	td := d.Duration()
-	if td < min || td > max {
-		return fmt.Errorf("field %q: duration %s out of range [%s, %s]", field, td, min, max)
-	}
 	if td%time.Millisecond != 0 {
 		return fmt.Errorf("field %q: duration %s must be integer milliseconds", field, td)
+	}
+	if td < min || td > max {
+		return fmt.Errorf("field %q: duration %s out of range [%s, %s]", field, td, min, max)
 	}
 	return nil
 }

@@ -33,7 +33,7 @@ The hub SHALL expose an operation that returns the tmux sessions currently prese
 
 The hub SHALL expose an operation that creates a new detached tmux session. The caller MAY supply a name; when no name is supplied the hub SHALL generate a unique one. A created session SHALL start in the invoking user's home directory.
 
-A caller-supplied name SHALL be valid when all of the following hold: it is non-empty; it is valid UTF-8 containing no control characters; it contains neither `:` nor `.` (which tmux's own name and target syntax reserves), neither `/` nor `\` (reserved path separators), nor full-width lookalikes `：` and `．` (which render identically to the reserved characters); it has no leading or trailing whitespace; and it is at most 64 characters long, counted in code points. The hub SHALL accept any valid name, including names outside ASCII such as CJK text.
+A caller-supplied name SHALL be valid when all of the following hold: it is non-empty; it is valid UTF-8 containing no control characters; it contains neither `:` nor `.` (which tmux's own name and target syntax reserves), neither `/` nor `\` (reserved path separators), nor `;` (reserved tmux command separator), nor full-width lookalikes `：`, `．`, and `；` (which render identically to the reserved characters); it has no leading or trailing whitespace; and it is at most 64 characters long, counted in code points. The hub SHALL accept any valid name, including names outside ASCII such as CJK text.
 
 #### Scenario: Create with an explicit name
 
@@ -62,7 +62,7 @@ A caller-supplied name SHALL be valid when all of the following hold: it is non-
 
 #### Scenario: Name is rejected
 
-- **WHEN** a caller requests session creation with a name that contains a control character, `:`, `.`, `/`, `\` or full-width lookalikes, leading or trailing whitespace, or that exceeds 64 code points
+- **WHEN** a caller requests session creation with a name that contains a control character, `:`, `.`, `/`, `\`, `;` or full-width lookalikes, leading or trailing whitespace, or that exceeds 64 code points
 - **THEN** the hub does not invoke tmux and returns a validation error naming the constraint that was violated
 
 ### Requirement: Session renaming
@@ -123,7 +123,7 @@ The hub SHALL invoke tmux by passing an argument vector directly to the operatin
 
 #### Scenario: Name contains shell metacharacters
 
-- **WHEN** a caller supplies a session name containing shell metacharacters such as `;`, `$`, backticks, or quotes
+- **WHEN** a caller supplies a session name containing shell metacharacters such as '$', backticks, '&', or quotes
 - **THEN** the name reaches tmux as one argument with no shell interpretation of it ever occurring
 
 ### Requirement: Terminal attachment

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -57,7 +58,7 @@ func startSmokeServer(
 	t.Helper()
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = append(testTmuxEnv(t.TempDir()), env...)
 
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
@@ -136,20 +137,32 @@ func stopSmokeServer(t *testing.T, s *runningServer) {
 	_ = s.cmd.Wait() //nolint:errcheck // wait completion in test helper
 }
 
+var (
+	smokeBinPath string
+	smokeBinOnce sync.Once
+	smokeBinErr  error
+)
+
 func ensureBinaryBuilt(t *testing.T) string {
 	t.Helper()
-	binPath := filepath.Join("..", "..", "visual-tmux-client")
-	if _, err := os.Stat(binPath); err != nil {
+	smokeBinOnce.Do(func() {
+		binPath := filepath.Join("..", "..", "visual-tmux-client")
 		cmd := exec.Command("go", "build", "-o", binPath, ".")
-		if out, bErr := cmd.CombinedOutput(); bErr != nil {
-			t.Fatalf("failed to build binary: %v: %s", bErr, string(out))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			smokeBinErr = fmt.Errorf("failed to build binary: %w: %s", err, string(out))
+			return
 		}
+		abs, err := filepath.Abs(binPath)
+		if err != nil {
+			smokeBinErr = fmt.Errorf("failed to resolve abs path: %w", err)
+			return
+		}
+		smokeBinPath = abs
+	})
+	if smokeBinErr != nil {
+		t.Fatal(smokeBinErr)
 	}
-	abs, err := filepath.Abs(binPath)
-	if err != nil {
-		t.Fatalf("failed to resolve abs path: %v", err)
-	}
-	return abs
+	return smokeBinPath
 }
 
 func TestSmokeNoYAML(t *testing.T) {
@@ -365,13 +378,13 @@ web:
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = res1.Body.Close() }() //nolint:errcheck // test cleanup
 	var conf1 struct {
 		Web struct {
 			ActivityDecay int64 `json:"activity_decay"`
 		} `json:"web"`
 	}
 	_ = json.NewDecoder(res1.Body).Decode(&conf1) //nolint:errcheck // test helper
-	_ = res1.Body.Close()                         //nolint:errcheck // test helper
 	stopSmokeServer(t, srv1)
 
 	if conf1.Web.ActivityDecay != 3000 {
@@ -387,13 +400,13 @@ web:
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = res2.Body.Close() }() //nolint:errcheck // test cleanup
 	var conf2 struct {
 		Web struct {
 			ActivityDecay int64 `json:"activity_decay"`
 		} `json:"web"`
 	}
 	_ = json.NewDecoder(res2.Body).Decode(&conf2) //nolint:errcheck // test helper
-	_ = res2.Body.Close()                         //nolint:errcheck // test helper
 
 	if conf2.Web.ActivityDecay != 4000 {
 		t.Fatalf("expected 4000 ms after restart, got %d", conf2.Web.ActivityDecay)
@@ -407,12 +420,13 @@ func TestSmokeTerminalInputOutputAndReconnect(t *testing.T) {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	tmuxDir := t.TempDir()
-	env := []string{"TMUX_TMPDIR=" + tmuxDir}
+	env := testTmuxEnv(tmuxDir)
+	socket := filepath.Join(tmuxDir, fmt.Sprintf("tmux-%d", os.Getuid()), "default")
 	t.Cleanup(func() {
 		tmux, err := exec.LookPath("tmux")
 		if err == nil {
-			cmd := exec.Command(tmux, "kill-server")
-			cmd.Env = append(os.Environ(), "TMUX_TMPDIR="+tmuxDir)
+			cmd := exec.Command(tmux, "-S", socket, "kill-server")
+			cmd.Env = env
 			_ = cmd.Run() //nolint:errcheck // cleanup isolated test tmux server
 		}
 	})
@@ -431,6 +445,7 @@ func TestSmokeTerminalInputOutputAndReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create session: %v", err)
 	}
+	defer func() { _ = res.Body.Close() }() //nolint:errcheck // test cleanup
 	if res.StatusCode != http.StatusCreated {
 		body, bErr := io.ReadAll(res.Body)
 		if bErr != nil {
@@ -438,7 +453,27 @@ func TestSmokeTerminalInputOutputAndReconnect(t *testing.T) {
 		}
 		t.Fatalf("expected 201 on create session, got %d: %s", res.StatusCode, string(body))
 	}
-	_ = res.Body.Close() //nolint:errcheck // cleanup
+
+	// Verify nameless session creation generates default name
+	namelessReq, _ := http.NewRequest( //nolint:errcheck // standard test request
+		http.MethodPost,
+		"http://"+srv.addr+"/api/hosts/local/sessions",
+		strings.NewReader(`{}`),
+	)
+	namelessReq.Header.Set("Authorization", "Bearer "+srv.token)
+	namelessReq.Header.Set("Content-Type", "application/json")
+	namelessRes, err := http.DefaultClient.Do(namelessReq)
+	if err != nil {
+		t.Fatalf("failed to create nameless session: %v", err)
+	}
+	defer func() { _ = namelessRes.Body.Close() }() //nolint:errcheck // test cleanup
+	if namelessRes.StatusCode != http.StatusCreated {
+		body, bErr := io.ReadAll(namelessRes.Body)
+		if bErr != nil {
+			t.Fatalf("expected 201 on create nameless session, got %d", namelessRes.StatusCode)
+		}
+		t.Fatalf("expected 201 on create nameless session, got %d: %s", namelessRes.StatusCode, string(body))
+	}
 
 	// Issue first ticket
 	ticketReq, _ := http.NewRequest( //nolint:errcheck // standard test request
@@ -452,6 +487,7 @@ func TestSmokeTerminalInputOutputAndReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to issue ticket: %v", err)
 	}
+	defer func() { _ = tRes.Body.Close() }() //nolint:errcheck // test cleanup
 	if tRes.StatusCode != http.StatusOK {
 		tBody, bErr := io.ReadAll(tRes.Body)
 		if bErr != nil {
@@ -463,7 +499,6 @@ func TestSmokeTerminalInputOutputAndReconnect(t *testing.T) {
 		Ticket string `json:"ticket"`
 	}
 	_ = json.NewDecoder(tRes.Body).Decode(&ticketPayload) //nolint:errcheck // helper
-	_ = tRes.Body.Close()                                 //nolint:errcheck // helper
 
 	// Connect WebSocket
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -511,6 +546,7 @@ func TestSmokeTerminalInputOutputAndReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to issue second ticket: %v", err)
 	}
+	defer func() { _ = tRes2.Body.Close() }() //nolint:errcheck // test cleanup
 	if tRes2.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 on second ticket issue, got %d", tRes2.StatusCode)
 	}
@@ -518,7 +554,6 @@ func TestSmokeTerminalInputOutputAndReconnect(t *testing.T) {
 		Ticket string `json:"ticket"`
 	}
 	_ = json.NewDecoder(tRes2.Body).Decode(&ticketPayload2) //nolint:errcheck // helper
-	_ = tRes2.Body.Close()                                  //nolint:errcheck // helper
 
 	// Reconnect WebSocket
 	wsURL2 := fmt.Sprintf("ws://%s/ws/local/smoke-sess?ticket=%s&cols=80&rows=24", srv.addr, ticketPayload2.Ticket)

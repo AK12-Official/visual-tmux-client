@@ -31,7 +31,7 @@ func NewStaticSPAHandler(staticFS fs.FS) http.Handler {
 			return
 		}
 		if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/ws/") {
-			http.NotFound(w, r)
+			writeError(w, http.StatusNotFound, "not_found")
 			return
 		}
 		if name := strings.TrimPrefix(path, "/"); name != "" && name != "index.html" {

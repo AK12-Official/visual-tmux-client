@@ -60,18 +60,20 @@ func TestInvalidNameDoesNotCallBackend(t *testing.T) {
 	}
 
 	for _, name := range invalidNames {
-		t.Run("Create_"+name, func(t *testing.T) {
-			backend := &fakeBackend{}
-			svc := NewService(backend)
+		if name != "" {
+			t.Run("Create_"+name, func(t *testing.T) {
+				backend := &fakeBackend{}
+				svc := NewService(backend)
 
-			_, err := svc.CreateSession(context.Background(), name)
-			if !errors.Is(err, ErrInvalidName) {
-				t.Fatalf("expected ErrInvalidName, got: %v", err)
-			}
-			if backend.createCalls != 0 {
-				t.Errorf("backend should not have been called for invalid name %q", name)
-			}
-		})
+				_, err := svc.CreateSession(context.Background(), name)
+				if !errors.Is(err, ErrInvalidName) {
+					t.Fatalf("expected ErrInvalidName, got: %v", err)
+				}
+				if backend.createCalls != 0 {
+					t.Errorf("backend should not have been called for invalid name %q", name)
+				}
+			})
+		}
 
 		t.Run("RenameOld_"+name, func(t *testing.T) {
 			backend := &fakeBackend{}
@@ -111,6 +113,22 @@ func TestInvalidNameDoesNotCallBackend(t *testing.T) {
 				t.Errorf("backend should not have been called for invalid name %q", name)
 			}
 		})
+	}
+}
+
+func TestCreateSession_EmptyNameDelegatesToBackend(t *testing.T) {
+	backend := &fakeBackend{}
+	svc := NewService(backend)
+
+	sess, err := svc.CreateSession(context.Background(), "")
+	if err != nil {
+		t.Fatalf("expected nil error for empty session name, got: %v", err)
+	}
+	if backend.createCalls != 1 {
+		t.Errorf("backend.Create should have been called once for empty name, got %d", backend.createCalls)
+	}
+	if sess == nil {
+		t.Fatal("expected non-nil session returned")
 	}
 }
 
@@ -187,6 +205,8 @@ func TestValidateSessionName_SecurityEdgeCases(t *testing.T) {
 		{"windows path separator backslash", "path\\session", false},
 		{"full width colon lookalike", "sess：0", false},
 		{"full width dot lookalike", "sess．0", false},
+		{"tmux command separator semicolon", "sess;0", false},
+		{"full width semicolon lookalike", "sess；0", false},
 	}
 
 	for _, tt := range tests {

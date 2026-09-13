@@ -2,7 +2,7 @@
 set -eu
 
 project_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-version=${VERSION:-0.3.0}
+version=${VERSION:-0.3.1}
 output_dir=${OUTPUT_DIR:-"$project_dir/release"}
 targets=${TARGETS:-"$(go env GOOS)/$(go env GOARCH)"}
 

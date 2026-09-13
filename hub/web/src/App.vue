@@ -322,12 +322,22 @@ function logout() {
 
 // One-click creation: the hub assigns the default name (made unique by its
 // suffix retry); renaming is how the user personalizes it afterwards.
+const creating = ref(false)
 async function onCreate() {
+  if (creating.value) return
+  creating.value = true
   try {
-    await createSession()
+    const sess = await createSession()
     await refresh()
+    select(sess.name)
   } catch (err) {
+    if (err instanceof AuthError) {
+      handleAuthFailure()
+      return
+    }
     notify('error', err instanceof Error ? err.message : String(err))
+  } finally {
+    creating.value = false
   }
 }
 
@@ -379,6 +389,10 @@ async function onRename(oldName: string, newName: string) {
     renameTerminalSession(oldName, newName)
     await refresh()
   } catch (err) {
+    if (err instanceof AuthError) {
+      handleAuthFailure()
+      return
+    }
     notify('error', err instanceof Error ? err.message : String(err))
   }
 }
@@ -421,6 +435,10 @@ async function onKill(name: string) {
     dropPanel(name)
     await refresh()
   } catch (err) {
+    if (err instanceof AuthError) {
+      handleAuthFailure()
+      return
+    }
     notify('error', err instanceof Error ? err.message : String(err))
   }
 }
@@ -434,7 +452,11 @@ async function onBulkKill(names: string[]) {
       await killSession(name)
       if (selected.value === name) selected.value = null
       dropPanel(name)
-    } catch {
+    } catch (err) {
+      if (err instanceof AuthError) {
+        handleAuthFailure()
+        return
+      }
       failed.push(name)
     }
   }
@@ -523,6 +545,7 @@ onBeforeUnmount(() => {
                 :error="listError"
                 :selected="selected"
                 :active="activity"
+                :creating="creating"
                 @select="select($event)"
                 @create="onCreate"
                 @rename="onRename"
@@ -544,7 +567,7 @@ onBeforeUnmount(() => {
               :aria-expanded="!sidebarCollapsed"
               @click="toggleSidebar"
             ><span aria-hidden="true">»</span></button>
-            <button class="app__rail-btn" type="button" title="new session" aria-label="Create new session" @click="onCreate">
+            <button class="app__rail-btn" type="button" title="new session" aria-label="Create new session" :disabled="creating" @click="onCreate">
               <span aria-hidden="true">+</span>
             </button>
             <button class="app__rail-btn" type="button" title="help" aria-label="Open tmux help" @click="helpOpen = true">

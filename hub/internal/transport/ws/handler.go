@@ -155,7 +155,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	proc, err := h.procFactory.NewProcess(context.Background(), session, cols, rows)
+	proc, err := h.procFactory.NewProcess(r.Context(), session, cols, rows)
 	if err != nil {
 		sendErrorAndClose(conn, "attach failed: "+err.Error(), true)
 		return

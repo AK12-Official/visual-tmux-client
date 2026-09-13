@@ -106,7 +106,7 @@ func TestE2ERestartPreservesSession(t *testing.T) {
 		t.Fatalf("create socket dir: %v", err)
 	}
 
-	tmuxEnv := append([]string{"TMUX_TMPDIR=" + tmpdir}, os.Environ()...)
+	tmuxEnv := testTmuxEnv(tmpdir)
 	_, _, code, err := runCmd(tmux, tmuxEnv, "-S", socket, "new-session", "-d", "-s", "e2e-sess")
 	if err != nil || code != 0 {
 		t.Fatalf("new-session failed: code=%d err=%v", code, err)

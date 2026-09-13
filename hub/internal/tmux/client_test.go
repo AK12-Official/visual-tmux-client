@@ -29,6 +29,7 @@ func newTestClient(t *testing.T) *Client {
 	if !tmuxAvailable(t) {
 		t.Skip("tmux not available")
 	}
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
 	sock := uniqueSocket(t)
 	c := NewClient("", sock)
 	if c.err != nil {
@@ -98,6 +99,33 @@ func TestUnicodeAndExactTargeting(t *testing.T) {
 	}
 }
 
+func TestCreateNamelessSessionAndAutoCollision(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	sess1, err := c.Create(ctx, "")
+	if err != nil {
+		t.Fatalf("Create first nameless session failed: %v", err)
+	}
+	if !strings.HasPrefix(sess1.Name, "session-") {
+		t.Errorf("expected generated name with prefix session-, got: %q", sess1.Name)
+	}
+	if !c.HasSession(ctx, sess1.Name) {
+		t.Errorf("expected HasSession true for sess1 %q", sess1.Name)
+	}
+
+	sess2, err := c.Create(ctx, "")
+	if err != nil {
+		t.Fatalf("Create second nameless session failed: %v", err)
+	}
+	if sess2.Name == sess1.Name {
+		t.Errorf("expected distinct generated session names, got same: %q", sess1.Name)
+	}
+	if !c.HasSession(ctx, sess2.Name) {
+		t.Errorf("expected HasSession true for sess2 %q", sess2.Name)
+	}
+}
+
 func TestConflictAndNotFound(t *testing.T) {
 	c := newTestClient(t)
 	ctx := context.Background()
@@ -123,6 +151,11 @@ func TestConflictAndNotFound(t *testing.T) {
 	err = c.Rename(ctx, "session-a", "session-b")
 	if !errors.Is(err, session.ErrNameInUse) {
 		t.Errorf("expected ErrNameInUse on rename to existing name, got: %v", err)
+	}
+
+	// Rename to same name is no-op
+	if err := c.Rename(ctx, "session-a", "session-a"); err != nil {
+		t.Errorf("expected nil error on renaming session to itself, got: %v", err)
 	}
 
 	// Not found on rename
@@ -282,5 +315,14 @@ func TestNewClient_NotFoundPath(t *testing.T) {
 	}
 	if err := c.EnsureGlobalOptions(ctx); !errors.Is(err, session.ErrTmuxNotFound) {
 		t.Errorf("expected EnsureGlobalOptions to return ErrTmuxNotFound, got %v", err)
+	}
+	if _, err := c.Create(ctx, "test"); !errors.Is(err, session.ErrTmuxNotFound) {
+		t.Errorf("expected Create to return ErrTmuxNotFound, got %v", err)
+	}
+	if err := c.Rename(ctx, "old", "new"); !errors.Is(err, session.ErrTmuxNotFound) {
+		t.Errorf("expected Rename to return ErrTmuxNotFound, got %v", err)
+	}
+	if err := c.Kill(ctx, "test"); !errors.Is(err, session.ErrTmuxNotFound) {
+		t.Errorf("expected Kill to return ErrTmuxNotFound, got %v", err)
 	}
 }
