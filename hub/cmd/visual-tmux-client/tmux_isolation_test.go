@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/AK12-Official/visual-tmux-client/hub/internal/testutil"
 )
 
 // Never let a test inherit the caller's tmux server or temporary directory.
@@ -27,7 +29,7 @@ func TestTerminalTestsPreserveParentTmux(t *testing.T) {
 	if err != nil {
 		t.Skip("tmux not available")
 	}
-	dir := t.TempDir()
+	dir := testutil.SocketDir(t)
 	socket := filepath.Join(dir, "parent.sock")
 	env := testTmuxEnv(dir)
 	// This disposable server stands in for the user's real session.

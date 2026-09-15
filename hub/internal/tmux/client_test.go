@@ -3,14 +3,12 @@ package tmux
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/session"
+	"github.com/AK12-Official/visual-tmux-client/hub/internal/testutil"
 )
 
 func tmuxAvailable(t *testing.T) bool {
@@ -19,18 +17,19 @@ func tmuxAvailable(t *testing.T) bool {
 	return err == nil && p != ""
 }
 
-func uniqueSocket(t *testing.T) string {
-	t.Helper()
-	return fmt.Sprintf("tmuxtest-%d-%d", os.Getpid(), time.Now().UnixNano())
-}
+// socketName is deliberately short. The socket lives at
+// TMUX_TMPDIR/tmux-<uid>/<name>, and the platform's sun_path limit counts the
+// whole path, not just the name. Each test gets its own TMUX_TMPDIR, so a fixed
+// name cannot collide with another test's server.
+const socketName = "t"
 
 func newTestClient(t *testing.T) *Client {
 	t.Helper()
 	if !tmuxAvailable(t) {
 		t.Skip("tmux not available")
 	}
-	t.Setenv("TMUX_TMPDIR", t.TempDir())
-	sock := uniqueSocket(t)
+	t.Setenv("TMUX_TMPDIR", testutil.SocketDir(t))
+	sock := socketName
 	c := NewClient("", sock)
 	if c.err != nil {
 		t.Fatalf("NewClient failed: %v", c.err)

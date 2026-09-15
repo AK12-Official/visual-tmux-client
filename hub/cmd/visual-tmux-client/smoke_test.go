@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/AK12-Official/visual-tmux-client/hub/internal/testutil"
 )
 
 const (
@@ -58,7 +60,7 @@ func startSmokeServer(
 	t.Helper()
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = dir
-	cmd.Env = append(testTmuxEnv(t.TempDir()), env...)
+	cmd.Env = append(testTmuxEnv(testutil.SocketDir(t)), env...)
 
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
@@ -419,7 +421,7 @@ func TestSmokeTerminalInputOutputAndReconnect(t *testing.T) {
 	port := getFreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
-	tmuxDir := t.TempDir()
+	tmuxDir := testutil.SocketDir(t)
 	env := testTmuxEnv(tmuxDir)
 	socket := filepath.Join(tmuxDir, fmt.Sprintf("tmux-%d", os.Getuid()), "default")
 	t.Cleanup(func() {
