@@ -520,6 +520,7 @@ onBeforeUnmount(() => {
         </button>
         <p v-if="authError" class="auth-card__error" role="alert" aria-live="assertive">{{ authError }}</p>
       </div>
+      <ToastStack />
     </div>
 
     <template v-else>
@@ -637,11 +638,11 @@ onBeforeUnmount(() => {
               @activity="onActivity"
             />
           </KeepAlive>
+          <ToastStack />
         </main>
       </div>
     </template>
 
-    <ToastStack />
     <HelpModal :open="helpOpen" @close="helpOpen = false" />
   </div>
 </template>
@@ -653,6 +654,7 @@ onBeforeUnmount(() => {
   height: 100%;
 }
 .app__auth {
+  position: relative;
   flex: 1;
   display: flex;
   align-items: center;

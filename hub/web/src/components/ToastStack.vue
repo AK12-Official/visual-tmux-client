@@ -48,6 +48,7 @@ const LEVEL_TAG: Record<string, string> = {
   pointer-events: auto;
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: 0.5rem;
   background: var(--th-raised);
   border: 1px solid var(--th-border);
@@ -82,7 +83,7 @@ const LEVEL_TAG: Record<string, string> = {
   color: var(--th-warning);
 }
 .toast__message {
-  flex: 1;
+  flex: 1 1 12rem;
   min-width: 0;
   overflow-wrap: anywhere;
 }
