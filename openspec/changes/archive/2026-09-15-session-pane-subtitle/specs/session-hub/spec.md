@@ -35,8 +35,13 @@ When no representative pane can be determined, or when the pane query fails, the
 
 #### Scenario: Free-form window name and title
 
-- **WHEN** a session's window name, pane title, or current command contains separator characters, spaces, or non-ASCII text
-- **THEN** the hub reports those values verbatim without truncation or misattribution between fields
+- **WHEN** a session's window name, pane title, or current command contains spaces or non-ASCII text
+- **THEN** the hub reports those values as tmux gave them, without misattribution between fields, each capped in length so one pane cannot inflate every listing response
+
+#### Scenario: A value carrying the field separator itself
+
+- **WHEN** a value contains the field separator, so its record no longer splits into the expected number of fields
+- **THEN** the hub omits that record rather than reporting a summary whose fields may have shifted
 
 #### Scenario: No sessions exist
 

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildSubtitleMap, formatPaneSubtitle } from './sessionSubtitle'
+import { buildSubtitleMap, formatPaneSubtitle, rowLabel } from './sessionSubtitle'
 import type { PaneSummary } from './api'
 
 function pane(overrides: Partial<PaneSummary> = {}): PaneSummary {
@@ -110,4 +110,20 @@ test('a session named __proto__ keeps its own subtitle', () => {
 
 test('the subtitle map has no prototype', () => {
   assert.equal(Object.getPrototypeOf(buildSubtitleMap([])), null)
+})
+
+test('the row label names the session and, when there is one, its subtitle', () => {
+  assert.equal(rowLabel('work', 'zsh*: editor'), 'Session work; zsh*: editor')
+})
+
+test('the row label omits the subtitle segment when the row shows none', () => {
+  // A screen-reader user must be told what the row displays, and nothing else:
+  // the window count and attached state are no longer rendered anywhere.
+  assert.equal(rowLabel('work', null), 'Session work')
+  assert.equal(rowLabel('work', ''), 'Session work')
+  assert.equal(rowLabel('work', undefined), 'Session work')
+})
+
+test('the row label carries a session name that collides with Object.prototype', () => {
+  assert.equal(rowLabel('__proto__', 'zsh'), 'Session __proto__; zsh')
 })

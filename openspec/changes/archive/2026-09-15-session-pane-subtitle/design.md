@@ -55,7 +55,7 @@ The precedence — `windowName[*]: title` → `windowName` → `command` → not
 
 ### 6. The subtitle is an additional line, not a replacement
 
-`row-meta` ("N windows · attached/detached") stays as it is; the subtitle is a new line above it. The subtitle carries no state and no punctuation of its own beyond the active-window asterisk, so it reads as annotation rather than as another control.
+`row-meta` ("N windows · attached/detached") was intended to stay as it is, with the subtitle a new line above it. A review follow-up removed it instead: the window count and attached state duplicated what the terminal header shows, and dropping the line leaves the row carrying only its name and subtitle. The subtitle carries no state and no punctuation of its own beyond the active-window asterisk, so it reads as annotation rather than as another control.
 
 *Alternatives considered:* folding the command into the existing meta line — that line already packs two facts, and appending a free-form command of arbitrary length risks wrapping the row and crowding the rename control.
 

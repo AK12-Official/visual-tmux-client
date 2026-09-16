@@ -40,13 +40,18 @@ var PaneFormat = strings.Join([]string{
 // which is worse than showing no summary at all.
 //
 // Records are split on newlines before the field count is checked, so a newline
-// inside a field splits one pane's record in two, and the tail is then either
-// dropped (the usual case) or, if it happens to carry enough separators of its
-// own, read as a record for a session that does not exist. Field-order is
-// therefore not guaranteed against a value containing a raw newline. That is
-// accepted: tmux rejects a newline in a window name and strips one from a pane
-// title, leaving a process whose executable name contains one, which is not
-// reachable in practice.
+// inside a field splits one pane's record in two. The tail is then usually
+// dropped, but if it carries enough separators of its own it parses as a record
+// in its own right -- and since the session name is its first field, that record
+// can name a session that exists, displacing that session's real summary with a
+// fragment of another pane's. Field-order is therefore not guaranteed against a
+// value containing a raw newline.
+//
+// Nothing reachable produces one: tmux rejects a newline in a window name and
+// strips one from a pane title, leaving a process whose executable name contains
+// one, which its own argv cannot carry. The guarantee comes from tmux's
+// sanitising, not from this parser, which is what the spec's "a separator inside
+// a value can never shift one pane's title onto another pane" rests on.
 func ParsePanes(stdout string) []session.Pane {
 	out := make([]session.Pane, 0)
 	for _, line := range strings.Split(stdout, "\n") {

@@ -49,10 +49,12 @@ type paneChoice struct {
 
 // better reports whether candidate should displace incumbent.
 //
-// Rank decides first. Equal ranks are reachable — a session whose split gives it
-// several panes in the active window, for instance — and resolving them by index
-// keeps the result a function of server state rather than of the order in which
-// tmux happens to emit panes.
+// Rank decides first. Equal ranks are reachable -- every pane of the active
+// window except the active one ranks the same, as does the active pane of every
+// other window -- and resolving them by index keeps the result a function of
+// server state rather than of the order in which tmux happens to emit panes.
+// The top rank is not one of these: exactly one pane server-wide is both active
+// in its window and the active pane of it.
 func better(candidate, incumbent paneChoice) bool {
 	if candidate.rank != incumbent.rank {
 		return candidate.rank > incumbent.rank

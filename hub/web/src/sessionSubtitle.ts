@@ -59,3 +59,19 @@ export function buildSubtitleMap(
   }
   return out
 }
+
+/**
+ * rowLabel is the accessible name of a sidebar row: the session's name, plus the
+ * subtitle when the row shows one, so the label says what the row says.
+ *
+ * The window count and attached state used to be announced here. They are no
+ * longer displayed anywhere, so announcing them would tell a screen-reader user
+ * something sighted users cannot see.
+ *
+ * It lives here rather than in the component so it has a test: the row's markup
+ * is not covered by anything (the project's test runner has no DOM), and this is
+ * the part of it the spec makes a claim about.
+ */
+export function rowLabel(name: string, subtitle: string | null | undefined): string {
+  return subtitle ? `Session ${name}; ${subtitle}` : `Session ${name}`
+}

@@ -85,6 +85,20 @@ func TestParsePanesToleratesBlankLinesAndCarriageReturns(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d panes, want 2", len(got))
 	}
+	// The count alone would pass without the trailing-CR strip: a stray \r lands
+	// in the last field, which nothing else here reads. Assert the fields, so the
+	// trim is what the test is actually testing.
+	for i, want := range []struct{ window, title, command string }{
+		{"w", "t", "c"},
+		{"w", "t", "c"},
+	} {
+		if got[i].WindowName != want.window || got[i].Title != want.title ||
+			got[i].CurrentCommand != want.command {
+			t.Errorf("record %d = %q/%q/%q, want %q/%q/%q (a CRLF line end must not reach a field)",
+				i, got[i].WindowName, got[i].Title, got[i].CurrentCommand,
+				want.window, want.title, want.command)
+		}
+	}
 }
 
 func TestParsePanesTreatsUnparseableIndexesAsZero(t *testing.T) {
@@ -102,6 +116,27 @@ func TestPaneFormatFieldCountMatchesParser(t *testing.T) {
 	fields := strings.Split(PaneFormat, paneFieldSep)
 	if len(fields) != paneFieldCount {
 		t.Fatalf("PaneFormat emits %d fields, parser expects %d", len(fields), paneFieldCount)
+	}
+}
+
+// The count above is not enough on its own: ParsePanes reads fields by position,
+// so a permuted format string would still parse, and would report one field's
+// value as another's -- a pane title shown as the window name, say -- with the
+// count, the parser's own fixture and every rendering test still green. The
+// order is therefore pinned literally, next to the parser that depends on it.
+func TestPaneFormatFieldOrderIsPinnedToTheParser(t *testing.T) {
+	const want = "#{session_name}" + paneFieldSep +
+		"#{window_index}" + paneFieldSep +
+		"#{pane_index}" + paneFieldSep +
+		"#{window_active}" + paneFieldSep +
+		"#{pane_active}" + paneFieldSep +
+		"#{pane_dead}" + paneFieldSep +
+		"#{window_name}" + paneFieldSep +
+		"#{pane_title}" + paneFieldSep +
+		"#{pane_current_command}"
+	if PaneFormat != want {
+		t.Fatalf("PaneFormat =\n  %q\nwant\n  %q\n(reordering it also reorders ParsePanes's "+
+			"field indexing)", PaneFormat, want)
 	}
 }
 

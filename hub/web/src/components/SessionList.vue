@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { Session } from '../api'
-import { buildSubtitleMap } from '../sessionSubtitle'
+import { buildSubtitleMap, rowLabel } from '../sessionSubtitle'
 import { notify } from '../toasts'
 import {
   applyOrder,
@@ -50,13 +50,6 @@ const ordered = computed(() => applyOrder(props.sessions, order.value))
 // renders no subtitle element at all. buildSubtitleMap keys the result on a
 // null-prototype object, because session names are user-controlled.
 const subtitles = computed(() => buildSubtitleMap(props.sessions))
-
-// The row's accessible name mirrors what the row actually shows. Window count
-// and attached state are no longer displayed anywhere, so announcing them here
-// would tell a screen-reader user something sighted users cannot see.
-function rowLabel(name: string, subtitle: string | undefined): string {
-  return subtitle ? `Session ${name}; ${subtitle}` : `Session ${name}`
-}
 
 // Keep stored entries consistent with reality: sessions that disappeared
 // (killed anywhere) are pruned from the saved state.

@@ -148,9 +148,14 @@ func TestSelectPaneSummariesBreaksTiesByIndex(t *testing.T) {
 	})
 
 	t.Run("the lowest pane index decides within a window", func(t *testing.T) {
+		// A reachable tie: these are the inactive panes of the active window, so
+		// they share a rank and only the index separates them. Two panes that are
+		// both window-active and pane-active cannot occur -- exactly one pane
+		// server-wide carries both -- so a fixture built that way would pin a tie
+		// the selector can never be asked about.
 		got := SelectPaneSummaries([]Pane{
-			{Session: "s", WindowActive: true, PaneActive: true, PaneIndex: 3, WindowName: "pane-three"},
-			{Session: "s", WindowActive: true, PaneActive: true, PaneIndex: 1, WindowName: "pane-one"},
+			{Session: "s", WindowActive: true, PaneIndex: 3, WindowName: "pane-three"},
+			{Session: "s", WindowActive: true, PaneIndex: 1, WindowName: "pane-one"},
 		})
 		if got["s"].WindowName != "pane-one" {
 			t.Errorf("window name = %q, want %q", got["s"].WindowName, "pane-one")

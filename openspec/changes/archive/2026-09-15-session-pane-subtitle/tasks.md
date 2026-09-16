@@ -25,7 +25,7 @@
 ## 5. Styling and accessibility
 
 - [x] 5.1 Style the subtitle as small, muted text that ellipsises to a single line so row height stays uniform. Verify: manual check with a very long pane title that the row height does not change and the title does not overlap the action buttons.
-- [x] 5.2 Confirm the diff does not regress the row's existing accessible semantics: the session name remains the row's identifying text and the subtitle reads as supplementary rather than replacing it. Verify: `git diff hub/web/src/components/SessionList.vue` shows **no** change to `aria-label`, so the row's accessible name is byte-identical to before this change and there is nothing to regress. (An earlier revision folded the subtitle into that label; review removed it, so the subtitle is deliberately not announced.)
+- [x] 5.2 Confirm the row's accessible semantics match what the row actually shows. Verify: the row's `aria-label` is the session name plus its subtitle when one is rendered (`rowLabel` in `sessionSubtitle.ts`, with its own tests), and the window count and attached state are announced nowhere, because a later revision removed them from the row. A screen-reader user is told what sighted users see, and nothing they cannot. (An intermediate revision kept the label byte-identical to before the change and left the subtitle unannounced; the follow-up commit below reversed that once `row-meta` was removed.)
 
 ## 6. Verification
 
@@ -57,8 +57,8 @@ Review of the built UI produced four follow-ups, all applied:
 
 - The ended-session status was a centred card; it is now anchored top-left like terminal output, in `TerminalView.vue` (not part of this change's tasks — recorded here because it was raised during review).
 - The row's `row-meta` line (`1 window · attached`) was removed, and the "Session list view" delta updated: a row now carries only its name and subtitle.
-- The subtitle was removed from the row's `aria-label`, so the subtitle is not announced — see 5.2.
-- The `5.2` task's original verification (inspect the accessibility tree) was replaced by a stronger one: the label is now unchanged from before the change, so there is nothing to regress.
+- With `row-meta` gone, the subtitle *is* folded into the row's `aria-label` (`rowLabel`), so the label says what the row says and no longer announces a window count that is displayed nowhere. This reverses the intermediate decision recorded in 5.2.
+- The record above and the spec deltas in this change were brought back in line with the shipped code, which a later review found they had drifted from (the 200-rune field cap and the `aria-label` both changed after they were written).
 
 ### Decided not to change: the tmux dead-pane message
 
