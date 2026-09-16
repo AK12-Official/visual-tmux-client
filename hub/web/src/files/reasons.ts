@@ -17,6 +17,7 @@ export const REASONS: Record<string, string> = {
   path_not_allowed: 'that path is outside the directories this hub may open',
   cross_root_move: 'entries cannot be moved between two configured roots',
   not_found: 'it is no longer there',
+  host_not_found: 'that path is not on this machine',
   permission_denied: 'the hub is not allowed to read or write it',
   file_too_large: 'it is larger than the size limit for one file',
   conflict: 'it changed on disk since it was read',

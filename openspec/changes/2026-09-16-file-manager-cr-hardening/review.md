@@ -683,3 +683,40 @@ refused or removed a symlink", where one rooted recursive delete succeeds throug
 never reaches the emptiness check. The claim it supports holds and `tasks.md` 18.2 states it
 precisely; a commit message cannot be amended without rewriting what was reviewed, so it is recorded
 here instead.
+
+## The tenth review of the change
+
+One reviewer, given the two questions this branch has taught itself to ask: is any check narrower than
+it claims, and does any claim describe a superseded behaviour. Both answers were yes.
+
+**The check.** The error-code coverage test reads the hub's `mapFileError` and claimed to cover "every
+refusal in the file routes". Every file route is wrapped by `requireLocalHost`, which answers
+`host_not_found` — a code with no entry in the table, which the test could not see because it reads
+one file. A request to a host that is not this one would have shown the user the bare identifier,
+which is exactly what the table exists to prevent and what the test exists to catch. Unreachable
+through today's UI, since the client hardcodes the local host; the defect is a check that cannot see
+the gap it claims to cover, and it is the second one of those found in two rounds.
+
+**The claim.** Two comments in the manager said "a path covers what is beneath it" while describing an
+`isPending` query, which looks *up* — `pending.test.ts` asserts the opposite reading, directly, in a
+test whose comment says "a file was reported for the directory holding it". The effect the comments
+described was correct and the mechanism was backwards, which is what a reader would have carried away.
+The previous round found three of this species in `tabs.ts` and swept one file; this one swept the
+other.
+
+**And a second way past the widened test**: `import(/* @vite-ignore */ './preview')`, a real Vite
+idiom, matched neither pattern.
+
+### Where the loop has arrived, and why it stops here
+
+Ten rounds. The first five found defects: a data race, an ordering hole, a predicate written in one
+direction, a guard that covered half its race. The sixth and seventh found a real cost defect and an
+unpinned boundary, both only visible from a whole-change read. Rounds eight, nine and ten found no
+product defect at all — they found checks that were narrower than their claims, and claims that
+described behaviour the branch had already replaced. Every one of those has been fixed, and each fix
+gives the next round something new to measure.
+
+That is a tail without a fixed point: a check can always be narrower than its claim, unless the claim
+is narrowed to match, and this round did that too. The product code has been unchanged by five
+consecutive rounds; what remains is a list of accepted costs and pre-existing gaps, each with the
+reason it is bounded, which is the state this change set out to reach.

@@ -86,9 +86,11 @@ const saveTickets = new Map<number, number>()
 // means the file is on its way out, so the save is not sent at all (see save).
 //
 // A count per path rather than a flag, because two of a kind can be in flight on
-// one path at once, and a path covers what is beneath it, because a delete or a
-// rename of a directory is crossed by the writes naming its contents. Both rules
-// are in files/pending.ts, with what they are for.
+// one path at once. The two questions also look in *opposite* directions, which
+// is what makes each of them the right one for its caller: isPending asks
+// whether anything is outstanding for this path or for a directory above it, and
+// idle waits for the writes naming this path or anything inside it. Both rules,
+// with what they are for, are in files/pending.ts.
 const saving = createPending()
 const renaming = createPending()
 const deleting = createPending()
@@ -423,8 +425,9 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
   // while a delete is in flight would reach the hub in an order neither request
   // can see, and could put the file back after the user was told it was gone.
   //
-  // The path being deleted covers what is under it, so this refuses a save of a
-  // file inside a directory that is being deleted as well as the entry itself.
+  // The query runs *upwards* -- it is true when this path, or a directory above
+  // it, has a delete in flight -- so a file inside a directory being deleted is
+  // refused as well as the entry itself.
   if (deleting.isPending(tab.path)) {
     // What is known, and no more: a delete of this file, or of a directory above
     // it, has been sent. Whether it will succeed is not known here, and saying

@@ -313,7 +313,8 @@ test('an answer is recorded normally once no rename is outstanding', () => {
 // The specifier is what is searched for, not the statement, because every way of
 // naming a module names it as a string: a single-line import, a multi-line one
 // (which this repository writes often), `import './preview'` for its side effect,
-// `import('./preview')`, and `export ... from './preview'`. Searching for the
+// `import('./preview')`, `import(/* @vite-ignore */ './preview')`, and
+// `export ... from './preview'`. Searching for the
 // statement shape catches only the first of those -- which is how this test was
 // written first, and what a reviewer walked through five shapes to show.
 //
@@ -324,9 +325,9 @@ test('tabs.ts does not name the renderer', () => {
   const source = readFileSync(fileURLToPath(new URL('./tabs.ts', import.meta.url)), 'utf8')
   const specifiers = [
     // import ... from '<specifier>'  |  export ... from '<specifier>'
-    ...[...source.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)].map((m) => m[1]),
+    ...[...source.matchAll(/\bfrom\s*(?:\/\*[\s\S]*?\*\/\s*)?['"]([^'"]+)['"]/g)].map((m) => m[1]),
     // import '<specifier>'  |  import('<specifier>')
-    ...[...source.matchAll(/\bimport\s*\(?\s*['"]([^'"]+)['"]/g)].map((m) => m[1]),
+    ...[...source.matchAll(/\bimport\s*(?:\/\*[\s\S]*?\*\/\s*)?\(?\s*['"]([^'"]+)['"]/g)].map((m) => m[1]),
   ]
 
   assert.ok(specifiers.length > 0, 'no specifiers were read, so this proves nothing')

@@ -159,3 +159,13 @@ the browser side.
 - [x] 19.2 *(review round 7)* Three places still described the `raced` check as path-exact -- `SaveSettlement`'s doc, the comment above the check, and a test comment -- while the caller passes a query that covers the path or a directory above it, and the user-facing notice had already been reworded for the ancestor case. Verify: the three sites now match `pending.ts`'s documented direction.
 - [x] 19.3 *(review round 7)* `OpenFile.size`'s doc named one of its four sources, and it is load-bearing rather than a display field: it is an argument to `presentation`, so it decides which size bound applies. Verify: the doc names all four.
 - [x] 19.4 A false sentence in 9c95c63's commit message, which cannot be amended without rewriting it: it says every rooted delete "either refused or removed a symlink", where one rooted *recursive* delete in the tests succeeds -- through `removeAll`, which never reaches the emptiness check. The conclusion the sentence supports holds, and 18.2 states it precisely. Verify: `review.md`'s ninth review.
+
+## 20. The tenth round
+
+One reviewer, asked the two questions this branch has learned to ask of itself: is any check narrower
+than it claims, and does any claim describe a superseded behaviour. It found one of each, plus a
+second way past the test the previous round had just widened.
+
+- [x] 20.1 The error-code coverage test read `mapFileError` and claimed to cover "every refusal in the file routes". `requireLocalHost` wraps every file route and answers `host_not_found`, which had no entry in the table and no test that could see it -- the same shape as the boundary test the previous round widened. The code has an entry; the clause now says what the scan reads, and the two codes that arrive from elsewhere are named by a test of their own with where each comes from. Verify: `reasons.test.ts`, the two tests.
+- [x] 20.2 Two comments in the manager said "a path covers what is beneath it" while describing an `isPending` query, which looks *up*: `pending.test.ts` asserts the opposite reading directly. The effect they described was right and the mechanism was backwards, which is what a reader would have taken from them. Verify: the two comments now state the direction each call uses.
+- [x] 20.3 The boundary test's stated limit was still one short: `import(/* @vite-ignore */ './preview')` matches neither pattern, and the comment is a real Vite idiom. Both patterns now allow one. Verify: `tabs.test.ts`.

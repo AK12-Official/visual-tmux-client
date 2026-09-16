@@ -28,7 +28,8 @@ function hubCodes(): string[] {
   )
   const codes = new Set<string>()
   // writeError(w, <status expression>, "code") -- the shape every arm of
-  // mapFileError and every refusal in the file routes takes.
+  // mapFileError takes. Two codes a file route can still answer with are raised
+  // elsewhere and are named by the test below rather than reached by this scan.
   for (const match of source.matchAll(/writeError\(\s*w,\s*[^,]+,\s*"([^"]+)"\)/g)) {
     codes.add(match[1])
   }
@@ -51,9 +52,18 @@ test('the hub file routes answer with codes this browser can explain', () => {
   }
 })
 
-test('a code the hub raises that no route mints is explained too', () => {
+test('the codes a file route can answer with that its mapper does not mint', () => {
   // requireMtime raises this one in files/api.ts; no response carries it.
-  assert.equal(typeof REASONS['mtime_unavailable'], 'string')
+  //
+  // host_not_found is raised by requireLocalHost, which wraps every file route --
+  // so a request to a host that is not this one reaches the file client with it.
+  // It is named here rather than reached by the scan above because it lives in
+  // router.go, whose other codes belong to the session and terminal routes the
+  // file client never calls; reading that file would demand words for those.
+  for (const code of ['mtime_unavailable', 'host_not_found']) {
+    assert.equal(typeof REASONS[code], 'string', `no words for ${code}`)
+    assert.ok(REASONS[code].length > 0, `the entry for ${code} is empty`)
+  }
 })
 
 test('a code with no entry falls through to itself', () => {
