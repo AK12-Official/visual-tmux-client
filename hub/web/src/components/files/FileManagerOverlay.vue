@@ -14,6 +14,7 @@ import {
   readFile,
   renameEntry,
   type Entry,
+  type StartDirectory,
 } from '../../files/api'
 import { basename, dirname, joinPath, quoteForShell } from '../../files/pathUtils'
 import { choosePreview } from '../../files/preview'
@@ -81,37 +82,44 @@ async function goTo(path: string) {
 /**
  * startDirectory picks where the manager opens.
  *
- * The pane's working directory is read once, as a seed. If it cannot be listed,
- * its nearest listable ancestor is used instead: a shell whose working directory
- * was removed is ordinary, and an ancestor that still exists beats an error. The
- * result is reported when it is not what the pane said, so the user is never
- * silently somewhere else.
+ * The pane's working directory is read once, as a seed. If the hub reports that
+ * it substituted one -- the pane is outside a configured boundary, and only the
+ * hub can know that -- the manager opens there and says so. Otherwise the seed
+ * may still be unusable for a reason that is not the boundary, such as a shell
+ * whose directory was removed, so its nearest listable ancestor is used instead:
+ * an ancestor that still exists beats an error.
  */
 async function startDirectory(): Promise<void> {
-  let seed = ''
+  let seed: StartDirectory = { path: '', substituted: false }
   try {
     seed = await fetchWorkingDirectory(props.session)
   } catch {
-    seed = ''
+    seed = { path: '', substituted: false }
   }
-  if (seed === '') {
+  if (seed.path === '') {
     await goTo('/')
     return
   }
 
-  let probe = seed
+  if (seed.substituted) {
+    await goTo(seed.path)
+    emit('notice', `Opened ${seed.path}: the session's directory is outside the file boundary.`, 'warning')
+    return
+  }
+
+  let probe = seed.path
   for (;;) {
     try {
       await loadDirectory(tree, probe)
       current.value = probe
       loading.value = false
-      if (probe !== seed) {
-        emit('notice', `Opened ${probe}: the session's directory ${seed} was not accessible.`, 'warning')
+      if (probe !== seed.path) {
+        emit('notice', `Opened ${probe}: the session's directory ${seed.path} was not accessible.`, 'warning')
       }
       return
     } catch (err) {
       const code = err instanceof FileApiError ? err.code : ''
-      if (code !== 'not_found' && code !== 'path_not_allowed') {
+      if (code !== 'not_found') {
         report(err, `Could not open ${probe}`)
         failure.value = `${probe} could not be opened (${code || 'error'}).`
         loading.value = false
@@ -125,8 +133,8 @@ async function startDirectory(): Promise<void> {
 
   // Nothing on the way up could be listed, so stay where the session is and show
   // why: a blank panel would hide the boundary that caused it.
-  current.value = seed
-  await goTo(seed)
+  current.value = seed.path
+  await goTo(seed.path)
 }
 
 /**

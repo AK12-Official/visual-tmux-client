@@ -137,14 +137,29 @@ export async function deleteEntry(path: string, recursive: boolean): Promise<voi
   await post('delete', { path, recursive })
 }
 
+/** StartDirectory is where the manager opens, and whether the hub substituted it. */
+export interface StartDirectory {
+  path: string
+  /**
+   * substituted is true when the session's own directory falls outside a
+   * configured boundary, in which case path names one that does not. Only the
+   * hub can decide this: a browser has no way to discover which directories the
+   * boundary permits.
+   */
+  substituted: boolean
+}
+
 /**
- * fetchWorkingDirectory asks for the session's active pane directory. It is the
- * manager's starting point and nothing more: it is read once, and the boundary
- * is decided the same way wherever the user navigates afterwards.
+ * fetchWorkingDirectory asks for the directory the manager should open at. It is
+ * read once, as a seed: the boundary is decided the same way wherever the user
+ * navigates afterwards, so a later pane change never moves an open manager.
  */
-export async function fetchWorkingDirectory(session: string): Promise<string> {
+export async function fetchWorkingDirectory(session: string): Promise<StartDirectory> {
   const target = `/api/hosts/local/sessions/${encodeURIComponent(session)}/working-directory`
   const res = await request(target)
-  const data = (await res.json()) as { path?: unknown } | null
-  return typeof data?.path === 'string' ? data.path : ''
+  const data = (await res.json()) as { path?: unknown; substituted?: unknown } | null
+  return {
+    path: typeof data?.path === 'string' ? data.path : '',
+    substituted: data?.substituted === true,
+  }
 }

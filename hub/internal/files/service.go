@@ -2,6 +2,7 @@ package files
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -56,6 +57,29 @@ func NewService(opts Options) *Service {
 // reads the filesystem on behalf of a capability that is turned off.
 func (s *Service) Enabled() bool {
 	return s.enabled
+}
+
+// StartDirectory returns the directory a browser should open the file manager
+// at, given the candidate a session reported, and whether it substituted one.
+//
+// The substitution exists because only the hub knows the boundary: a browser
+// cannot discover a permitted directory for itself, so when the candidate falls
+// outside a configured root the hub names one that does not. A candidate that is
+// unusable for any other reason -- it no longer exists, say -- is returned
+// unchanged, because that is not a boundary decision and the caller can do
+// something more useful with it than this function can.
+func (s *Service) StartDirectory(candidate string) (string, bool) {
+	if _, err := s.roots.Resolve(candidate, ModeRead); err == nil {
+		return candidate, false
+	} else if !errors.Is(err, ErrPathNotAllowed) {
+		return candidate, false
+	}
+
+	roots := s.roots.Roots()
+	if len(roots) == 0 {
+		return candidate, false
+	}
+	return roots[0], true
 }
 
 // List returns one directory's immediate children, directories first and then

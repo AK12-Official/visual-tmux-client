@@ -334,6 +334,70 @@ func TestWriteLeavesTheOriginalWhenTheBodyFailsMidStream(t *testing.T) {
 	}
 }
 
+// A browser cannot discover which directories the boundary permits, so when the
+// session's own directory falls outside it the hub has to name one that does not
+// -- and say that it did, rather than silently opening somewhere else.
+func TestStartDirectorySubstitutesOnlyOutsideTheBoundary(t *testing.T) {
+	base := sandbox(t)
+	root := filepath.Join(base, "root")
+	outside := filepath.Join(base, "outside")
+	mustMkdir(t, root)
+	mustMkdir(t, outside)
+
+	unrestricted := mustService(t, Options{})
+	rooted := mustRootedService(t, root)
+
+	tests := []struct {
+		name            string
+		svc             *Service
+		candidate       string
+		wantPath        string
+		wantSubstituted bool
+	}{
+		{"unrestricted keeps the candidate", unrestricted, outside, outside, false},
+		{"inside the boundary keeps the candidate", rooted, root, root, false},
+		{"outside the boundary is substituted", rooted, outside, root, true},
+		{"a missing candidate outside the boundary is substituted", rooted,
+			filepath.Join(outside, "gone"), root, true},
+		// Missing is not a boundary decision, so the caller is left to deal with
+		// it -- it can step up to an ancestor, which the hub cannot choose for it.
+		{"a missing candidate inside the boundary is left alone", rooted,
+			filepath.Join(root, "gone"), filepath.Join(root, "gone"), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path, substituted := tc.svc.StartDirectory(tc.candidate)
+			if path != tc.wantPath || substituted != tc.wantSubstituted {
+				t.Errorf("expected (%q, %v), got (%q, %v)",
+					tc.wantPath, tc.wantSubstituted, path, substituted)
+			}
+		})
+	}
+}
+
+// The first configured root is the one a substituted start lands on, so the
+// answer does not depend on which directory the session happened to be in.
+func TestStartDirectoryAlwaysSubstitutesTheFirstRoot(t *testing.T) {
+	base := sandbox(t)
+	first := filepath.Join(base, "first")
+	second := filepath.Join(base, "second")
+	mustMkdir(t, first)
+	mustMkdir(t, second)
+
+	set, err := NewRootSet([]string{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := mustService(t, Options{Roots: set})
+
+	for _, candidate := range []string{base, filepath.Join(base, "elsewhere")} {
+		path, substituted := svc.StartDirectory(candidate)
+		if path != first || !substituted {
+			t.Errorf("candidate %q: expected (%q, true), got (%q, %v)", candidate, first, path, substituted)
+		}
+	}
+}
+
 func TestCreateRefusesTheCasesItCannotServe(t *testing.T) {
 	dir := sandbox(t)
 	svc := mustService(t, Options{})

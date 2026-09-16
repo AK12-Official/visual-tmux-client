@@ -20,6 +20,7 @@ import (
 // exercised without touching a filesystem.
 type mockFileService struct {
 	disabled bool
+	startFn  func(candidate string) (string, bool)
 	listFn   func(path string) (files.ListResult, error)
 	readFn   func(path string) (files.ReadResult, error)
 	writeFn  func(path string, body io.Reader, size int64, mtime *int64) (int64, error)
@@ -30,6 +31,13 @@ type mockFileService struct {
 
 func (m *mockFileService) Enabled() bool {
 	return !m.disabled
+}
+
+func (m *mockFileService) StartDirectory(candidate string) (string, bool) {
+	if m.startFn != nil {
+		return m.startFn(candidate)
+	}
+	return candidate, false
 }
 
 func (m *mockFileService) List(ctx context.Context, path string) (files.ListResult, error) {
@@ -443,6 +451,66 @@ func TestWorkingDirectoryRouteAnswersAndReportsAnAbsentSession(t *testing.T) {
 	absent := authedGet(t, router, "/api/hosts/local/sessions/absent/working-directory")
 	if absent.Code != http.StatusNotFound {
 		t.Errorf("expected an absent session to map to 404, got %d", absent.Code)
+	}
+}
+
+// The seed the browser opens at has to be usable: when the session's directory
+// is outside the boundary, the hub answers with one that is and says so, because
+// the browser has no way to work that out for itself.
+func TestWorkingDirectoryRouteFlagsASubstitutedDirectory(t *testing.T) {
+	sessions := &mockSessionService{
+		sessions: []session.Session{{Name: "work"}},
+		paneDir:  "/home/user/project",
+	}
+
+	tests := []struct {
+		name            string
+		files           *mockFileService
+		wantPath        string
+		wantSubstituted bool
+	}{
+		{"permitted stays where the pane is", &mockFileService{}, "/home/user/project", false},
+		{"outside the boundary is replaced", &mockFileService{
+			startFn: func(string) (string, bool) { return "/srv/projects", true },
+		}, "/srv/projects", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			router := NewRouter(testRouterConfig("tok", nil), sessions, tc.files, &mockTicketIssuer{}, nil)
+
+			rec := authedGet(t, router, "/api/hosts/local/sessions/work/working-directory")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", rec.Code)
+			}
+			var got workingDirectoryResponse
+			decodeBody(t, rec, &got)
+			if got.Path != tc.wantPath || got.Substituted != tc.wantSubstituted {
+				t.Errorf("expected (%q, %v), got (%q, %v)",
+					tc.wantPath, tc.wantSubstituted, got.Path, got.Substituted)
+			}
+		})
+	}
+}
+
+// A hub with the file manager turned off answers exactly as it did before the
+// substitution existed, and never consults the service to do it.
+func TestWorkingDirectoryIsNotSubstitutedWhenTheManagerIsOff(t *testing.T) {
+	sessions := &mockSessionService{
+		sessions: []session.Session{{Name: "work"}},
+		paneDir:  "/home/user/project",
+	}
+	files := &mockFileService{disabled: true, startFn: func(string) (string, bool) {
+		t.Error("a disabled manager must not be consulted")
+		return "", false
+	}}
+
+	router := NewRouter(testRouterConfig("tok", nil), sessions, files, &mockTicketIssuer{}, nil)
+	rec := authedGet(t, router, "/api/hosts/local/sessions/work/working-directory")
+
+	var got workingDirectoryResponse
+	decodeBody(t, rec, &got)
+	if got.Path != "/home/user/project" || got.Substituted {
+		t.Errorf("a disabled manager changed the answer: %+v", got)
 	}
 }
 

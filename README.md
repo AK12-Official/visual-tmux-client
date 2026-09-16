@@ -190,7 +190,9 @@ Each root must be an absolute path to an existing directory. Roots are resolved 
 
 `max_file_size` bounds a single read, write, or download. `max_dir_entries` bounds one directory listing, which is reported as truncated beyond that.
 
-The file manager opens at the working directory of the session's active pane. That directory is a starting point only: if it cannot be opened, the manager says so rather than showing a blank tree.
+The file manager opens at the working directory of the session's active pane. That directory is a starting point only, read once: navigating afterwards is unrestricted, and changing the active pane does not move an already-open manager.
+
+When `roots` is configured and the pane's directory lies outside them, the manager opens at the first configured root instead and says so — a browser has no way to work out which directories the boundary permits, so the hub names one. If the pane's directory is unusable for any other reason, such as having been removed, the nearest ancestor that can still be opened is used, and that substitution is reported too.
 
 The default loopback binding is intentional. If you expose the service to another machine, put it behind HTTPS, use a strong stable token, and set `origin` to the exact public origin. See [SECURITY.md](SECURITY.md) before exposing it to a network.
 

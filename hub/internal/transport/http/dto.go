@@ -113,6 +113,13 @@ type writeFileResponse struct {
 	Mtime int64 `json:"mtime"`
 }
 
+// workingDirectoryResponse seeds the file manager's starting directory.
+//
+// Substituted is set when the session's own directory falls outside a configured
+// boundary, in which case Path names a permitted directory instead. It is
+// omitted rather than sent as false, so an unrestricted hub answers exactly as
+// it did before this field existed.
 type workingDirectoryResponse struct {
-	Path string `json:"path"`
+	Path        string `json:"path"`
+	Substituted bool   `json:"substituted,omitempty"`
 }

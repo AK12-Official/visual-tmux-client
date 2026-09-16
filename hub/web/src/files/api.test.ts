@@ -174,9 +174,23 @@ test('fetchWorkingDirectory reads the path the hub answered with', async () => {
   await withoutStorage(async () => {
     const calls = mockFetch(jsonResponse({ path: '/srv/project' }))
 
-    const dir = await fetchWorkingDirectory('my session')
-    assert.equal(dir, '/srv/project')
+    const start = await fetchWorkingDirectory('my session')
+    assert.equal(start.path, '/srv/project')
+    assert.equal(start.substituted, false)
     assert.equal(calls[0].url, '/api/hosts/local/sessions/my%20session/working-directory')
+  })
+})
+
+// The hub substitutes a directory when the session's own is outside the file
+// boundary, and the manager has to tell the user rather than quietly opening
+// somewhere else.
+test('fetchWorkingDirectory reports a substituted directory', async () => {
+  await withoutStorage(async () => {
+    mockFetch(jsonResponse({ path: '/srv/projects', substituted: true }))
+
+    const start = await fetchWorkingDirectory('work')
+    assert.equal(start.path, '/srv/projects')
+    assert.equal(start.substituted, true)
   })
 })
 

@@ -16,6 +16,7 @@ import (
 // FileService specifies the file operations the HTTP router needs.
 type FileService interface {
 	Enabled() bool
+	StartDirectory(candidate string) (string, bool)
 	List(ctx context.Context, path string) (files.ListResult, error)
 	Read(ctx context.Context, path string) (files.ReadResult, error)
 	Write(
@@ -218,6 +219,10 @@ func (s *handlerState) deleteEntry(w http.ResponseWriter, r *http.Request) {
 // sessionWorkingDirectory answers the directory the file manager should open at.
 // It is a navigation seed, never an authorization input: the boundary is
 // decided the same way wherever the browser goes afterwards.
+//
+// When the pane's directory falls outside a configured boundary, the hub answers
+// with one that is inside it and flags the substitution. Only the hub can: a
+// browser has no way to discover which directories the boundary permits.
 func (s *handlerState) sessionWorkingDirectory(w http.ResponseWriter, r *http.Request) {
 	if !requireLocalHost(w, r) {
 		return
@@ -227,7 +232,12 @@ func (s *handlerState) sessionWorkingDirectory(w http.ResponseWriter, r *http.Re
 		mapSessionError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, workingDirectoryResponse{Path: dir})
+
+	response := workingDirectoryResponse{Path: dir}
+	if s.files != nil && s.files.Enabled() {
+		response.Path, response.Substituted = s.files.StartDirectory(dir)
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // parseRequiredInt64 parses a query parameter the request cannot do without.
