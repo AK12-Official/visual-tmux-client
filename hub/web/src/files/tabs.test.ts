@@ -44,12 +44,14 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 function openFile(overrides: Partial<OpenFile> = {}): OpenFile {
   return {
+    id: 1,
     path: '/home/user/a.txt',
     name: 'a.txt',
     text: 'hello',
     saved: 'hello',
     mtime: 100,
     size: 5,
+    binary: false,
     ...overrides,
   }
 }
@@ -107,11 +109,48 @@ test('adopting the returned mtime makes the next save clean', async () => {
   const calls = mockFetch(() => jsonResponse({ mtime: 777 }))
   const file = openFile({ text: 'first' })
 
-  const saved = applySaved(file, await saveOpenFile(file))
+  const saved = applySaved(file, await saveOpenFile(file), file.text)
   assert.equal(isDirty(saved), false)
   assert.equal(saved.mtime, 777)
 
   await saveOpenFile(saved)
   const url = new URL(calls[1].url, 'http://localhost')
   assert.equal(url.searchParams.get('expected_mtime'), '777')
+})
+
+// A hub that did not report the new modification time must not stop the tab
+// recording that it saved: the write happened, so the tab is clean, and the time
+// left in place is what makes the next save ask before overwriting.
+test('a save that reported no modification time still counts as saved', () => {
+  const file = openFile({ text: 'edited', saved: 'original', mtime: 100 })
+  const saved = applySaved(file, null, 'edited')
+  assert.equal(isDirty(saved), false)
+  assert.equal(saved.mtime, 100)
+})
+
+// An answer to a save is matched to the session that asked for it, so folding a
+// save back in must not change which session the tab is.
+test('applySaved keeps the tab identity it was given', () => {
+  const file = openFile({ id: 7 })
+  assert.equal(applySaved(file, 123, file.text).id, 7)
+})
+
+// The bug this pins: `saved` used to be read from the live object when the
+// response landed, so a keystroke typed while the write was in flight was
+// recorded as saved without ever reaching the disk. The tab then reported itself
+// clean, and the edit could be thrown away with no warning.
+test('a keystroke typed during a save is still unsaved afterwards', async () => {
+  setup()
+  mockFetch(() => jsonResponse({ mtime: 777 }))
+  const file = openFile({ text: 'first' })
+
+  const sent = file.text
+  const mtime = await saveOpenFile(file)
+  // The user keeps typing before the response is folded back in.
+  const edited = { ...file, text: 'first and more' }
+
+  const saved = applySaved(edited, mtime, sent)
+  assert.equal(isDirty(saved), true)
+  assert.equal(saved.text, 'first and more')
+  assert.equal(saved.saved, 'first')
 })

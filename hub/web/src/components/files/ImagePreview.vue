@@ -10,6 +10,10 @@ const emit = defineEmits<{ (e: 'notice', text: string, level: 'error' | 'warning
 
 const url = ref('')
 let objectUrl: string | null = null
+// loadAt is the ticket of the most recent load. A read that resolves after a
+// newer one started -- or after the component is gone -- must not adopt its blob,
+// because the handle to the URL it replaced would be lost and never revoked.
+let loadAt = 0
 
 function release() {
   if (objectUrl !== null) {
@@ -22,18 +26,26 @@ function release() {
 watch(
   () => props.path,
   async (path) => {
+    const attempt = ++loadAt
     release()
     try {
-      objectUrl = URL.createObjectURL(await readFileBytes(path))
+      const blob = await readFileBytes(path)
+      if (attempt !== loadAt) return
+      objectUrl = URL.createObjectURL(blob)
       url.value = objectUrl
     } catch (err) {
+      if (attempt !== loadAt) return
       emit('notice', `Could not preview ${path}: ${String(err)}`, 'error')
     }
   },
   { immediate: true },
 )
 
-onBeforeUnmount(release)
+onBeforeUnmount(() => {
+  // Anything still in flight belongs to a component that no longer exists.
+  loadAt++
+  release()
+})
 </script>
 
 <template>

@@ -33,6 +33,14 @@ export interface WebConfig {
 export interface ClientConfig {
   version: number
   web: WebConfig
+  files: FilesConfig
+}
+
+/** FilesConfig reports whether the hub offers its file manager, and its limit. */
+export interface FilesConfig {
+  enabled: boolean
+  /** max_file_size in bytes; the bound a refusal can name. */
+  max_file_size: number
 }
 
 function isPositiveInteger(n: unknown, min = 1): n is number {
@@ -58,6 +66,14 @@ export function validateClientConfig(raw: unknown): ClientConfig {
   }
 
   const web = payload.web as Partial<WebConfig>
+
+  // Files. Anything other than an explicit true leaves the file manager out: a
+  // hub that does not publish this has no file API either, so an absent or
+  // malformed section means unavailable rather than "assume it works". The limit
+  // is only for wording a refusal, so a missing one is zero rather than an error.
+  const files = payload.files as Partial<FilesConfig> | undefined
+  const filesEnabled = files?.enabled === true
+  const maxFileSize = isPositiveInteger(files?.max_file_size) ? files.max_file_size : 0
 
   if (!isPositiveInteger(web.session_poll_interval, 100)) {
     throw new Error('Invalid client configuration: web.session_poll_interval must be an integer >= 100 ms')
@@ -128,6 +144,7 @@ export function validateClientConfig(raw: unknown): ClientConfig {
 
   return {
     version: payload.version,
+    files: { enabled: filesEnabled, max_file_size: maxFileSize },
     web: {
       session_poll_interval: web.session_poll_interval,
       activity_decay: web.activity_decay,
@@ -169,6 +186,7 @@ let activeConfig: ClientConfig | null = null
 export function setConfig(cfg: ClientConfig): void {
   activeConfig = deepFreeze({
     version: cfg.version,
+    files: { ...cfg.files },
     web: {
       session_poll_interval: cfg.web.session_poll_interval,
       activity_decay: cfg.web.activity_decay,

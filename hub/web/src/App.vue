@@ -160,6 +160,42 @@ function toggleFullscreen(): void {
 const fileManagerOpen = ref(false)
 const filesDirty = ref(false)
 
+// The hub publishes whether it offers a file manager at all. A button that
+// always answers "not found" invites a support question, so the entry point is
+// left out rather than offered and refused.
+const filesAvailable = computed(() => getConfig().files.enabled)
+
+/** closeFileManager drops the overlay and the flag it reported.
+ *
+ * The flag is cleared here rather than left to the overlay: the watcher that
+ * reports it stops when the component unmounts, so a manager closed while dirty
+ * would leave `true` behind forever and the next panel close would warn about
+ * unsaved changes that no longer exist. */
+function closeFileManager(): void {
+  fileManagerOpen.value = false
+  filesDirty.value = false
+}
+
+/** toggleFileManager warns before discarding unsaved edits.
+ *
+ * The overlay's own close button asks for the same confirmation, so this is not
+ * the only guard -- but the header button is a second way out, and closing
+ * through it used to unmount the manager without a word. */
+function toggleFileManager(): void {
+  if (!filesAvailable.value) return
+  if (!fileManagerOpen.value) {
+    fileManagerOpen.value = true
+    return
+  }
+  if (
+    filesDirty.value &&
+    !window.confirm('The file manager has unsaved changes. Close it anyway?')
+  ) {
+    return
+  }
+  closeFileManager()
+}
+
 /** insertPathIntoTerminal writes text the file manager prepared. The manager has
  * already quoted it and made sure it carries no line terminator; all that is left
  * is to find a live attachment, and to say so when there is none rather than
@@ -181,7 +217,7 @@ function closePanel(): void {
       /* already exited */
     })
   }
-  fileManagerOpen.value = false
+  closeFileManager()
   selected.value = null
 }
 
@@ -306,6 +342,9 @@ function handleAuthFailure() {
   stopPolling()
   clearToken()
   token.value = ''
+  // The credential is gone, so nothing could be saved anyway; asking about
+  // unsaved edits here would be a question with only one answer.
+  closeFileManager()
   selected.value = null
   sessions.value = []
   cleanupSessionState()
@@ -352,6 +391,8 @@ function logout() {
   stopPolling()
   clearToken()
   token.value = ''
+  // As with an auth failure: the token is gone, so there is nothing to ask.
+  closeFileManager()
   selected.value = null
   sessions.value = []
   cleanupSessionState()
@@ -655,12 +696,13 @@ onBeforeUnmount(() => {
               @click="toggleFullscreen"
             ><span aria-hidden="true">⛶</span></button>
             <button
+              v-if="filesAvailable"
               class="app__term-btn"
               type="button"
               title="browse files in this session"
               aria-label="Open the file manager"
               :aria-pressed="fileManagerOpen"
-              @click="fileManagerOpen = !fileManagerOpen"
+              @click="toggleFileManager"
             >Files</button>
             <button
               class="app__term-btn"
@@ -683,10 +725,10 @@ onBeforeUnmount(() => {
               @activity="onActivity"
             />
           </KeepAlive>
-          <div v-if="selected && fileManagerOpen" class="app__files">
+          <div v-if="fileManagerOpen" class="app__files">
             <FileManagerOverlay
               :session="selected"
-              @close="fileManagerOpen = false"
+              @close="closeFileManager"
               @notice="onNotice"
               @insert-path="insertPathIntoTerminal"
               @dirty-change="filesDirty = $event"

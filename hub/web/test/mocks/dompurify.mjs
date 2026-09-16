@@ -3,14 +3,18 @@
 //
 // sanitize records what it was given and returns it unchanged, so a test can
 // assert that rendered Markdown actually passes through the sanitizer -- the
-// property the preview module is responsible for. Sanitization itself is not
-// behaviourally exercised here; see the note in the OpenSpec design.
+// property the preview module is responsible for. The configuration is recorded
+// as well, because the policy is what keeps a preview from reaching a third
+// party, and asserting only that a sanitizer ran would pass for any policy.
+//
+// Sanitization itself is not behaviourally exercised here; the hook the module
+// installs can be invoked directly, which the tests do.
 
 const calls = []
 const hooks = []
 
-function sanitize(html) {
-  calls.push(html)
+function sanitize(html, config) {
+  calls.push({ html, config })
   return html
 }
 
@@ -26,7 +30,9 @@ const DOMPurify = {
   isSupported: false,
   version: 'mock',
   /** sanitizedInputs returns every input sanitize was given, oldest first. */
-  sanitizedInputs: () => calls.slice(),
+  sanitizedInputs: () => calls.map((call) => call.html),
+  /** sanitizeCalls returns what each call was given, including its config. */
+  sanitizeCalls: () => calls.slice(),
   /** registeredHooks returns the hooks the module under test installed. */
   registeredHooks: () => hooks.slice(),
 }

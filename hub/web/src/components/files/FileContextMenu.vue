@@ -1,9 +1,9 @@
 <script setup lang="ts">
 // Right-click menu for a tree entry. It renders nothing itself when closed; the
 // overlay owns when it is open.
-import { onBeforeUnmount, onMounted } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-defineProps<{ x: number; y: number; name: string; isDir: boolean }>()
+const props = defineProps<{ x: number; y: number; name: string; isDir: boolean }>()
 const emit = defineEmits<{
   (e: 'new-file'): void
   (e: 'new-dir'): void
@@ -15,16 +15,75 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
+const menu = ref<HTMLElement | null>(null)
+const offset = ref({ left: props.x, top: props.y })
+
+// The menu opens at the pointer and is then pulled back inside the viewport. One
+// opened near the bottom edge would otherwise put its final entries -- Delete
+// among them -- below the window with nothing to scroll.
+function place() {
+  const el = menu.value
+  if (!el) return
+  const { width, height } = el.getBoundingClientRect()
+  offset.value = {
+    left: Math.max(0, Math.min(props.x, window.innerWidth - width)),
+    top: Math.max(0, Math.min(props.y, window.innerHeight - height)),
+  }
+}
+
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') emit('close')
 }
 
-onMounted(() => document.addEventListener('keydown', onKeydown))
-onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
+/** onPointerDown dismisses the menu when the press lands anywhere else. */
+function onPointerDown(event: PointerEvent) {
+  if (menu.value && !menu.value.contains(event.target as Node)) emit('close')
+}
+
+// A menu is anchored to a place on screen, so anything that moves what is under
+// that place invalidates it: the tree scrolls, the window resizes. Leaving it up
+// would leave it naming an entry the user is no longer looking at.
+function onViewportChange() {
+  emit('close')
+}
+
+onMounted(() => {
+  place()
+  document.addEventListener('keydown', onKeydown)
+  // Capture phase, so a press that a descendant stops still dismisses the menu.
+  document.addEventListener('pointerdown', onPointerDown, true)
+  // Scroll does not bubble, so the capture phase is what catches a scroll inside
+  // the tree or the editor.
+  window.addEventListener('scroll', onViewportChange, { capture: true, passive: true })
+  window.addEventListener('resize', onViewportChange)
+})
+
+// Watching the point as well as placing on mount, because the overlay can reuse
+// this instance for a second right-click: a menu left at the first position
+// would name an entry it is no longer next to, and every action on it -- Delete
+// among them -- would then apply to the wrong entry.
+//
+// The flush is 'post' so the box being measured is the one just rendered. A
+// pre-flush watcher measures the previous entry's title, which is wider or
+// narrower than the new one, and clamps against a size that no longer applies.
+watch(() => [props.x, props.y], place, { flush: 'post' })
+
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onKeydown)
+  document.removeEventListener('pointerdown', onPointerDown, true)
+  window.removeEventListener('scroll', onViewportChange, { capture: true })
+  window.removeEventListener('resize', onViewportChange)
+})
 </script>
 
 <template>
-  <div class="menu" :style="{ left: `${x}px`, top: `${y}px` }" role="menu" @contextmenu.prevent>
+  <div
+    ref="menu"
+    class="menu"
+    :style="{ left: `${offset.left}px`, top: `${offset.top}px` }"
+    role="menu"
+    @contextmenu.prevent
+  >
     <div class="menu__title" :title="name">{{ name }}</div>
     <button class="menu__item" type="button" role="menuitem" @click="emit('new-file')">
       New file

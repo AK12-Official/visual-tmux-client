@@ -6,6 +6,7 @@ import {
   cachedChildren,
   createTreeState,
   forgetDirectory,
+  invalidateDirectory,
   isExpanded,
   isTruncated,
   loadDirectory,
@@ -168,8 +169,10 @@ test('visibleRows marks which rows are open', () => {
   assert.equal(visibleRows(state, '/srv')[0].expanded, false)
 })
 
-// A directory whose children have not been fetched yet shows as collapsed and
-// contributes nothing, rather than inventing rows.
+// A directory whose listing was dropped is not open, whatever the set still
+// says: claiming otherwise would render it as open with nothing beneath it,
+// which reads as an empty directory, and the next click would collapse
+// something that was not showing.
 test('visibleRows ignores an expanded directory that was never loaded', () => {
   const state = createTreeState()
   state.children.set('/srv', [entry('app', true)])
@@ -178,7 +181,8 @@ test('visibleRows ignores an expanded directory that was never loaded', () => {
   const rows = visibleRows(state, '/srv')
   assert.equal(rows.length, 1)
   assert.equal(rows[0].path, '/srv/app')
-  assert.equal(rows[0].expanded, true)
+  assert.equal(rows[0].expanded, false)
+  assert.equal(isExpanded(state, '/srv/app'), false)
 })
 
 test('visibleRows joins paths from the filesystem root', () => {
@@ -193,11 +197,74 @@ test('visibleRows joins paths from the filesystem root', () => {
   )
 })
 
+// The bug this pins: forgetting a directory dropped only its own cache, so a
+// directory that was deleted and then created again inherited the old one's
+// subtree and rendered rows for entries that were gone.
+test('forgetDirectory drops the cached subtree, not just the directory', () => {
+  const state = createTreeState()
+  state.children.set('/srv', [entry('app', true)])
+  state.children.set('/srv/app', [entry('gone.txt')])
+  state.children.set('/srv/app/vendor', [entry('dep.go')])
+  state.expanded.add('/srv/app')
+  state.expanded.add('/srv/app/vendor')
+  state.truncated.add('/srv/app')
+
+  forgetDirectory(state, '/srv/app')
+
+  assert.equal(cachedChildren(state, '/srv/app'), undefined)
+  assert.equal(cachedChildren(state, '/srv/app/vendor'), undefined)
+  assert.equal(isTruncated(state, '/srv/app'), false)
+  // Nothing beneath it can still be open, and neither can it: a directory is
+  // open only while what is inside it is known, and that is what just went.
+  assert.equal(isExpanded(state, '/srv/app/vendor'), false)
+  assert.equal(isExpanded(state, '/srv/app'), false)
+  // The parent keeps its own listing: only what is beneath the named directory
+  // goes, and /srv is above it, not below.
+  assert.deepEqual(cachedChildren(state, '/srv'), [entry('app', true)])
+})
+
+// A change inside a directory says nothing about what is beneath it, so the
+// narrow tool has to leave the subtree alone.
+test('invalidateDirectory drops one listing and leaves the ones beneath it', () => {
+  const state = createTreeState()
+  state.children.set('/srv/app', [entry('a.txt')])
+  state.children.set('/srv/app/vendor', [entry('dep.go')])
+  state.truncated.add('/srv/app')
+
+  invalidateDirectory(state, '/srv/app')
+
+  assert.equal(cachedChildren(state, '/srv/app'), undefined)
+  assert.equal(isTruncated(state, '/srv/app'), false)
+  assert.deepEqual(cachedChildren(state, '/srv/app/vendor'), [entry('dep.go')])
+})
+
+test('a directory recreated after a delete renders no stale rows', () => {
+  const state = createTreeState()
+  state.children.set('/srv', [entry('app', true)])
+  state.children.set('/srv/app', [entry('gone.txt')])
+  state.expanded.add('/srv/app')
+  assert.deepEqual(
+    visibleRows(state, '/srv').map((row) => row.path),
+    ['/srv/app', '/srv/app/gone.txt'],
+  )
+
+  forgetDirectory(state, '/srv/app')
+  assert.deepEqual(
+    visibleRows(state, '/srv').map((row) => row.path),
+    ['/srv/app'],
+  )
+
+  // The directory comes back, freshly listed and empty.
+  state.children.set('/srv/app', [])
+  assert.deepEqual(
+    visibleRows(state, '/srv').map((row) => row.path),
+    ['/srv/app'],
+  )
+})
+
 test('a refused directory does not leave a partial cache entry', async () => {
   setup()
-  const pages = { '/srv': { entries: [entry('secret.txt')], truncated: false } }
-  delete pages['/srv']
-  mockList(pages)
+  mockList({})
   const state = createTreeState()
 
   await assert.rejects(() => loadDirectory(state, '/srv'))

@@ -57,20 +57,99 @@ export async function listDirectory(path: string): Promise<ListResult> {
   }
 }
 
+/**
+ * requireMtime turns a modification time the hub reported into a number.
+ *
+ * There is deliberately no zero fallback. Zero is a real modification time, so a
+ * client that adopted it as "last observed" would send `expected_mtime=0` on the
+ * next save -- which never matches the file, turning every save into a conflict
+ * the user has to confirm, with nothing on screen explaining why. A hub that does
+ * not report one is a hub this client cannot edit against safely, so it says so.
+ */
+function requireMtime(raw: unknown): number {
+  // A number, or a string that is entirely a number -- nothing else. Coercing
+  // whatever else arrives is how `false` becomes 0 and `[]` becomes 0, and zero
+  // is a real modification time: it would be adopted as an observation nobody
+  // made, and every later save would carry an expected time that never matches.
+  const value =
+    typeof raw === 'number'
+      ? raw
+      : typeof raw === 'string' && raw.trim() !== ''
+        ? Number(raw)
+        : Number.NaN
+  if (!Number.isFinite(value)) {
+    throw new FileApiError('mtime_unavailable')
+  }
+  return value
+}
+
+/**
+ * optionalMtime reads a modification time a hub may not have reported.
+ *
+ * The write path uses this where the read path uses requireMtime. By the time the
+ * answer to a write is read, the bytes are already on disk: refusing to parse the
+ * time cannot undo that, it only leaves the tab unable to record that it saved --
+ * so every later attempt writes the file again and fails in the same way, and the
+ * tab can never be closed without a warning. Reporting "no time" instead lets the
+ * tab record the save and leaves the next one to be told the file changed.
+ */
+function optionalMtime(raw: unknown): number | null {
+  try {
+    return requireMtime(raw)
+  } catch {
+    return null
+  }
+}
+
 /** mtimeOf reads the modification time the hub reports alongside the bytes. */
 function mtimeOf(res: Response): number {
-  const value = Number(res.headers.get('X-File-Mtime'))
-  return Number.isFinite(value) ? value : 0
+  return requireMtime(res.headers.get('X-File-Mtime'))
 }
 
 export interface FileContents {
+  /** text is the decoded contents, empty when the hub reported the file binary. */
   text: string
   mtime: number
+  /** binary is the hub's classification, not a guess from the file's name. */
+  binary: boolean
+}
+
+/** releaseBody drops a response body the caller will not read, so the connection
+ * is not held until the response is collected.
+ *
+ * It never fails the caller: whatever it reports could only replace the reason
+ * the caller already has, and on the success path there is no reason to report
+ * at all. */
+async function releaseBody(res: Response): Promise<void> {
+  try {
+    await res.body?.cancel()
+  } catch {
+    /* already consumed or errored; there is nothing left to release */
+  }
 }
 
 export async function readFile(path: string): Promise<FileContents> {
   const res = await request(withPath('read', path))
-  return { text: await res.text(), mtime: mtimeOf(res) }
+  let mtime: number
+  try {
+    mtime = mtimeOf(res)
+  } catch (err) {
+    await releaseBody(res)
+    throw err
+  }
+  // A binary file's bytes are not decoded at all: decoding them is what produces
+  // replacement characters, and saving that text back would overwrite the
+  // original bytes with them.
+  if (res.headers.get('X-File-Binary') === '1') {
+    await releaseBody(res)
+    return { text: '', mtime, binary: true }
+  }
+  try {
+    return { text: await res.text(), mtime, binary: false }
+  } catch (err) {
+    await releaseBody(res)
+    throw err
+  }
 }
 
 /** readFileBytes fetches the raw bytes, for previewing an image. */
@@ -91,7 +170,7 @@ export async function downloadFile(path: string): Promise<Blob> {
 
 /**
  * writeFile replaces a file's contents and returns the modification time the hub
- * reports afterwards.
+ * reports afterwards, or null when it reported none.
  *
  * Pass the mtime last observed to have the hub refuse a write that lost a race,
  * or null to force the overwrite. The declared size is a byte count, because
@@ -101,7 +180,7 @@ export async function writeFile(
   path: string,
   body: string,
   expectedMtime: number | null,
-): Promise<number> {
+): Promise<number | null> {
   const query = new URLSearchParams({
     path,
     size: String(new TextEncoder().encode(body).length),
@@ -113,8 +192,15 @@ export async function writeFile(
     headers: { 'Content-Type': 'application/octet-stream' },
     body,
   })
-  const data = (await res.json()) as { mtime?: unknown } | null
-  return typeof data?.mtime === 'number' ? data.mtime : 0
+  // Parsed the same way the read path parses its header, so a hub that reports
+  // the time as a numeric string is not accepted on one route and rejected on
+  // the other -- which would report a write that succeeded as a failure.
+  //
+  // A body that is not JSON is treated the same way as one without the field: a
+  // 2xx means the bytes are on disk, and reporting a parse failure would say the
+  // save failed while every retry succeeded on disk and failed the same way.
+  const data = (await res.json().catch(() => null)) as { mtime?: number | string | null } | null
+  return optionalMtime(data?.mtime)
 }
 
 async function post(route: string, payload: unknown): Promise<void> {

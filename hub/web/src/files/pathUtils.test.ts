@@ -79,17 +79,29 @@ test('quoteForShell refuses a path that cannot be written on one line', () => {
   assert.equal(quoteForShell(''), null)
 })
 
-test('quoteForShell never emits a line terminator for any accepted path', () => {
-  const paths = [
-    '/home/user/plain.txt',
-    '/home/user/my file.txt',
-    "/home/user/it's here",
-    '/home/user/$HOME;rm -rf /',
-    '/home/user/tab\there',
+// The terminal reads these bytes before the shell does, so quoting cannot make
+// them literal: a tab completes the word, ESC begins an escape sequence, Ctrl-C
+// is VINTR, and DEL erases a character of the line. Built from code points
+// rather than written out, because the literals are invisible in source.
+test('quoteForShell refuses every other control character', () => {
+  for (const code of [0x00, 0x03, 0x09, 0x0b, 0x1a, 0x1b, 0x7f]) {
+    const path = `/home/user/x${String.fromCharCode(code)}y`
+    assert.equal(
+      quoteForShell(path),
+      null,
+      `expected a path containing 0x${code.toString(16)} to be refused`,
+    )
+  }
+})
+
+test('quoteForShell returns a form the shell reads as one literal word', () => {
+  const cases: Array<[string, string]> = [
+    ['/home/user/plain.txt', '/home/user/plain.txt'],
+    ['/home/user/my file.txt', "'/home/user/my file.txt'"],
+    ["/home/user/it's here", `'/home/user/it'\\''s here'`],
+    ['/home/user/$HOME;rm -rf /', "'/home/user/$HOME;rm -rf /'"],
   ]
-  for (const path of paths) {
-    const quoted = quoteForShell(path)
-    assert.ok(quoted !== null, `expected ${path} to be insertable`)
-    assert.ok(!/[\n\r]/.test(quoted), `quoting ${path} produced a line terminator`)
+  for (const [path, want] of cases) {
+    assert.equal(quoteForShell(path), want, `quoting ${path}`)
   }
 })

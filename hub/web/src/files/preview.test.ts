@@ -91,6 +91,39 @@ test('renderMarkdown restricts attributes that load on their own', () => {
   const link = { attrName: 'href', attrValue: 'https://example.com', keepAttr: true }
   hook.handler(undefined, link)
   assert.equal(link.keepAttr, true)
+
+  // The same rule applies to the legacy attributes that load a background image.
+  const background = {
+    attrName: 'background',
+    attrValue: 'https://example.com/track.png',
+    keepAttr: true,
+  }
+  hook.handler(undefined, background)
+  assert.equal(background.keepAttr, false)
+})
+
+// The hook is only half the policy. A <style> element is what DOMPurify allows
+// by default and does not sanitize, so a document can reach a third party with
+// @import alone -- the element has to be refused, and the inline `style`
+// attribute with it, rather than filtered. Asserted here because the earlier
+// tests pass for any configuration at all.
+test('renderMarkdown forbids the constructs that load remote content', () => {
+  renderMarkdown('# x')
+  const calls = DOMPurify.sanitizeCalls()
+  const config = calls[calls.length - 1].config as {
+    FORBID_TAGS: string[]
+    FORBID_ATTR: string[]
+  }
+
+  for (const tag of ['iframe', 'frame', 'frameset', 'object', 'embed', 'base', 'style', 'link']) {
+    assert.ok(config.FORBID_TAGS.includes(tag), `expected ${tag} to be forbidden`)
+  }
+  // `srcset` is forbidden whole rather than checked, because a source list is not
+  // one value: a leading `#` on its first candidate says nothing about the rest,
+  // so a per-value rule would let a remote one through behind an inline one.
+  for (const attr of ['style', 'srcset']) {
+    assert.ok(config.FORBID_ATTR.includes(attr), `expected ${attr} to be forbidden`)
+  }
 })
 
 // The result is the sanitizer's answer rather than the source placed into the

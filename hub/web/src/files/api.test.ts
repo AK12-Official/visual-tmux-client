@@ -98,6 +98,37 @@ test('a refused call carries the hub error code', async () => {
   })
 })
 
+// Zero is a real modification time, so a value that merely *coerces* to zero must
+// not be adopted as an observation nobody made: every later save would carry an
+// expected time that never matches, and the user would be asked to confirm an
+// overwrite on every save with nothing on screen explaining why.
+//
+// A write that reported no time at all is different: the bytes are on disk by
+// then, so the answer is "no time" rather than a refusal -- refusing would leave
+// the tab unable to record that it saved, and every later attempt would write the
+// file again and fail the same way.
+test('the write path refuses a coerced modification time but tolerates a missing one', async () => {
+  await withoutStorage(async () => {
+    for (const body of [{ mtime: false }, { mtime: true }, { mtime: [] }, { mtime: null }, {}]) {
+      mockFetch(jsonResponse(body))
+      assert.equal(
+        await writeFile('/home/user/a.txt', 'hello', 100),
+        null,
+        `an mtime of ${JSON.stringify(body)} must not be adopted`,
+      )
+    }
+
+    // A reported zero is a number the hub chose, and is adopted.
+    mockFetch(jsonResponse({ mtime: 0 }))
+    assert.equal(await writeFile('/home/user/a.txt', 'hello', 100), 0)
+
+    // A numeric string is what the read path already accepts, and is read the
+    // same way here so the two cannot disagree about a hub's answer.
+    mockFetch(jsonResponse({ mtime: '250' }))
+    assert.equal(await writeFile('/home/user/a.txt', 'hello', 100), 250)
+  })
+})
+
 test('writeFile declares a byte length rather than a character count', async () => {
   await withoutStorage(async () => {
     const calls = mockFetch(jsonResponse({ mtime: 99 }))
@@ -139,6 +170,41 @@ test('readFile reports the modification time the hub sent', async () => {
     const contents = await readFile('/home/user/a.txt')
     assert.equal(contents.text, 'hello')
     assert.equal(contents.mtime, 1737000000000)
+    assert.equal(contents.binary, false)
+  })
+})
+
+// Decoding a binary file's bytes is what turns them into replacement characters,
+// and saving that text back is what destroys the original. The hub classifies the
+// contents, so the client never decodes them at all.
+test('readFile does not decode contents the hub reported as binary', async () => {
+  await withoutStorage(async () => {
+    mockFetch(
+      new Response('not really decoded', {
+        status: 200,
+        headers: {
+          'X-File-Size': '19',
+          'X-File-Mtime': '1737000000000',
+          'X-File-Binary': '1',
+        },
+      }),
+    )
+
+    const contents = await readFile('/home/user/blob.bin')
+    assert.equal(contents.binary, true)
+    assert.equal(contents.text, '')
+    assert.equal(contents.mtime, 1737000000000)
+  })
+})
+
+// The hub always sends the header; a response without it means something is
+// wrong, and adopting zero as the observed time would turn every later save into
+// a conflict with nothing on screen explaining why.
+test('readFile refuses a response that does not report a modification time', async () => {
+  await withoutStorage(async () => {
+    mockFetch(new Response('hello', { status: 200, headers: { 'X-File-Size': '5' } }))
+
+    await assert.rejects(() => readFile('/home/user/a.txt'), /mtime_unavailable/)
   })
 })
 

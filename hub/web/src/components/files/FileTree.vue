@@ -5,7 +5,7 @@
 import { computed } from 'vue'
 
 import type { Entry } from '../../files/api'
-import { isTruncated, visibleRows, type TreeState } from '../../files/tree'
+import { cachedChildren, isTruncated, visibleRows, type TreeState } from '../../files/tree'
 
 const props = defineProps<{
   path: string
@@ -33,6 +33,11 @@ function activate(row: { entry: Entry; path: string }) {
 
 const rows = computed(() => visibleRows(props.state, props.path))
 const truncated = computed(() => isTruncated(props.state, props.path))
+// "Empty" is a claim about the directory, so it is only made about one that has
+// actually been read. A listing that has been dropped and not re-read -- which is
+// what a failed reload leaves behind -- has nothing to show and no reason to
+// claim there is nothing in there.
+const loaded = computed(() => cachedChildren(props.state, props.path) !== undefined)
 
 function onContext(event: MouseEvent, entry: Entry, path: string) {
   emit('context', event, entry, path)
@@ -41,7 +46,7 @@ function onContext(event: MouseEvent, entry: Entry, path: string) {
 
 <template>
   <div class="tree">
-    <p v-if="rows.length === 0" class="tree__empty">This directory is empty.</p>
+    <p v-if="rows.length === 0 && loaded" class="tree__empty">This directory is empty.</p>
     <template v-else>
       <p v-if="truncated" class="tree__note">
         More entries than the listing limit — open a subdirectory to see the rest.

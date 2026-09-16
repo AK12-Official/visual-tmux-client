@@ -1,5 +1,11 @@
 <script setup lang="ts">
 // CodeMirror 6 binding. The editor owns its document; the parent owns the value.
+//
+// One instance per open file, which the parent arranges by keying this component
+// on the path. Sharing one instance across tabs makes undo walk back through the
+// tab switches themselves -- the document swap is an ordinary history entry --
+// so a reflex Ctrl-Z after switching tabs would pull the previous file's text
+// into this one, and the next Save would write it there.
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { EditorView, basicSetup } from 'codemirror'
 

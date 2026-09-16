@@ -56,11 +56,38 @@ export interface RenderedMarkdown {
  * FORBIDDEN_TAGS are omitted from rendered output outright. An embedded document
  * is the one thing that turns a preview into a fetch the user never asked for,
  * and the specification requires it to be absent rather than neutralised.
+ *
+ * `style` and `link` are on the list for the same reason, less obviously: the
+ * sanitizer does not sanitize CSS, and CSS carries `@import` and `url()`, which
+ * fetch whatever they name. A document that wants to reach a third party would
+ * otherwise only have to say so in a stylesheet rather than in an element.
  */
-const FORBIDDEN_TAGS = ['iframe', 'frame', 'frameset', 'object', 'embed', 'portal', 'base']
+const FORBIDDEN_TAGS = [
+  'iframe',
+  'frame',
+  'frameset',
+  'object',
+  'embed',
+  'portal',
+  'base',
+  'style',
+  'link',
+  'meta',
+]
+
+/**
+ * FORBIDDEN_ATTRS are attributes whose value can itself load remote content,
+ * beyond what the inline-source rule below can decide.
+ *
+ * `srcset` is here rather than in that rule because a source list is not one
+ * value: its candidates are comma-separated, so a leading `#` on the first one
+ * says nothing about the second. There is no Markdown construct that produces
+ * the attribute, so refusing it whole costs nothing.
+ */
+const FORBIDDEN_ATTRS = ['style', 'srcset']
 
 /** SELF_LOADING_ATTRS are the attributes that make a browser fetch something. */
-const SELF_LOADING_ATTRS = new Set(['src', 'srcset', 'poster'])
+const SELF_LOADING_ATTRS = new Set(['src', 'poster', 'background'])
 
 /** INLINE_SRC_RE matches a source the document already carries. */
 const INLINE_SRC_RE = /^(?:data:image\/|blob:|#)/i
@@ -99,6 +126,7 @@ export function renderMarkdown(source: string): RenderedMarkdown {
     html: DOMPurify.sanitize(parsed, {
       USE_PROFILES: { html: true },
       FORBID_TAGS: FORBIDDEN_TAGS,
+      FORBID_ATTR: FORBIDDEN_ATTRS,
     }),
     truncated,
   }
