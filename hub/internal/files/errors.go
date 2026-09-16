@@ -33,4 +33,12 @@ var (
 	// ErrWriteFailed is a write that could not be completed safely. Nothing was
 	// changed at the target path.
 	ErrWriteFailed = errors.New("write failed")
+	// ErrCrossRoot is a move whose two ends lie in different configured roots,
+	// which this hub does not perform.
+	//
+	// It is its own error rather than a not-allowed path because neither path is
+	// outside the boundary: what cannot be expressed is the move between them,
+	// and telling a caller one of two paths it may name is forbidden would be
+	// false. See renameAt for why it is refused rather than attempted.
+	ErrCrossRoot = errors.New("cross-root move")
 )

@@ -162,17 +162,37 @@ test('the editor holds source, and nothing it must not render as text', () => {
   assert.equal(editable('build.log', 100, false), true)
 })
 
-test('presentation follows the hub over the file name, in both directions', () => {
+test('presentation follows the hub about what may be decoded as text', () => {
   assert.equal(presentation('photo.png', 100, null), 'image')
   assert.equal(presentation('notes.md', 100, null), 'markdown')
   assert.equal(presentation('main.go', 100, null), 'editor')
+  // Binary the name did not suggest is information, which is the point in this
+  // direction: decoding bytes the hub read as binary is what would replace them
+  // on the next save, whatever the name suggests.
   assert.equal(presentation('main.go', 100, true), 'info')
-  // Which is the point in this direction: decoding bytes the hub read as binary
-  // is what would replace them on the next save, whatever the name suggests.
-  assert.equal(presentation('photo.png', 100, true), 'info')
+  assert.equal(presentation('archive.zip', 100, true), 'info')
   // And in the other: text the hub read is text the editor gets, even when the
   // name said otherwise. Markdown is still Markdown, because that is a rendering
   // choice rather than a guess about the contents.
   assert.equal(presentation('archive.zip', 100, false), 'editor')
   assert.equal(presentation('notes.md', 100, false), 'markdown')
+})
+
+// The classification settles whether bytes may be decoded as text, and an image
+// preview never decodes anything as text -- it hands the bytes to the image
+// decoder. Asking the hub about a picture therefore gets the right answer to a
+// question the preview does not ask: every image is binary. Reading it as "not
+// previewable" is what presented a picture as a file's details whenever a
+// directory listing had called it too large and the read found it under the
+// bound, which is what a file that has shrunk since the listing looks like.
+test('an image within the bound is shown as an image, binary or not', () => {
+  assert.equal(presentation('photo.png', 100, true), 'image')
+  assert.equal(presentation('photo.png', MAX_IMAGE_PREVIEW_BYTES, true), 'image')
+  // Over the bound it is information either way, because rendering it is what
+  // would freeze the tab -- a different bound from the one that was asked about.
+  assert.equal(presentation('photo.png', MAX_IMAGE_PREVIEW_BYTES + 1, true), 'info')
+  assert.equal(presentation('photo.png', MAX_IMAGE_PREVIEW_BYTES + 1, null), 'info')
+  // And it stays out of the editor, which is the whole reason the classification
+  // was asked for: editing an image means decoding it as text.
+  assert.equal(editable('photo.png', 100, true), false)
 })

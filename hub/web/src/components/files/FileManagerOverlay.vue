@@ -18,6 +18,7 @@ import {
   type StartDirectory,
 } from '../../files/api'
 import { basename, dirname, joinPath, quoteForShell } from '../../files/pathUtils'
+import { createPending } from '../../files/pending'
 import { createRenames } from '../../files/renames'
 import { getConfig } from '../../config'
 import { choosePreview, editable, presentation, type Classification } from '../../files/preview'
@@ -75,11 +76,18 @@ const opening = new Set<string>()
 // saveTickets is the newest save attempted per tab session, so an out-of-order
 // answer from an older one cannot be folded back in.
 const saveTickets = new Map<number, number>()
-// renaming holds the source path of every rename this manager has asked for and
-// not yet been answered about. A save answer arriving while one is outstanding
-// describes a write that named the same path, and the two crossed on the wire:
-// see settleSave for why that answer is not recorded.
-const renaming = new Set<string>()
+// saving, renaming and deleting are the requests this manager has sent and not
+// yet been answered about, by path. What each one is asked is different, which
+// is why there are three: a rename outstanding when a save is answered means
+// that answer describes a path the rename may have vacated, so it is not
+// recorded (see settleSave), and a delete outstanding when a save is sent means
+// the file is on its way out, so the save is not sent at all (see save).
+//
+// A count per path rather than a flag, because two of a kind can be in flight on
+// one path at once: see files/pending.ts.
+const saving = createPending()
+const renaming = createPending()
+const deleting = createPending()
 // nextTabId numbers the editing sessions. See OpenFile.id for why an answer is
 // matched to a session rather than to a path.
 let nextTabId = 1
@@ -425,6 +433,16 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
   const tab = tabs.value.find((candidate) => candidate.id === tabId)
   if (!tab) return
 
+  // A file on its way out is not one to write to. The delete below waits for the
+  // saves it found travelling, and this is the other direction: a save started
+  // while a delete of the same path is in flight would reach the hub in an order
+  // neither request can see, and could put the file back after the user was told
+  // it was gone.
+  if (deleting.isPending(tab.path)) {
+    emit('notice', `${tab.name} is being deleted, so it was not saved.`, 'warning')
+    return
+  }
+
   // Only the newest save for a session may fold its result back in. Two saves in
   // flight (edit again while the first is travelling) can resolve out of order,
   // and the older answer would mark the tab clean at a text and a time that are
@@ -433,11 +451,12 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
   saveTickets.set(tab.id, ticket)
 
   const request = beginSave(tab, force)
+  saving.begin(request.path)
   try {
     const stamp = await saveOpenFile(request)
     if (!isSameTab(tab.id)) return
     if (saveTickets.get(tab.id) !== ticket) return
-    const settled = settleSave(tabs.value, request, stamp, renaming.has(request.path))
+    const settled = settleSave(tabs.value, request, stamp, renaming.isPending(request.path))
     tabs.value = settled.files
     if (settled.outcome === 'raced') {
       emit(
@@ -476,6 +495,10 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
       return
     }
     report(err, `Could not save ${tab.name}`)
+  } finally {
+    // The path the write named, not the tab's: a rename during the flight moved
+    // the tab, and it is the write that was outstanding.
+    saving.end(request.path)
   }
 }
 
@@ -677,17 +700,17 @@ function renameTarget(entry: Entry, path: string) {
   const name = window.prompt('Rename to', entry.name)
   if (!name || name === entry.name) return
   const target = joinPath(dirname(path), name)
-  renaming.add(path)
+  renaming.begin(path)
   void renameEntry(path, target)
     .then(() => {
       retargetTabs(path, target, name)
       return settleMutation(path, target)
     })
     .catch((err: unknown) => report(err, `Could not rename ${entry.name}`))
-    .finally(() => renaming.delete(path))
+    .finally(() => renaming.end(path))
 }
 
-function deleteTarget(entry: Entry, path: string) {
+async function deleteTarget(entry: Entry, path: string) {
   const kind = entry.is_dir ? 'directory' : 'file'
   // Tabs for the entry and for anything it contains: a deleted directory takes
   // its open files with it, and unsaved edits among them are not recoverable.
@@ -704,34 +727,56 @@ function deleteTarget(entry: Entry, path: string) {
     return
   }
 
-  void deleteEntry(path, entry.is_dir)
-    .then(() => {
-      // Filtered by path where the answer lands, not by the set captured before
-      // the request: a tab opened while the delete travelled names a file that is
-      // now gone, and would otherwise survive pointing at nothing. A tab renamed
-      // out of the way during the flight no longer matches, and should survive.
-      const removed = tabs.value.filter(
-        (tab) => tab.path === path || tab.path.startsWith(prefix),
-      )
-      // The warning named what was dirty when the user answered. A tab that
-      // appeared or was edited while the delete travelled was not in it -- and
-      // the file is gone by now, so it is said rather than asked.
-      const warned = new Set(unsaved.map((tab) => tab.id))
-      const unwarned = removed.filter((tab) => isDirty(tab) && !warned.has(tab.id))
-      if (unwarned.length > 0) {
-        const names = unwarned.map((tab) => tab.name).join(', ')
-        emit('notice', `Unsaved changes in ${names} went with ${entry.name}.`, 'warning')
-      }
+  // The manager does not let the deletes it sends race the saves it sends, and
+  // this is where that is decided. The hub's last check and the rename that
+  // installs a write are two adjacent system calls -- no filesystem primitive
+  // replaces a name only if it still holds what was there -- so a write landing
+  // between them puts the file back, while the delete's own answer says the file
+  // is gone. Nothing can order another process's write against this delete; the
+  // manager can at least refuse to order its own that way.
+  //
+  // The marker goes up before the wait rather than after it, so a save started
+  // while the wait is on is refused by save() instead of joining the queue: the
+  // wait is for what was already travelling, and a later write is a separate
+  // question the marker answers directly.
+  //
+  // The wait is bounded by the write it is waiting for and by nothing else --
+  // there is no timeout on these requests anywhere in this client. A write that
+  // never answers therefore leaves the delete unsent, with the entry still
+  // listed, which is the truth; the alternative is a delete sent into a race it
+  // cannot see. Both are worse than the ordinary case, and only one of them
+  // lies.
+  deleting.begin(path)
+  try {
+    await Promise.all(doomed.map((tab) => saving.idle(tab.path)))
 
-      tabs.value = tabs.value.filter(
-        (tab) => tab.path !== path && !tab.path.startsWith(prefix),
-      )
-      if (!tabs.value.some((tab) => tab.path === activePath.value)) {
-        activePath.value = tabs.value.length > 0 ? tabs.value[tabs.value.length - 1].path : null
-      }
-      return settleMutation(path)
-    })
-    .catch((err: unknown) => report(err, `Could not delete ${entry.name}`))
+    await deleteEntry(path, entry.is_dir)
+
+    // Filtered by path where the answer lands, not by the set captured before
+    // the request: a tab opened while the delete travelled names a file that is
+    // now gone, and would otherwise survive pointing at nothing. A tab renamed
+    // out of the way during the flight no longer matches, and should survive.
+    const removed = tabs.value.filter((tab) => tab.path === path || tab.path.startsWith(prefix))
+    // The warning named what was dirty when the user answered. A tab that
+    // appeared or was edited while the delete travelled was not in it -- and
+    // the file is gone by now, so it is said rather than asked.
+    const warned = new Set(unsaved.map((tab) => tab.id))
+    const unwarned = removed.filter((tab) => isDirty(tab) && !warned.has(tab.id))
+    if (unwarned.length > 0) {
+      const names = unwarned.map((tab) => tab.name).join(', ')
+      emit('notice', `Unsaved changes in ${names} went with ${entry.name}.`, 'warning')
+    }
+
+    tabs.value = tabs.value.filter((tab) => tab.path !== path && !tab.path.startsWith(prefix))
+    if (!tabs.value.some((tab) => tab.path === activePath.value)) {
+      activePath.value = tabs.value.length > 0 ? tabs.value[tabs.value.length - 1].path : null
+    }
+    await settleMutation(path)
+  } catch (err) {
+    report(err, `Could not delete ${entry.name}`)
+  } finally {
+    deleting.end(path)
+  }
 }
 
 async function download(path: string, name: string) {
@@ -786,7 +831,7 @@ function onMenuAction(action: string) {
       renameTarget(target.entry, target.path)
       break
     case 'delete':
-      deleteTarget(target.entry, target.path)
+      void deleteTarget(target.entry, target.path)
       break
     case 'download':
       void download(target.path, target.entry.name)

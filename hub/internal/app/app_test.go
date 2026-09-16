@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/config"
+	"github.com/AK12-Official/visual-tmux-client/hub/internal/files"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/session"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/terminal"
 )
@@ -107,6 +109,53 @@ func TestAppLifecycleAndShutdown(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("server did not stop after shutdown")
+	}
+}
+
+// A root is an open descriptor and the hub holds one per configured root for as
+// long as it runs, so the end of that lifetime is where they are given back. The
+// service is reachable for it only because the App keeps it: the router receives
+// it, and a composition root that handed it over and forgot it could not.
+//
+// The consequence asserted here is the service refusing afterwards, which is
+// what a closed set does; that closing it also releases the descriptor is
+// TestClosingAServiceReleasesItsRootHandles.
+func TestShutdownReleasesTheConfiguredRoots(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Files.Roots = []string{root}
+	cfg.Server.Addr = "127.0.0.1:0"
+	cfg.Shutdown.AttachmentTimeout = config.Duration(100 * time.Millisecond)
+	cfg.Shutdown.HTTPTimeout = config.Duration(100 * time.Millisecond)
+
+	app, err := New(&cfg, config.Provenance{}, nil, Options{
+		Backend:     &dummyBackend{},
+		ProcessFact: &dummyFactory{},
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	ctx := context.Background()
+	if _, err := app.files.List(ctx, root); err != nil {
+		t.Fatalf("a configured root should be listable before shutdown: %v", err)
+	}
+
+	if _, err := app.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, time.Second)
+	defer shutdownCancel()
+	if err := app.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown failed: %v", err)
+	}
+
+	_, err = app.files.List(ctx, root)
+	if !errors.Is(err, files.ErrPathNotAllowed) {
+		t.Fatalf("expected a released root set to refuse, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "closed") {
+		t.Errorf("expected the refusal to be the closed set's, got: %v", err)
 	}
 }
 

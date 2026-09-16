@@ -136,6 +136,25 @@ func (s *Service) Enabled() bool {
 	return s.enabled
 }
 
+// Close gives back the descriptors the configured roots are held through.
+//
+// A hub holds one per root for its lifetime, so this is the end of that
+// lifetime: after it, every operation is refused rather than performed without
+// the handle. Nothing forces a process to call it -- the operating system
+// reclaims the descriptors at exit -- but a hub that is stopped and started
+// again in one process, or embedded in a program that outlives it, would leak
+// one per root per run, and a leaked descriptor on a mount point is also what
+// keeps the mount from being released.
+//
+// Safe to call more than once, and safe on a service built without roots, which
+// has nothing to give back.
+func (s *Service) Close() {
+	if s.roots == nil {
+		return
+	}
+	s.roots.Close()
+}
+
 // StartDirectory returns the directory a browser should open the file manager
 // at, given the candidate a session reported, and whether it substituted one.
 //

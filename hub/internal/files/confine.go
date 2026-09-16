@@ -235,15 +235,21 @@ func removeAll(c Confined) error {
 
 // renameAt moves one confined entry onto another.
 //
-// Both ends of a rename within one root go through the handle, which is the case
-// that matters: it is the final element of each path that a rename acts on and
-// never follows, and the parents are resolved as part of the call.
+// Both ends of a rename within one root go through the handle: it is the final
+// element of each path that a rename acts on and never follows, and the parents
+// are resolved as part of the call.
 //
-// Moving an entry *between* two configured roots cannot use the handle at all --
-// os.Root only moves within its own tree -- so it falls back to the two absolute
-// paths. That is the one remaining path-based call, and it is called out here
-// rather than left to be discovered: closing it needs a rename that takes two
-// directory descriptors, which this hub has no dependency for.
+// A move *between* two configured roots cannot be expressed that way at all --
+// os.Root only moves within its own tree -- and it is refused rather than
+// attempted. Performing it on the two absolute paths would resolve both of them
+// again at syscall time, which is the one thing this function exists to avoid: a
+// component of either path replaced by a symbolic link in between carries the
+// entry out of the boundary, or brings one in, in whichever direction the link
+// was planted. There is no safe spelling of it available here -- the primitive
+// it needs is a rename taking two directory descriptors, which this hub has no
+// dependency for -- and nothing the hub serves asks for one: a rename from the
+// browser's context menu always names a sibling of its source. A user who wants
+// the move has the terminal, where it is a `mv`.
 func renameAt(from, to Confined) error {
 	if from.err != nil {
 		return from.err
@@ -251,8 +257,17 @@ func renameAt(from, to Confined) error {
 	if to.err != nil {
 		return to.err
 	}
-	if from.root == nil || to.root == nil || from.root != to.root {
+	// Neither end rooted is a hub with no boundary, where there is nothing for a
+	// replaced component to escape from and the move is the ordinary one it has
+	// always been. Exactly one end rooted cannot arise from Confine -- it yields
+	// a handle for every path when roots are configured and for none when they
+	// are not -- but it falls into the refusal below rather than being assumed
+	// away, because assuming it away is what would put it on plain paths.
+	if from.root == nil && to.root == nil {
 		return os.Rename(from.abs, to.abs)
+	}
+	if from.root != to.root {
+		return fmt.Errorf("%w: %s and %s are in different configured roots", ErrCrossRoot, from.abs, to.abs)
 	}
 	return escapedWithin(from.root.Rename(from.path, to.path))
 }

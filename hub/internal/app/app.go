@@ -34,6 +34,10 @@ type App struct {
 	tickets    *auth.TicketStore
 	tmuxClient terminal.ProcessFactory
 	sessions   *session.Service
+	// files is held rather than only handed to the router, because it owns the
+	// descriptors the configured roots are acted through and is the only thing
+	// that can give them back. See Shutdown.
+	files *files.Service
 }
 
 // BrowserURL turns a listen address into a clickable browser URL.
@@ -144,6 +148,7 @@ func New(cfg *config.Config, prov config.Provenance, staticFS fs.FS, opt ...Opti
 		tickets:    ticketStore,
 		tmuxClient: procFact,
 		sessions:   sessionService,
+		files:      fileService,
 	}, nil
 }
 
@@ -230,6 +235,16 @@ func (a *App) Shutdown(ctx context.Context) error {
 		errs = append(errs, fmt.Errorf("http shutdown: %w", err))
 	}
 	httpCancel()
+
+	// Last, because every file request runs through these handles: the roots are
+	// open descriptors, one per configured root, and giving them back is what
+	// stops this hub leaking one each time it is stopped and started again inside
+	// one process. A hub whose process is about to exit would have them reclaimed
+	// anyway; one that is embedded, or restarted by a supervisor that keeps the
+	// process, would not.
+	if a.files != nil {
+		a.files.Close()
+	}
 
 	return errors.Join(errs...)
 }

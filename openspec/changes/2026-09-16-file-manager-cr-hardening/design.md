@@ -70,14 +70,24 @@ Two more properties of the design, both consequences of the same rules:
   escape from, so those hubs go on acting on plain paths. The default configuration's behaviour is
   therefore byte-identical, which is what makes this migration safe to land in the same change as
   nine other fixes.
-- **A move between two roots is the exception.** `os.Root.Rename` moves within its own tree only, so
-  a cross-root move is performed on the two absolute paths and a component replaced during it can
-  still redirect it. That is stated in the spec as the one exception rather than left to be found.
+- **A move between two roots is refused**, and a third review round is what settled that. Round 2
+  performed it on the two absolute paths and wrote the exception into the spec; the round after
+  pointed out that an exception written down is still a hole -- the API goes on offering an
+  operation a component replaced in between can redirect, out of the boundary in one direction or
+  into it in the other -- and that the reasoning offered for keeping it was wrong: it does not
+  "remove a working feature", because nothing reaches it. A rename from the context menu always
+  names a sibling of its source, so both ends are in one root by construction; only a hand-written
+  API call can name two. It is now refused with an error of its own (`ErrCrossRoot`,
+  `cross_root_move` on the wire), because neither path is outside the boundary and saying so would
+  be false. `renameAt` is consequently the last call in the package on a plain path -- and it makes
+  one only when no roots are configured.
 
 *Alternatives considered:* leaving the docs to carry the limit (rejected by review twice); a
-component-wise `O_NOFOLLOW` walk by hand (rejected: `os.Root` is that walk, maintained); refusing
-cross-root moves rather than performing them unsafely (rejected: it removes a working feature to
-close a window only a local actor can reach).
+component-wise `O_NOFOLLOW` walk by hand (rejected: `os.Root` is that walk, maintained); keeping the
+cross-root move and performing it on path strings (rejected in round 3, see above); performing it
+safely with `renameat2`/`RENAME_EXCHANGE` (rejected: Linux-only, a new dependency, and exchange is
+not the operation -- it would briefly install the wrong contents before a swap-back); copy-then-
+delete (rejected: not atomic, leaves both copies on a crash).
 
 ### 1a. A save answer that crossed a rename is not recorded
 
@@ -96,7 +106,49 @@ it. That is the trade the specification now states.
 would stall the rename the user is watching); re-reading the file after the rename to decide
 (rejected: it cannot distinguish the two orderings either, and it replaces the tab's contents).
 
-### 1b. A listing's metadata phase is cancellable too
+Round 3 found that record was a `Set`, and that one path can have two renames in flight at once:
+until the first is answered the entry is still listed under the name the user is renaming, so a
+second rename of it is one the interface permits. With a set, the first rename to be *answered*
+clears the record of the second, which is still travelling -- so a write answering next is recorded
+as saved against a path the second rename is at that moment moving out from under it. It is now a
+count per path (`files/pending.ts`), which is the same fix the same round applied to saves (1c).
+
+### 1b. A delete and a save are not allowed to race each other
+
+The same two-adjacent-syscalls window as 1a, from the other side, and round 3's finding. Between the
+hub's final `confirmUnchanged` and the `rename` that installs a write, a `unlink` can land: the write
+then recreates the file at a path the user has just been told it was deleted from, while the delete's
+own answer reports success and the tree is redrawn to show it gone.
+
+No primitive closes that window -- it is the same POSIX limitation as 1a, and the write side is where
+it can only be *detected*, never prevented. What the browser can do is refuse to order its own two
+requests that way, and that is what it now does:
+
+- A delete waits for the writes already travelling that name the entry or anything beneath it before
+  it is sent. The tabs it is about to close are exactly the paths a save of that subtree can be
+  in flight for, so it asks about those and nothing more.
+- A save whose path has a delete in flight is refused with a notice rather than sent. The await above
+  only covers writes that existed when the delete looked; one started afterwards would be a new
+  request reaching the hub in an order neither side can see.
+- The delete's own marker goes up before the await, so a save started during the wait is refused
+  rather than joining a queue it is not part of.
+
+The two mechanisms cover each other's remainder: a wait resolves on a path that is momentarily clear,
+and the marker is what makes a request begun just after that point impossible.
+
+*Alternatives considered:* a flag rather than a count (rejected: two saves of one tab can be in
+flight, and the first answer would clear the second's record -- 1a); awaiting the writes *after*
+sending the delete (rejected: the race has already happened by then, and reporting it afterwards
+needs machinery to detect an outcome the wait removes); a bare "a delete is outstanding" marker with
+no wait (rejected: it stops new writes but leaves the write already in flight to land in the window,
+which is the case the finding is about); bounding the wait with a timeout (rejected: a magic number
+in a path whose correctness is the point, and the save's own request is the thing that ends it).
+
+The cost of that last one is named rather than hidden: the wait ends when the write's request does,
+and this client puts no timeout on those, so a write that never answers leaves the delete unsent --
+the entry still listed, which is true, rather than a delete sent into a race it cannot see.
+
+### 1c. A listing's metadata phase is cancellable too
 
 Round 2 also found that the context check covered reading the directory but not describing what was
 read: `entryFor` runs up to the bound's worth of times after the last check, and for a symbolic link
@@ -250,6 +302,38 @@ review twice); mounting components against the real CodeMirror (rejected: it nee
 layout engine, and the tests would then be measuring CodeMirror); writing a general SFC plugin
 (rejected: this compiles one component per file and nothing else).
 
+### 5a. The classification is about text, and an image is not a text question
+
+Round 3 found the classification being read as an answer to a question it does not answer. The rule
+was `binary === true → information`, which is right about text and wrong about images: every image is
+binary, so a hub asked about a picture says "binary" -- truly, and irrelevantly, because the image
+preview hands the bytes to the image decoder and never decodes them as text.
+
+The path that made it visible runs through the probe. A file whose *name* suggests binary, or an
+image the listing called too large, is put to the hub before the browser presents it; the answer was
+used both to choose the editor and to refuse the preview. So a photograph that had shrunk below the
+bound since the directory was listed -- still over it in the stale listing, under it in the read --
+was shown as a file's details with a download button, while the same bytes would have rendered.
+
+`presentation` now keeps the classification to the text decision, in both directions as before, and
+lets the name decide the image. The rest of the dispatch is unchanged, and `editable` follows from
+`presentation`, so an image stays out of the editor -- which is the reason the classification is
+asked for in the first place.
+
+### 6. The hub gives its root handles back when it stops
+
+Each configured root is an open descriptor, held for the hub's lifetime and used by every operation
+below that root. The composition root built the service, handed it to the router, and forgot it; a
+process that exits has them reclaimed, but a hub embedded in a longer-lived program, or restarted
+inside one, leaked one per root per run -- and a descriptor held on a mount point is also what keeps
+the mount from being released. `App` now keeps the service and `Shutdown` closes it, last, after the
+HTTP server has stopped so no request is still using a handle.
+
+*Alternatives considered:* closing in `New` on the error path only (rejected: the leak is over the
+whole lifetime, not just startup); a finalizer (rejected: nondeterministic, and the point is to
+release them at a known moment); an `App.Stop` distinct from `Shutdown` (rejected: nothing else in
+this composition root has two teardown paths).
+
 ## Risks / Trade-offs
 
 - **[Risk] The commit-time identity check adds a refusal that did not exist**, so a write that
@@ -286,19 +370,21 @@ layout engine, and the tests would then be measuring CodeMirror); writing a gene
   which is where the operation is legible today. One reviewer raised it as a
   finding and one as an out-of-scope observation; recorded here rather than left
   as an oversight.
-- **[Residual] A move between two configured roots still acts on path strings.** → *The one
-  operation `os.Root` cannot express, since a handle moves within its own tree only. Named as the
-  single exception in the spec; closing it needs a rename between two directory descriptors.*
 - **[Residual] The write's last check and its replacement are two adjacent system calls**, so an
   entry moved or taken between them is acted on rather than detected. → *No filesystem primitive
   replaces a name only if it still holds the file that was there. What the browser does when it
-  loses that race is specified under "Editing and unsaved changes": the answer is not recorded, so
-  the outcome the user sees is safe under either ordering.*
+  loses that race is specified under "Editing and unsaved changes" for a rename and under "Browser
+  file manager" for a delete: the answer is not recorded in the first case, and in the second the
+  browser does not let its own two requests race at all. What remains outside both is a write from
+  another process, which no ordering the browser chooses can reach.*
 - **[Residual] A file's classification and the bytes served are two reads of a mutable file.** →
   *A file rewritten in between can be served with a classification taken before the change. The harm
   is bounded by the same optimistic write: the modification time the client recorded is no longer
   the file's, so its next save is refused as a conflict. Closing it would mean buffering the whole
-  file to serve a snapshot, which is what the streaming design exists to avoid.*
+  file to serve a snapshot, which is what the streaming design exists to avoid. Re-checking the
+  descriptor after the scan was considered and rejected: an append is indistinguishable from an
+  in-place rewrite by size and time, and refusing on either would break reading a log that is being
+  written to, which the spec explicitly allows.*
 
 ## Migration Plan
 
@@ -309,11 +395,12 @@ explicit user action. Rolling back is reverting the release.
 
 ## Open Questions
 
-- Whether a move between two configured roots can be made to act on handles rather than on path
-  strings. It needs a rename that takes two directory descriptors, which this hub has no dependency
-  for; it is the single named exception in the specification.
 - Whether the write's final step can be made a compare-and-swap. `renameat2(RENAME_EXCHANGE)` on
   Linux can swap two names atomically and then be checked, but it is Linux-only and needs
   `golang.org/x/sys`, and swapping back is its own window.
+- Whether a move between two configured roots is wanted at all. It is refused today (see decision
+  1), on the grounds that nothing reaches it and the alternative is a path-string rename inside a
+  boundary that claims to hold. If a "move to a directory…" action is ever added, it needs the
+  two-descriptor rename above rather than a return to path strings.
 - Whether sanitization itself should be tested against a real DOMPurify. The document exists now, so
   the objection to it has weakened to a dependency question rather than a capability one.

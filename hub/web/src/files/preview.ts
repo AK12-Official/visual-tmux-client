@@ -65,25 +65,39 @@ export type Classification = boolean | null
  * presentation decides how a file's contents are shown, given the hub's
  * classification of them.
  *
- * The classification outranks the file's name in both directions, which is the
- * point of asking: something the hub read as binary is presented as information
- * whatever the name suggests, because decoding its bytes as text is what would
- * replace them on the next save, and something it read as text opens as text
- * even when the name suggests otherwise.
+ * The classification answers one question -- may these bytes be decoded as text?
+ * -- and it is the answer to that question, not to "what is this file?", which
+ * is why it outranks the file's name in both directions. Something the hub read
+ * as binary is not offered as editable text whatever the name suggests, because
+ * decoding its bytes is what would replace them on the next save; something it
+ * read as text opens as text even when the name suggests otherwise.
+ *
+ * An image is the case where the two questions come apart. Every image is
+ * binary, so a hub asked about one answers "binary" -- correctly, and about the
+ * wrong question. An image within the bound is handed to the image decoder and
+ * never decoded as text, which is what the classification exists to prevent, so
+ * the name still decides. Reading it as "not previewable" is what presented a
+ * picture as a file's details whenever the listing had called it too large and
+ * the read found it under the bound: the file had shrunk since the listing, the
+ * hub's answer was true, and the preview was still refused.
  *
  * It lives here rather than beside the open-file state because it is a
  * presentation rule: the module that owns the save and conflict rules has no
  * business importing the renderer to answer a question about a file name.
  */
 export function presentation(name: string, size: number, binary: Classification): PreviewKind {
-  if (binary === true) return 'info'
+  const byName = choosePreview(name, size)
   if (binary === false) {
     // Text the hub read, so the only thing the name still decides is whether it
     // is Markdown -- which is a rendering choice rather than a guess about the
     // contents.
-    return choosePreview(name, size) === 'markdown' ? 'markdown' : 'editor'
+    return byName === 'markdown' ? 'markdown' : 'editor'
   }
-  return choosePreview(name, size)
+  if (binary === null) return byName
+  // Binary, which settles the text question and only that one. An image within
+  // the bound is still an image; anything else is information rather than a
+  // rendering of bytes nobody may decode.
+  return byName === 'image' ? 'image' : 'info'
 }
 
 /**

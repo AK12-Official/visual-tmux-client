@@ -45,6 +45,8 @@ func mapFileError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "invalid_body")
 	case errors.Is(err, files.ErrPathNotAllowed):
 		writeError(w, http.StatusForbidden, "path_not_allowed")
+	case errors.Is(err, files.ErrCrossRoot):
+		writeError(w, http.StatusForbidden, "cross_root_move")
 	case errors.Is(err, files.ErrPermissionDenied):
 		writeError(w, http.StatusForbidden, "permission_denied")
 	case errors.Is(err, files.ErrNotFound):

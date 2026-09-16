@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -104,6 +105,33 @@ func TestServiceDisabledIsReportedWithoutTouchingTheFilesystem(t *testing.T) {
 	svc := NewService(Options{Roots: set, MaxFileSize: 1024, MaxDirEntries: 10, Enabled: false})
 	if svc.Enabled() {
 		t.Fatal("expected the service to report itself disabled")
+	}
+}
+
+// A service built without a root set has nothing to give back, and saying so is
+// what keeps the shutdown path from having to know which kind it holds.
+func TestClosingAServiceWithNoRootSetIsHarmless(t *testing.T) {
+	svc := NewService(Options{MaxFileSize: 1024, MaxDirEntries: 10, Enabled: true})
+	svc.Close()
+	svc.Close()
+}
+
+// Closing a service reaches the handles its roots are acted through, rather than
+// only marking the set unusable: an unreleased descriptor is the leak this
+// exists to stop.
+func TestClosingAServiceReleasesItsRootHandles(t *testing.T) {
+	root := sandbox(t)
+	set, err := NewRootSet([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle := set.handles[0]
+	svc := NewService(Options{Roots: set, MaxFileSize: 1024, MaxDirEntries: 10, Enabled: true})
+
+	svc.Close()
+
+	if _, err := handle.Open("."); !errors.Is(err, fs.ErrClosed) {
+		t.Errorf("the descriptor was not released: %v", err)
 	}
 }
 

@@ -309,6 +309,48 @@ func TestAClosedRootSetRefusesRatherThanFailingOpen(t *testing.T) {
 	}
 }
 
+// A move between two configured roots is the one operation a handle cannot
+// express, and performing it on the two absolute paths is what a component
+// replaced in between could redirect -- out of the boundary in one direction or
+// into it in the other. It is refused instead, and this pins both halves: the
+// error the caller gets, and that nothing moved.
+func TestAMoveBetweenTwoRootsIsRefused(t *testing.T) {
+	base := sandbox(t)
+	first := filepath.Join(base, "first")
+	second := filepath.Join(base, "second")
+	mustMkdir(t, first)
+	mustMkdir(t, second)
+
+	source := filepath.Join(first, "a.txt")
+	destination := filepath.Join(second, "a.txt")
+	mustWrite(t, source, "contents")
+
+	set, err := NewRootSet([]string{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.Close()
+
+	maxEntries, maxSize := 10, int64(1024)
+	svc := NewService(Options{Roots: set, MaxFileSize: maxSize, MaxDirEntries: maxEntries, Enabled: true})
+
+	err = svc.Rename(context.Background(), source, destination)
+	if !errors.Is(err, ErrCrossRoot) {
+		t.Fatalf("expected a move between two roots to be refused, got: %v", err)
+	}
+	// Not the not-allowed error: both paths are inside the boundary the caller
+	// may name, and saying one of them is outside would be false.
+	if errors.Is(err, ErrPathNotAllowed) {
+		t.Errorf("the refusal reported a path outside the boundary: %v", err)
+	}
+	if _, statErr := os.Stat(destination); !os.IsNotExist(statErr) {
+		t.Error("a refused cross-root move created the destination")
+	}
+	if got := readFile(t, source); got != "contents" {
+		t.Errorf("a refused cross-root move moved the source: %q", got)
+	}
+}
+
 // The rooted branch of every operation is a different code path from the
 // unrestricted one -- a handle rather than a plain path -- and the migration
 // rewrote all of them at once. These are the paths a coverage gap would hide, so

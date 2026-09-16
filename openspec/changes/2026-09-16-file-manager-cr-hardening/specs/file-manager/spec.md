@@ -6,11 +6,11 @@ By default the hub SHALL allow file operations on any regular path its own opera
 
 Roots govern what a **caller** may name, and no path supplied through this API reaches outside them: each operation is authorized against the target's resolved form, and one that resolves outside every root is refused.
 
-When roots are configured the hub SHALL also *perform* each operation through an open handle on the containing root, with the path expressed relative to it, so that the components of the target are resolved by the call that performs the operation rather than by an earlier check. This is what makes the boundary hold against another process on the machine and not merely against the caller: a component replaced between the check and the operation by a symbolic link that leads outside the root SHALL cause the operation to be refused, rather than silently redirecting it. A replacement that leads back inside the same root is followed, which stays within the boundary -- what the handle refuses is leaving it, not being redirected. Moving an entry between two configured roots is the one operation that cannot be expressed this way -- a handle only moves within its own tree -- and it SHALL be performed on the two absolute paths, with a component replaced during it able to redirect the move. That exception SHALL be the only one.
+When roots are configured the hub SHALL also *perform* each operation through an open handle on the containing root, with the path expressed relative to it, so that the components of the target are resolved by the call that performs the operation rather than by an earlier check. This is what makes the boundary hold against another process on the machine and not merely against the caller: a component replaced between the check and the operation by a symbolic link that leads outside the root SHALL cause the operation to be refused, rather than silently redirecting it. A replacement that leads back inside the same root is followed, which stays within the boundary -- what the handle refuses is leaving it, not being redirected. Moving an entry between two configured roots SHALL be refused: a handle moves only within its own tree, so such a move could only be performed on the two absolute paths, where a component replaced in between carries the entry out of the boundary in one direction or into it in the other. Nothing this API serves requires one -- a rename names a sibling of its source -- and a caller that wants the move has the terminal.
 
 With no roots configured there is no boundary to keep, and none is claimed: the hub acts on plain paths, where a replaced component takes the operation wherever it points. That is the operating-system user's own access, which an attached terminal already grants.
 
-Roots are therefore a boundary against a caller, and -- for every operation but a move between two of them -- against a replaced path component as well. They are not a boundary against the hub's own user, who has the terminal, or against a file being changed while it is read: that is a different problem, specified under Bounded file reading.
+Roots are therefore a boundary against a caller, and against a replaced path component for every operation the hub performs. They are not a boundary against the hub's own user, who has the terminal, or against a file being changed while it is read: that is a different problem, specified under Bounded file reading.
 
 #### Scenario: Default boundary
 
@@ -35,7 +35,7 @@ Roots are therefore a boundary against a caller, and -- for every operation but 
 #### Scenario: A move between two configured roots
 
 - **WHEN** a caller moves an entry from one configured root to another
-- **THEN** the move is performed on the two absolute paths, which is the one operation a component replaced during it can still redirect
+- **THEN** the hub refuses the move with a cross-root error and leaves the entry at its original path, because a handle moves only within its own tree and no safe spelling of the move exists without one
 
 #### Scenario: Target inside a configured root
 
@@ -312,6 +312,8 @@ The browser SHALL present a file according to its content type. Images SHALL be 
 
 The browser SHALL NOT decide what a file is from its name alone. A name that suggests binary contents, or an image too large to render, SHALL be put to the hub before the browser presents the file, so that text the hub reads as text opens in the editor whatever it is called. That question SHALL cost the caller no file content.
 
+The hub's classification answers whether a file's bytes may be decoded as text, and that is the only question it answers. An image within the preview bound SHALL be presented as an image whether or not the hub classified its contents as binary -- every image is binary, so that answer is true and about something else -- and "binary" SHALL NOT on its own be read as "not previewable".
+
 Rendering SHALL be bounded independently of the transfer limit, so that a large file cannot freeze the interface: an image larger than the preview bound SHALL NOT be rendered, and rendered Markdown SHALL be limited to a bounded prefix of the source. The bound SHALL be applied to the size the hub reports at the moment of the read rather than to a size a directory listing reported earlier, and no content beyond it SHALL be transferred for a preview that will not use it. A file found to be over the bound SHALL be presented as information with a download action, and the user SHALL be told why.
 
 #### Scenario: Image file
@@ -328,6 +330,11 @@ Rendering SHALL be bounded independently of the transfer limit, so that a large 
 
 - **WHEN** the user opens an image whose size was within the preview bound when the directory was listed and is over it by the time it is read
 - **THEN** the browser transfers no content beyond the bound, presents the file as information with a download action, and says that it is too large to render
+
+#### Scenario: An image that shrank since it was listed
+
+- **WHEN** the user opens an image whose size was over the preview bound when the directory was listed and is under it by the time it is read
+- **THEN** the browser presents it as an image, because the bound is applied to the size reported at the read, and the hub's classification of its contents as binary is not read as "not previewable"
 
 #### Scenario: A text file with a binary name
 
@@ -358,3 +365,54 @@ Rendering SHALL be bounded independently of the transfer limit, so that a large 
 
 - **WHEN** the user opens a file detected as binary
 - **THEN** the browser presents file information and a download action instead of the contents
+
+### Requirement: Browser file manager
+
+The browser SHALL provide a file manager opened from the terminal for the current session. On opening, the browser SHALL resolve the manager's starting directory from the session's active pane working directory. That starting directory SHALL be captured once, so that later changes to the active pane do not move an already-open manager. The browser SHALL then let the user navigate freely within the boundary, including moving to a parent directory and selecting any directory in the tree as the current one. When the pane working directory is not permitted by the boundary, the browser SHALL open at a permitted directory instead and inform the user that it did so. The manager SHALL load directory contents on demand as the user expands the tree. The manager SHALL offer creating a file, creating a directory, renaming, deleting, and downloading, and SHALL require the user to confirm a delete before it is performed.
+
+The browser SHALL NOT let the deletes it sends race the saves it sends. The hub's last check before replacing a file and the replacement itself are two adjacent system calls, so a write landing between them leaves the file present at a path the user has just been told it was deleted from, while the delete's own answer reports success. Before sending a delete the browser SHALL wait for the writes already travelling that name the entry or anything beneath it, and it SHALL refuse to send a save whose path has a delete in flight rather than letting the two race. This orders the browser's own requests against each other; a write from any other process is not ordered by it, which is specified under Optimistic concurrent writes.
+
+#### Scenario: Open from the terminal
+
+- **WHEN** the user opens the file manager while attached to a session whose active pane is at a permitted directory
+- **THEN** the manager opens showing that directory and the terminal remains usable
+
+#### Scenario: Active pane changes while open
+
+- **WHEN** the user changes the active pane or its working directory after the manager has opened
+- **THEN** the manager keeps its current directory rather than following the pane
+
+#### Scenario: Navigate to a parent directory
+
+- **WHEN** the user navigates to the parent of the current directory
+- **THEN** the manager shows that parent's contents as its current directory
+
+#### Scenario: Pane directory is not permitted
+
+- **WHEN** the session's active pane working directory is not permitted by the boundary
+- **THEN** the manager opens at a permitted directory and tells the user the pane directory was not accessible
+
+#### Scenario: Directory loads on demand
+
+- **WHEN** the user expands a directory that has not been loaded yet
+- **THEN** the browser requests that directory's children at that point rather than loading the whole tree up front
+
+#### Scenario: Deletion requires confirmation
+
+- **WHEN** the user deletes a file or directory
+- **THEN** the browser asks for confirmation first and performs no deletion if the user declines
+
+#### Scenario: A delete while a save of the same file is travelling
+
+- **WHEN** the user confirms deleting a file that has a save in flight
+- **THEN** the browser sends the delete only once that save has been answered, so the write cannot land between the hub's last check and its replacement
+
+#### Scenario: A save while a delete of the same file is in flight
+
+- **WHEN** the user saves a file whose deletion has been sent and not yet answered
+- **THEN** the browser sends no write and tells the user the file is being deleted
+
+#### Scenario: Operation fails
+
+- **WHEN** a file operation is refused by the hub
+- **THEN** the browser reports the reason using the application's existing notification mechanism and leaves the manager usable

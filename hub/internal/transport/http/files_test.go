@@ -183,6 +183,7 @@ func TestMapFileErrorTranslatesTheWholeVocabulary(t *testing.T) {
 		{"invalid path", files.ErrInvalidPath, http.StatusBadRequest, "invalid_path"},
 		{"invalid body", files.ErrInvalidBody, http.StatusBadRequest, "invalid_body"},
 		{"path not allowed", files.ErrPathNotAllowed, http.StatusForbidden, "path_not_allowed"},
+		{"cross-root move", files.ErrCrossRoot, http.StatusForbidden, "cross_root_move"},
 		{"permission denied", files.ErrPermissionDenied, http.StatusForbidden, "permission_denied"},
 		{"not found", files.ErrNotFound, http.StatusNotFound, "not_found"},
 		{"conflict", files.ErrConflict, http.StatusConflict, "conflict"},

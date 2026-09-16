@@ -55,7 +55,9 @@ interface Call {
  * order is chosen.
  */
 function hubFetch(
-  overrides: Partial<Record<'write' | 'rename' | 'probe' | 'read', Responder>> = {},
+  overrides: Partial<
+    Record<'write' | 'rename' | 'delete' | 'probe' | 'read' | 'list', Responder>
+  > = {},
 ): Call[] {
   const calls: Call[] = []
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -67,6 +69,7 @@ function hubFetch(
       return json({ path: '/srv/work', substituted: false })
     }
     if (url.includes('/files/list')) {
+      if (overrides.list) return overrides.list()
       return json({
         path: '/srv/work',
         entries: [
@@ -90,6 +93,9 @@ function hubFetch(
     }
     if (url.includes('/files/rename')) {
       return overrides.rename ? overrides.rename() : new Response(null, { status: 204 })
+    }
+    if (url.includes('/files/delete')) {
+      return overrides.delete ? overrides.delete() : new Response(null, { status: 204 })
     }
     throw new Error(`the manager asked for something unexpected: ${method} ${url}`)
   }) as typeof fetch
@@ -152,6 +158,30 @@ async function saveButton(wrapper: VueWrapper) {
   const button = wrapper.findAll('.fm__btn').find((candidate) => candidate.text() === 'Save')
   assert.ok(button, 'no Save button')
   return button
+}
+
+/** deleteViaMenu deletes an entry the way the user does: the menu, then the
+ * confirmation, which is stubbed because a test cannot answer a dialog. */
+async function deleteViaMenu(wrapper: VueWrapper, name: string) {
+  const original = window.confirm
+  window.confirm = () => true
+  try {
+    await row(wrapper, name).find('.tree__label').trigger('contextmenu')
+    await flush(2)
+    const action = wrapper.findAll('.menu__item').find((item) => item.text() === 'Delete')
+    assert.ok(action, 'the context menu offered no delete')
+    await action.trigger('click')
+  } finally {
+    window.confirm = original
+  }
+}
+
+/** type makes the file in the only open editor differ from what was read, which
+ * is what makes Save both enabled and worth pressing. */
+async function type(inserted = ' edited') {
+  const view = instances[instances.length - 1]
+  view.dispatch({ changes: { from: view.doc.length, to: view.doc.length, insert: inserted } })
+  await flush()
 }
 
 test('every open file keeps an editor, and only the active one is shown', async () => {
@@ -359,6 +389,158 @@ test('an image that turns out to be over the bound is presented as information',
     notices.some((text) => String(text).includes('larger than this view renders')),
     `expected a notice explaining the bound, got ${JSON.stringify(notices)}`,
   )
+  wrapper.unmount()
+})
+
+// The manager does not let the deletes it sends race the saves it sends. The
+// hub's last check and the rename that installs a write are two adjacent system
+// calls, so a write landing between them puts the file back -- while the delete's
+// own answer says the file is gone, and the tree is redrawn to show it gone.
+//
+// Nothing can order another process's write against this delete. What the
+// manager can do is refuse to order its own that way, and this is that refusal:
+// the request is not sent until the write it would cross has been answered.
+test('a delete is not sent while a save of the same file is travelling', async () => {
+  const write = deferred()
+  const calls = hubFetch({ write: write.respond })
+  const wrapper = await mountManager()
+  await openFile(wrapper, 'a.txt')
+  await type()
+  await (await saveButton(wrapper)).trigger('click')
+  await flush(2)
+
+  await deleteViaMenu(wrapper, 'a.txt')
+  await flush(2)
+
+  assert.equal(
+    calls.some((call) => call.url.includes('/files/delete')),
+    false,
+    'the delete overtook the write it would have crossed',
+  )
+
+  write.release(json({ mtime: 2000, mtime_nanos: '2000000000' }))
+  await flush()
+
+  assert.equal(
+    calls.some((call) => call.url.includes('/files/delete')),
+    true,
+    'the delete never went out once the write had answered',
+  )
+  wrapper.unmount()
+})
+
+// The other direction of the same rule. A write started after the delete was
+// sent cannot be waited for -- it did not exist when the delete looked -- so it
+// is refused instead, which is the only ordering left that cannot put the file
+// back.
+test('a save is refused while the delete of that file is in flight', async () => {
+  const remove = deferred()
+  const calls = hubFetch({ delete: remove.respond })
+  const wrapper = await mountManager()
+  await openFile(wrapper, 'a.txt')
+  await type()
+
+  await deleteViaMenu(wrapper, 'a.txt')
+  await flush(2)
+
+  await (await saveButton(wrapper)).trigger('click')
+  await flush(2)
+
+  assert.equal(
+    calls.some((call) => call.url.includes('/files/write')),
+    false,
+    'a write was sent at a file that is being deleted',
+  )
+  const notices = (wrapper.emitted('notice') ?? []).flat()
+  assert.ok(
+    notices.some((text) => String(text).includes('is being deleted')),
+    `expected a notice that the file is being deleted, got ${JSON.stringify(notices)}`,
+  )
+
+  remove.release(new Response(null, { status: 204 }))
+  await flush()
+  wrapper.unmount()
+})
+
+// Two renames of one path can be in flight at once, and the manager does not
+// stop the user asking for the second: until the first is answered, the entry is
+// still listed under the name they are renaming.
+//
+// Which makes the record of "a rename is outstanding for this path" a count, not
+// a flag. With a flag, the *failing* second rename clears the record of the
+// first -- which is still travelling -- and the write that answers next is
+// recorded as saved against a path the first rename is at that moment moving out
+// from under it.
+test('one of two renames being answered does not clear the other', async () => {
+  const write = deferred()
+  const first = deferred()
+  const answers: Responder[] = [
+    () => first.respond(),
+    () => new Response(JSON.stringify({ error: 'conflict' }), { status: 409 }),
+  ]
+  hubFetch({ write: write.respond, rename: () => answers.shift()!() })
+  const wrapper = await mountManager()
+  await openFile(wrapper, 'a.txt')
+  await type()
+  await (await saveButton(wrapper)).trigger('click')
+  await flush(2)
+
+  await renameViaMenu(wrapper, 'a.txt', 'b.txt')
+  await flush(2)
+  await renameViaMenu(wrapper, 'a.txt', 'c.txt')
+  await flush(2)
+
+  write.release(json({ mtime: 2000, mtime_nanos: '2000000000' }))
+  await flush()
+
+  assert.equal(
+    wrapper.find('.fm__dirty').exists(),
+    true,
+    'the write was recorded as saved while a rename of that path was outstanding',
+  )
+  const notices = (wrapper.emitted('notice') ?? []).flat()
+  assert.ok(
+    notices.some((text) => String(text).includes('renamed while it was saved')),
+    `expected a notice about the crossing rename, got ${JSON.stringify(notices)}`,
+  )
+
+  first.release(new Response(null, { status: 204 }))
+  await flush()
+  wrapper.unmount()
+})
+
+// The same bound, in the other direction, and the one that was wrong. The
+// listing is stale and calls this image far too large to render, so the manager
+// asks the hub what the file is before presenting it -- and every image is
+// binary, so that is what comes back, together with a size that is now well
+// under the bound. Treating the classification as the answer to "may this be
+// previewed?" is what showed the file's details instead of the picture, for a
+// file that had simply shrunk since the listing was read.
+test('an image that has shrunk below the bound is previewed as an image', async () => {
+  hubFetch({
+    list: () =>
+      json({
+        path: '/srv/work',
+        entries: [{ name: 'photo.png', is_dir: false, size: 9000000, mtime: 1000 }],
+        truncated: false,
+      }),
+    probe: () =>
+      new Response(null, {
+        status: 200,
+        headers: { 'X-File-Size': '2048', 'X-File-Binary': '1' },
+      }),
+  })
+  const wrapper = await mountManager()
+
+  await openFile(wrapper, 'photo.png')
+  await flush()
+
+  assert.equal(
+    wrapper.find('.fm__info').exists(),
+    false,
+    'a previewable image was presented as information instead',
+  )
+  assert.equal(wrapper.find('.image-preview').exists(), true, 'the image was never rendered')
   wrapper.unmount()
 })
 
