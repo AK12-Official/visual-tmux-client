@@ -9,6 +9,7 @@ import {
   isExpanded,
   isTruncated,
   loadDirectory,
+  visibleRows,
 } from './tree'
 import type { Entry } from './api'
 
@@ -110,6 +111,86 @@ test('forgetDirectory drops what was cached for a path', async () => {
   delete pages['/srv']
   await assert.rejects(() => loadDirectory(state, '/srv'))
   assert.equal(calls.length, 2)
+})
+
+// The tree is rendered from this, so it decides what a user can actually see.
+test('visibleRows shows the root plus whatever is expanded beneath it', () => {
+  const state = createTreeState()
+  state.children.set('/srv', [entry('app', true), entry('notes.txt')])
+  state.children.set('/srv/app', [entry('main.go'), entry('vendor', true)])
+  state.children.set('/srv/app/vendor', [entry('dep.go')])
+
+  // Nothing expanded: only the root's own children, in listing order.
+  assert.deepEqual(
+    visibleRows(state, '/srv').map((row) => [row.path, row.depth]),
+    [
+      ['/srv/app', 0],
+      ['/srv/notes.txt', 0],
+    ],
+  )
+
+  state.expanded.add('/srv/app')
+  assert.deepEqual(
+    visibleRows(state, '/srv').map((row) => [row.path, row.depth]),
+    [
+      ['/srv/app', 0],
+      ['/srv/app/main.go', 1],
+      ['/srv/app/vendor', 1],
+      ['/srv/notes.txt', 0],
+    ],
+  )
+
+  state.expanded.add('/srv/app/vendor')
+  assert.deepEqual(
+    visibleRows(state, '/srv').map((row) => [row.path, row.depth]),
+    [
+      ['/srv/app', 0],
+      ['/srv/app/main.go', 1],
+      ['/srv/app/vendor', 1],
+      ['/srv/app/vendor/dep.go', 2],
+      ['/srv/notes.txt', 0],
+    ],
+  )
+})
+
+test('visibleRows marks which rows are open', () => {
+  const state = createTreeState()
+  state.children.set('/srv', [entry('app', true), entry('notes.txt')])
+  state.children.set('/srv/app', [])
+  state.expanded.add('/srv/app')
+
+  const rows = visibleRows(state, '/srv')
+  assert.equal(rows[0].expanded, true)
+  // A file is never "expanded", however it is named.
+  assert.equal(rows[1].expanded, false)
+
+  state.expanded.delete('/srv/app')
+  assert.equal(visibleRows(state, '/srv')[0].expanded, false)
+})
+
+// A directory whose children have not been fetched yet shows as collapsed and
+// contributes nothing, rather than inventing rows.
+test('visibleRows ignores an expanded directory that was never loaded', () => {
+  const state = createTreeState()
+  state.children.set('/srv', [entry('app', true)])
+  state.expanded.add('/srv/app')
+
+  const rows = visibleRows(state, '/srv')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].path, '/srv/app')
+  assert.equal(rows[0].expanded, true)
+})
+
+test('visibleRows joins paths from the filesystem root', () => {
+  const state = createTreeState()
+  state.children.set('/', [entry('srv', true)])
+  state.children.set('/srv', [entry('a.txt')])
+  state.expanded.add('/srv')
+
+  assert.deepEqual(
+    visibleRows(state, '/').map((row) => row.path),
+    ['/srv', '/srv/a.txt'],
+  )
 })
 
 test('a refused directory does not leave a partial cache entry', async () => {

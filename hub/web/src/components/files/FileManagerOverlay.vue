@@ -10,7 +10,6 @@ import {
   deleteEntry,
   downloadFile,
   fetchWorkingDirectory,
-  listDirectory,
   readFile,
   renameEntry,
   type Entry,
@@ -38,7 +37,10 @@ const emit = defineEmits<{
 const tree = reactive(createTreeState())
 const current = ref('')
 const loading = ref(true)
+// failure takes over the panel, so it is only ever set when there is nothing
+// else to show. navError is reported alongside the listing and leaves it alone.
 const failure = ref('')
+const navError = ref('')
 const tabs = ref<OpenFile[]>([])
 const activePath = ref<string | null>(null)
 const markdownView = reactive(new Map<string, 'source' | 'preview'>())
@@ -64,16 +66,27 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
 }
 
-/** goTo loads a directory and makes it the current one. */
+/** goTo loads a directory and makes it the current one.
+ *
+ * A refused navigation must not throw away what the user is looking at: stepping
+ * up out of a configured boundary is an ordinary thing to try, and it should
+ * answer with a reason while leaving the listing in place. Only a failure with
+ * nothing on screen yet takes over the panel, because then the reason is all
+ * there is to show. */
 async function goTo(path: string) {
   loading.value = true
-  failure.value = ''
+  navError.value = ''
   try {
     await loadDirectory(tree, path, true)
     current.value = path
+    failure.value = ''
   } catch (err) {
     const detail = err instanceof FileApiError ? err.code : String(err)
-    failure.value = `${path} could not be opened (${detail}).`
+    if (current.value === '') {
+      failure.value = `${path} could not be opened (${detail}).`
+    } else {
+      navError.value = `${path} could not be opened (${detail}).`
+    }
   } finally {
     loading.value = false
   }
@@ -191,14 +204,6 @@ async function toggleDirectory(path: string) {
   } catch (err) {
     report(err, `Could not expand ${basename(path)}`)
   }
-}
-
-async function activate(entry: Entry, path: string) {
-  if (entry.is_dir) {
-    await goTo(path)
-    return
-  }
-  await openFile(entry, path)
 }
 
 async function save(force = false) {
@@ -390,15 +395,23 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
       <aside class="fm__tree">
         <p v-if="loading" class="fm__state">Loading…</p>
         <p v-else-if="failure" class="fm__state fm__state--error" role="alert">{{ failure }}</p>
-        <FileTree
-          v-else
-          :path="current"
-          :state="tree"
-          :current="current"
-          @open="activate"
-          @toggle="toggleDirectory"
-          @context="openMenu"
-        />
+        <template v-else>
+          <p v-if="navError" class="fm__nav-error" role="alert">
+            <span>{{ navError }}</span>
+            <button class="fm__nav-dismiss" type="button" aria-label="Dismiss" @click="navError = ''">
+              ×
+            </button>
+          </p>
+          <FileTree
+            :path="current"
+            :state="tree"
+            :current="current"
+            @open="openFile"
+            @select="goTo"
+            @toggle="toggleDirectory"
+            @context="openMenu"
+          />
+        </template>
       </aside>
 
       <section class="fm__viewer">
@@ -567,6 +580,29 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
 
 .fm__state--error {
   color: var(--th-danger);
+}
+
+/* A refused navigation is reported next to the listing, not in place of it. */
+.fm__nav-error {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  margin: 6px 8px;
+  padding: 6px 8px;
+  color: var(--th-warning);
+  font-size: 11px;
+  border: 1px solid var(--th-warning);
+  border-radius: 4px;
+}
+
+.fm__nav-dismiss {
+  margin-left: auto;
+  color: var(--th-text-mid);
+  font-size: 12px;
+  line-height: 1;
+  background: none;
+  border: none;
+  cursor: pointer;
 }
 
 .fm__info {
