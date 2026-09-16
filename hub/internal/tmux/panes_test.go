@@ -205,9 +205,12 @@ func TestListPanesReportsEveryPane(t *testing.T) {
 		t.Fatalf("ListPanes failed: %v", err)
 	}
 	if len(panes) != 2 {
-		before := c.HasSession(ctx, "panes")
-		t.Fatalf("got %d panes, want 2\nthe list-panes run just before returned %q\n"+
-			"the session still exists: %v", len(panes), raw, before)
+		again, againErr := c.ListPanes(ctx)
+		after, afterStderr, afterCode, afterErr := c.Exec(ctx, "list-panes", "-a", "-F", PaneFormat)
+		t.Fatalf("got %d panes, want 2\nfirst ListPanes: %d (err=%v)\nsecond ListPanes: %d (err=%v)\n"+
+			"raw before: %q\nraw after: code=%d err=%v stderr=%q out=%q",
+			len(panes), len(panes), err, len(again), againErr,
+			raw, afterCode, afterErr, afterStderr, after)
 	}
 	for _, p := range panes {
 		if p.Session != "panes" {
