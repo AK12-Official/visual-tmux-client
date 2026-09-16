@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 import { clearToken } from '../api'
 import { FileApiError } from './api'
@@ -299,4 +301,28 @@ test('an answer is recorded normally once no rename is outstanding', () => {
 
   assert.equal(settled.outcome, 'saved')
   assert.equal(isDirty(settled.files[0]), false)
+})
+
+// The boundary this module's own comment claims -- free of the renderer -- is
+// asserted rather than described, because describing it is what failed. The
+// second review read this file, saw an `import type` naming the renderer's
+// module, and recorded the boundary as closed: a type import erases at compile
+// time, so nothing was broken at runtime and nothing failed either. A reading is
+// not evidence; this is.
+//
+// It checks the specifier rather than the resolved graph. That is enough for the
+// break that happened, and a graph walk would need a module resolver in a test
+// that has no bundler; what it does not catch is a future module that re-exports
+// the renderer under another name.
+test('tabs.ts does not name the renderer', () => {
+  const source = readFileSync(fileURLToPath(new URL('./tabs.ts', import.meta.url)), 'utf8')
+  const specifiers = [...source.matchAll(/^import\s[^\n]*from\s+'([^']+)'/gm)].map((m) => m[1])
+
+  assert.ok(specifiers.length > 0, 'no imports were read, so this proves nothing')
+  for (const specifier of specifiers) {
+    assert.ok(
+      !specifier.includes('preview'),
+      `tabs.ts imports ${specifier}; the renderer imports the Markdown sanitizer`,
+    )
+  }
 })

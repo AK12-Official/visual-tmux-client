@@ -625,3 +625,27 @@ none of it, no correctness or boundary defect either. What remains is a list of 
 pre-existing gaps, each with the reason it is bounded — which is the state this change set out to
 reach, and the point at which another round would be reviewing its own summaries rather than the
 code.
+
+## The eighth review of the change
+
+Two reviewers over the whole-change round's own commit, which is small and behavioural and therefore
+gets the same treatment as every other fix on this branch.
+
+Both findings are the same shape, and it is worth naming because it is the last one this loop
+produced: **an improvement that is correct and pinned by nothing.** The module boundary in the
+previous round holds — the reviewer followed `tabs.ts`'s whole runtime graph to `api.ts` and then to
+a module with no imports at all, so the built application reaches neither `preview` nor the sanitizer
+— but nothing asserted it, and it had already been broken once by a `type` import that a review read
+past. There is a test now. And the rooted half of the new emptiness check was unexercised: the
+unrooted cases cover both answers, and the rooted ones only ever refused, so a check that called every
+rooted directory non-empty would have made them undeletable with no test failing. `dirHasEntries`
+answers through the root's handle, which is a different branch, and it is covered now.
+
+Neither is a defect in the code as it stands. Both are the difference between code that is right and
+code that would stay right, which is what the last three rounds have been converging on.
+
+The reviewer also confirmed by building a throwaway probe, rather than by reading, that the new
+emptiness check classifies identically to what it replaced across every shape asked of it -- missing,
+a regular file, an empty directory, a one-entry directory, a mode-0000 directory, a readable-but-not-
+executable one, and a symlink -- and that the `io.EOF` swallow is load-bearing rather than dead,
+since an empty directory returns exactly that.

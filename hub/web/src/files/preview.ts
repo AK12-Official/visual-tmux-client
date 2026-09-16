@@ -48,7 +48,6 @@ export function choosePreview(name: string, size: number): PreviewKind {
   }
 }
 
-
 /**
  * presentation decides how a file's contents are shown, given the hub's
  * classification of them (see Classification in ./classification).

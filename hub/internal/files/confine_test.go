@@ -488,4 +488,17 @@ func TestRootedCreateAndDeleteActInsideTheRoot(t *testing.T) {
 	if got := readFile(t, filepath.Join(root, "keep.txt")); got != "contents" {
 		t.Errorf("a neighbouring file was touched: %q", got)
 	}
+
+	// An *empty* directory inside a configured root, which only this test has:
+	// the emptiness check reads through the root's handle here rather than the
+	// plain path, and an emptiness check that answered "not empty" for a rooted
+	// one would leave empty directories under a root undeletable with nothing
+	// failing. See dirHasEntries.
+	mustMkdir(t, filepath.Join(root, "emptydir"))
+	if err := svc.Delete(ctx, filepath.Join(root, "emptydir"), false); err != nil {
+		t.Errorf("an empty directory inside the root should delete: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "emptydir")); !os.IsNotExist(err) {
+		t.Error("the empty directory survived a plain delete")
+	}
 }
