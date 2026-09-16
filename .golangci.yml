@@ -28,6 +28,11 @@ linters:
       min-len: 3
       min-occurrences: 3
       numbers: false
+      # Test files are excluded from goconst by the rule below, so they must not
+      # be counted towards a product file's occurrences either: without this,
+      # a value used twice in production and twice in tests was reported against
+      # the production file, which is not the file the rule claims to govern.
+      ignore-tests: true
     lll:
       line-length: 120
       tab-width: 4
