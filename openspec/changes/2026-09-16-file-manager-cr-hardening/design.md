@@ -136,7 +136,7 @@ requests that way, and that is what it now does:
 
 - A delete waits for the writes already travelling that name the entry or anything beneath it before
   it is sent. It asks by *path*, not by the tabs it is about to close -- a write outlives its tab,
-  which is the defect the two paragraphs after this list record.
+  which is the defect recorded under "The first version of this waited on the wrong thing" below.
 - A save whose path has a delete in flight is refused with a notice rather than sent. The await above
   only covers writes that existed when the delete looked; one started afterwards would be a new
   request reaching the hub in an order neither side can see.
@@ -462,10 +462,23 @@ reads (rejected: a build step and a generated artifact for eleven strings).
   an empty frame.*
 - **[Accepted] A create is not ordered against a delete.** → *`createHere` neither waits for an
   outstanding delete of its path nor is refused by one, so a create sent while that delete is in
-  flight can land before or after the unlink. Either way the name ends up in a state the user asked
-  for -- an empty file -- or without a file at all, and the tree refresh that follows both requests
-  shows which. It is not the save case: nothing of the user's is lost, which is why the ordering is
-  worth having for a save and not here.*
+  flight can land before or after the unlink. Nothing of the user's is lost either way: one ordering
+  leaves the empty file they asked for, the other leaves no file at all. What is *not* guaranteed is
+  that the screen settles on the truth -- the delete's refresh postdates the unlink, but the create's
+  is issued after the create's own answer, which can precede it, so whichever listing lands last is
+  the one the user is left looking at. It is not the save case, where what is at stake is an edit
+  being replaced, which is why the ordering is worth having there and not here.*
+- **[Accepted] `StartDirectory` answers from a closed root set.** → *It goes through `Resolve`, which
+  never consults `closed`, so after `Service.Close` it still reports a candidate as usable. Nothing
+  acts on that answer: every operation that touches the filesystem re-enters through `Confine` and is
+  refused. Unreachable once the HTTP server has stopped, which is when `Shutdown` closes the set --
+  but reachable by an embedder, which is the stated reason `Close` exists at all, so it is named.*
+- **[Accepted] A decode failure is sticky until the preview is remounted.** → *`undecodable` is
+  cleared by `release()`, which runs on a path change or an unmount. The preview is mounted only for
+  the active tab, so switching away and back re-runs the load and clears it -- but a file repaired on
+  disk while its tab stays active keeps the fallback panel until the user navigates away. The panel
+  was true when it was set and the recovery exists, so it is left rather than given a refresh
+  trigger of its own.*
 - **[Residual] A file's classification and the bytes served are two reads of a mutable file.** →
   *A file rewritten in between can be served with a classification taken before the change. The harm
   is bounded by the same optimistic write: the modification time the client recorded is no longer

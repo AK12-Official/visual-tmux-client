@@ -502,3 +502,67 @@ does not have (found independently by two reviewers this round).
 - The image decode-failure path rests on a browser raising `error` for a revoked blob URL. No test
   here can check that, because they dispatch the event themselves, and the fallback's test asserts a
   premise about the platform rather than about this code.
+
+## The sixth review of the change
+
+Three subagents, read-only and disjoint, over the fixes the fifth round produced. The result is worth
+recording precisely, because it is the first round of six that found **no confirmed defect in the
+behaviour of anything**: not the synchronization, not the predicate directions, not the ordering,
+not the classification, not the image preview. What it found is one plausible hole it could not
+construct, three items the record did not name, and four more prose defects.
+
+### The hole that turned out not to be one, and the test that could not fail
+
+The identity guard added in the fifth round rests on the node on screen being a different node from
+the one a stale event came from. The reviewer showed that a key on the *URL* would leave that resting
+on the platform producing a distinct string per call — which it does, but which this code cannot
+check — and labelled it PLAUSIBLE rather than CONFIRMED, having been unable to construct it.
+
+Tracing it settled the question the other way, and the reason is worth keeping: `release()` clears
+the URL before every load, so the `v-else-if` branch is torn down and a node never survives from one
+load to the next — whatever the key says. The element is always fresh, so the guard is exact by
+construction. The key was changed to key on the *load* anyway, but only so that the node's identity
+and the handler's ticket are the same fact rather than two facts that happen to agree; the comment
+says exactly that, and no more.
+
+The test written to pin it was then deleted, because it passed with either key. A test that passes
+whatever the code says is not evidence, and this branch spent five rounds learning that. What it
+would have claimed is recorded instead, in the comment, as a property of `release()`.
+
+### The Go round changed nothing but the record
+
+`git diff` over the Go tree is two comments. The reviewer verified the rewritten `Close` comment
+against `$GOROOT/src/os/root_openat.go`'s refcounting directly — including that `rootRemoveAll` is a
+single `doInRoot` call, so one ref covers the whole recursive walk — and could not falsify item
+15.9's claim that the three `writeFailure` call sites are undrivable. It sharpened it instead: the
+close must land in one of three adjacent-syscall gaps, and it traced the one injection point a test
+might plausibly use (a body that closes the handle mid-copy) to a path that *does* report correctly,
+so that case is not among the uncovered ones.
+
+It also named the one thing no previous round had: `StartDirectory` answers from a closed set. It
+acts on nothing and is unreachable once the server has stopped, but it is reachable by an embedder,
+which is the stated reason `Close` exists — so it is in `design.md`'s accepted items now rather than
+unnamed.
+
+And it found the same species of defect this round was fixing, in the file the round edited:
+`tasks.md` 14.3 said the closed-handle test "covers the three routes" while 15.9, fifteen lines
+below, said it "pins the helper, not the routes". The test is renamed for what it checks.
+
+### The claims round
+
+Four more, three of them narrowings rather than falsehoods: the create's comment promised a refresh
+that shows the outcome, where only the delete's refresh is guaranteed to postdate the unlink; a
+cross-reference in `design.md` pointed two blocks short of what it named; the two READMEs and the
+spec scenario described the refusal as covering the file itself, where the upward predicate also
+covers a directory above it; and the commit message accounted for a user-visible notice change under
+"prose defects". The last is this round's own commit message problem and is recorded here because
+the message cannot be amended without rewriting the commit.
+
+### Where this leaves the loop
+
+Six rounds have produced, in order: a data race and a real ordering hole; a predicate written in one
+direction; one narrow gap in a guard added to fix the second; and then, this round, nothing wrong
+with any behaviour at all. The findings have been in the *record* — sentences about what changed,
+left standing after the thing they described was replaced — for three rounds running, and each round
+writes more of that record, which is what the next round checks. The lever is to stop growing the
+narrative, not to keep reviewing it.

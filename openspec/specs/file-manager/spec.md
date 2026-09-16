@@ -323,7 +323,7 @@ The hub SHALL expose the working directory of a session's active pane, so the br
 
 The browser SHALL provide a file manager opened from the terminal for the current session. On opening, the browser SHALL resolve the manager's starting directory from the session's active pane working directory. That starting directory SHALL be captured once, so that later changes to the active pane do not move an already-open manager. The browser SHALL then let the user navigate freely within the boundary, including moving to a parent directory and selecting any directory in the tree as the current one. When the pane working directory is not permitted by the boundary, the browser SHALL open at a permitted directory instead and inform the user that it did so. The manager SHALL load directory contents on demand as the user expands the tree. The manager SHALL offer creating a file, creating a directory, renaming, deleting, and downloading, and SHALL require the user to confirm a delete before it is performed.
 
-The browser SHALL NOT let the deletes it sends race the saves it sends. The hub's last check before replacing a file and the replacement itself are two adjacent system calls, so a write landing between them leaves the file present at a path the user has just been told it was deleted from, while the delete's own answer reports success. Before sending a delete the browser SHALL wait for the writes already travelling that name the entry or anything beneath it, and it SHALL refuse to send a save whose path has a delete in flight rather than letting the two race. This orders the browser's own requests against each other; a write from any other process is not ordered by it, which is specified under Optimistic concurrent writes.
+The browser SHALL NOT let the deletes it sends race the saves it sends. The hub's last check before replacing a file and the replacement itself are two adjacent system calls, so a write landing between them leaves the file present at a path the user has just been told it was deleted from, while the delete's own answer reports success. Before sending a delete the browser SHALL wait for the writes already travelling that name the entry or anything beneath it, and it SHALL refuse to send a save whose path, or a directory holding it, has a delete in flight rather than letting the two race. This orders the browser's own requests against each other; a write from any other process is not ordered by it, which is specified under Optimistic concurrent writes.
 
 #### Scenario: Open from the terminal
 
@@ -363,7 +363,7 @@ The browser SHALL NOT let the deletes it sends race the saves it sends. The hub'
 #### Scenario: A save while a delete of the same file is in flight
 
 - **WHEN** the user saves a file whose deletion has been sent and not yet answered
-- **THEN** the browser sends no write and tells the user the file is being deleted
+- **THEN** the browser sends no write and tells the user that a delete of that file, or of a directory above it, is in flight
 
 #### Scenario: Operation fails
 

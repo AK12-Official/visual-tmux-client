@@ -36,11 +36,16 @@ let objectUrl: string | null = null
 // newer one started -- or after the component is gone -- must not adopt its blob,
 // because the handle to the URL it replaced would be lost and never revoked.
 let loadAt = 0
-// shownAt is the load the URL on screen came from, and the decode handler needs
-// it for the same reason the fetch has a ticket: revoking a blob to make room for
-// the next file aborts that file's decode, and the browser then raises `error`
-// for a URL this component has already let go of.
-let shownAt = -1
+// shownAt is the load the URL on screen came from. It is the <img>'s key *and*
+// the ticket the decode handler checks, because those are the same fact: the node
+// showing a load, and the load that node is showing.
+//
+// Keying on the load rather than on the URL is what makes identity mean that.
+// Either would do here -- release() clears the URL before every load, so a node
+// never survives from one load to the next whatever the key says -- but that is a
+// property of another function, and the handler below tests the key's meaning
+// rather than that function's behaviour.
+const shownAt = ref(-1)
 
 function release() {
   if (objectUrl !== null) {
@@ -49,17 +54,16 @@ function release() {
   }
   url.value = ''
   undecodable.value = false
-  shownAt = -1
+  shownAt.value = -1
 }
 
 function onDecodeFailed(event: Event) {
-  // Two guards, because that stale event can arrive at either moment. Before the
-  // next file's bytes land, the ticket is what says so; after, `shownAt` matches
-  // the live load and only the element does. The element is keyed on its URL, so
-  // a superseded one is a different node rather than the same node re-pointed --
-  // which is what makes identity a faithful answer to "is this event about what
-  // is on screen now".
-  if (shownAt !== loadAt) return
+  // Two guards, and each covers a moment the other cannot. Before the next file's
+  // bytes land, the element to hand is still the old node -- Vue has not patched
+  // it away yet -- so identity would accept a stale event and only the ticket
+  // refuses it. After they land, the ticket names the live load and only identity
+  // can tell the superseded node from the live one.
+  if (shownAt.value !== loadAt) return
   if (event.target !== image.value) return
   undecodable.value = true
   emit(
@@ -88,7 +92,7 @@ watch(
       }
       objectUrl = URL.createObjectURL(fetched.blob)
       url.value = objectUrl
-      shownAt = attempt
+      shownAt.value = attempt
     } catch (err) {
       if (attempt !== loadAt) return
       emit('notice', `Could not preview ${path}: ${String(err)}`, 'error')
@@ -124,7 +128,7 @@ onBeforeUnmount(() => {
     </div>
     <img
       v-else-if="url"
-      :key="url"
+      :key="shownAt"
       ref="image"
       class="image-preview__img"
       :src="url"

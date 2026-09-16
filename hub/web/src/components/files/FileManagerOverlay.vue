@@ -630,8 +630,9 @@ async function createHere(isDir: boolean) {
   // A create is deliberately not ordered against an outstanding delete, unlike a
   // save: one that lands before the unlink has its empty file removed, and one
   // that lands after leaves exactly what the user asked for. Nothing of theirs is
-  // lost either way, and the refresh that follows both requests shows which
-  // happened, so there is nothing here for the ordering to protect.
+  // lost either way -- though which of the two the screen is left showing is not
+  // guaranteed, since the two listings race -- so there is nothing here for the
+  // ordering to protect.
   const name = window.prompt(isDir ? 'New directory name' : 'New file name')
   if (!name) return
   const path = joinPath(current.value, name)

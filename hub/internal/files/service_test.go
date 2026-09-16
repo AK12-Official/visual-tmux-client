@@ -149,10 +149,14 @@ func TestClosingAServiceReleasesItsRootHandles(t *testing.T) {
 
 // One cause, one answer. An operation that was handed its handle just before the
 // hub closed the set fails with a closed handle, and that is the same situation
-// the closed-set check reports -- so every route reports it the same way. The
-// write path is the one that classifies its own failures, and without this it
-// answers `write_failed` for what a read beside it answers `path_not_allowed`.
-func TestAClosedHandleIsReportedTheSameWayOnEveryRoute(t *testing.T) {
+// the closed-set check reports -- so the write path reports it the way the read
+// path does, rather than answering `write_failed` for what a read beside it
+// answers `path_not_allowed`.
+//
+// This pins the classification each path uses, not the paths themselves: reaching
+// a route's own call with a closed handle needs the close to land in an
+// adjacent-syscall gap, which no test can drive. See tasks.md 15.9.
+func TestAClosedHandleIsNotReportedAsAWriteFailure(t *testing.T) {
 	root := sandbox(t)
 	mustWrite(t, filepath.Join(root, "a.txt"), testBody)
 
