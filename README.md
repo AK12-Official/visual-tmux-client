@@ -186,7 +186,7 @@ files:
     - "/var/log"
 ```
 
-Each root must be an absolute path to an existing directory. Roots are resolved through symlinks at startup, and authorization is decided against the resolved path, so a symlink cannot be used to step outside a root. A root that does not exist, is not a directory, or cannot be resolved is a startup error. `/proc`, `/sys`, and `/dev` are refused in both modes, whatever the configuration says.
+Each root must be an absolute path to an existing directory. Roots are resolved through symlinks at startup, and authorization is decided against the resolved path, so a symlink cannot be used to step outside a root. A root that does not exist, is not a directory, cannot be resolved, or resolves onto one of the always-refused paths below is a startup error, rather than a hub whose every file operation would be refused. `/proc`, `/sys`, and `/dev` are refused in both modes, whatever the configuration says, and are matched without regard to case so that a differently-spelled path on a case-insensitive filesystem is refused too.
 
 `max_file_size` bounds a single read, write, or download. `max_dir_entries` bounds one directory listing, which is reported as truncated beyond that.
 
