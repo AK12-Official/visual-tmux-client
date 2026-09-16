@@ -5,11 +5,21 @@
 
 const TOKEN_KEY = 'visual-tmux-client-token'
 
+/** PaneSummary describes the most representative pane of a session. */
+export interface PaneSummary {
+  window_name: string
+  title: string
+  current_command: string
+  window_active: boolean
+}
+
 export interface Session {
   name: string
   windows: number
   attached: number
   created: number
+  /** Supplementary; absent when no representative pane could be determined. */
+  pane?: PaneSummary
 }
 
 /** AuthError is thrown when the hub rejects the token with a 401. */

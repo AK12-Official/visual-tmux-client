@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/AK12-Official/visual-tmux-client/hub/internal/testutil"
 )
 
 func runCmd(bin string, env []string, args ...string) (string, string, int, error) {
@@ -95,11 +97,10 @@ func TestE2ERestartPreservesSession(t *testing.T) {
 		t.Fatalf("build hub: %v\n%s", err, out)
 	}
 
-	tmpdir, err := os.MkdirTemp("", "vtc-e2e-")
-	if err != nil {
-		t.Fatalf("mkdtemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(tmpdir) }) //nolint:errcheck // test cleanup
+	// A short socket directory: the socket path must fit the platform's sun_path
+	// limit, which os.MkdirTemp("") does not guarantee (macOS) because it nests
+	// under the long /var/folders OS temp root.
+	tmpdir := testutil.SocketDir(t)
 
 	socket := filepath.Join(tmpdir, fmt.Sprintf("tmux-%d", os.Getuid()), "default")
 	if err := os.MkdirAll(filepath.Dir(socket), 0o700); err != nil {

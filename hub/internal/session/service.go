@@ -12,9 +12,39 @@ func NewService(backend Backend) *Service {
 	return &Service{backend: backend}
 }
 
-// ListSessions delegates to the backend to return all active sessions.
+// paneLister is implemented by backends that can report panes across sessions.
+// It is optional: a backend without it yields sessions with no pane summary.
+type paneLister interface {
+	ListPanes(ctx context.Context) ([]Pane, error)
+}
+
+// ListSessions delegates to the backend to return all active sessions,
+// annotating each with a summary of its most representative pane when the
+// backend can supply one.
+//
+// Pane summaries are supplementary: a backend that cannot list panes, or whose
+// pane query fails, still returns the session list rather than an error, so an
+// optional nicety can never take the whole listing down.
 func (s *Service) ListSessions(ctx context.Context) ([]Session, error) {
-	return s.backend.List(ctx)
+	sessions, err := s.backend.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pl, ok := s.backend.(paneLister)
+	if !ok {
+		return sessions, nil
+	}
+	panes, err := pl.ListPanes(ctx)
+	if err != nil {
+		return sessions, nil
+	}
+	summaries := SelectPaneSummaries(panes)
+	for i := range sessions {
+		if summary, found := summaries[sessions[i].Name]; found {
+			sessions[i].Pane = &summary
+		}
+	}
+	return sessions, nil
 }
 
 // CreateSession validates the requested session name before instructing the backend to create it.

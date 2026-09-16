@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { Session } from '../api'
+import { buildSubtitleMap, rowLabel } from '../sessionSubtitle'
 import { notify } from '../toasts'
 import {
   applyOrder,
@@ -43,6 +44,12 @@ function setMode(mode: OrderMode): void {
 }
 
 const ordered = computed(() => applyOrder(props.sessions, order.value))
+
+// Subtitles are derived once per session list rather than per render, and only
+// for sessions that actually have something to show, so a row without a summary
+// renders no subtitle element at all. buildSubtitleMap keys the result on a
+// null-prototype object, because session names are user-controlled.
+const subtitles = computed(() => buildSubtitleMap(props.sessions))
 
 // Keep stored entries consistent with reality: sessions that disappeared
 // (killed anywhere) are pruned from the saved state.
@@ -315,7 +322,7 @@ const manualMode = computed(() => order.value.mode === 'manual')
         }"
         :draggable="manualMode && renaming !== s.name"
         tabindex="0"
-        :aria-label="`Session ${s.name}; ${s.windows} window${s.windows === 1 ? '' : 's'}; ${s.attached ? 'attached' : 'detached'}`"
+        :aria-label="rowLabel(s.name, subtitles[s.name])"
         :aria-current="s.name === selected && !selecting ? 'true' : undefined"
         @click="selecting ? toggleCheck(s.name) : emit('select', s.name)"
         @keydown.enter.self="selecting ? toggleCheck(s.name) : emit('select', s.name)"
@@ -398,9 +405,8 @@ const manualMode = computed(() => order.value.mode === 'manual')
               ><span aria-hidden="true">✕</span></button>
             </span>
           </div>
-          <div class="session-list__row-meta">
-            {{ s.windows }} window{{ s.windows === 1 ? '' : 's' }} ·
-            {{ s.attached ? 'attached' : 'detached' }}
+          <div v-if="subtitles[s.name]" class="session-list__subtitle">
+            {{ subtitles[s.name] }}
           </div>
         </template>
       </li>
@@ -599,7 +605,9 @@ const manualMode = computed(() => order.value.mode === 'manual')
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.session-list__row-meta {
+/* The row's secondary line. The single-line ellipsis matters: a long pane title
+   must never wrap the row or push the action buttons. */
+.session-list__subtitle {
   color: var(--th-text-lo);
   font-size: 0.72rem;
   padding-left: 0.05rem;

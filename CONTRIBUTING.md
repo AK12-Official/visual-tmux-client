@@ -45,7 +45,7 @@ Rules are defined in root `.golangci.yml`:
 - **`funlen`**: Maximum 80 lines and 50 statements per function (excluding comments).
 - **`gocyclo`**: Cyclomatic complexity threshold is 15.
 - **`mnd`**: Magic numbers in business logic are disallowed. Named semantic constants must be defined. Excluded for test files and `internal/config/defaults.go`.
-- **`goconst`**: Repeated strings of length >= 3 occurring 3 or more times require a shared constant.
+- **`goconst`**: Repeated strings of length >= 3 occurring 3 or more times require a shared constant. Test files are excluded, and their occurrences are not counted towards a product file's total.
 - **`errcheck`**: Unhandled errors and discarding via blank identifier `_` are strictly checked (`check-blank: true`).
 - **`errorlint`**: Strict error wrapping and comparison checks.
 - **`nolintlint`**: Any `//nolint` directive must specify the exact rule and include an explanation comment (`//nolint:rule // reason`). Broad suppressions are rejected.

@@ -148,26 +148,27 @@ onBeforeUnmount(() => {
   padding: 6px;
   box-sizing: border-box;
 }
+/* Status text is anchored top-left, where the session's own output would appear,
+   instead of being centred as a floating card: a session that has ended should
+   read like the last thing it printed, not like a modal. The card chrome is
+   dropped for the same reason. */
 .terminal-view__overlay {
   position: absolute;
   inset: 0;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 0.85rem 1rem;
   background: rgba(10, 10, 10, 0.78);
   z-index: 10;
 }
 .terminal-view__ended {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 0.5rem;
-  max-width: 28rem;
-  padding: 1.25rem 1.5rem;
-  background: var(--th-surface);
-  border: 1px solid var(--th-border);
-  border-radius: 8px;
-  text-align: center;
+  align-items: flex-start;
+  gap: 0.4rem;
+  max-width: 34rem;
+  text-align: left;
 }
 .terminal-view__ended-title {
   margin: 0;
