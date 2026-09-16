@@ -244,3 +244,52 @@ reverting the fix and watching the test fail, once by a differential probe of th
 Go parser. The code stopped moving at round 2; the explanations took three more rounds to stop
 moving, which is the shape to expect from a loop that treats every claim — including its own
 record — as something to be checked.
+
+## The second review of the change
+
+A second review of the branch raised seven findings. Two were the P1s this change had *dispositioned*
+rather than fixed -- the boundary TOCTOU and the write's install window -- and both were fixed this
+time.
+
+| finding | outcome |
+| --- | --- |
+| The boundary can still be redirected by a local process (P1) | **Fixed.** Operations run through an `os.Root` handle; see `design.md` decision 1. Only the rooted case changes, so the default configuration is byte-identical. |
+| A save and a rename can still cross (P1) | **Fixed on the browser side.** The server window between the write's check and its replacement cannot be closed with a POSIX rename, so the browser refuses to record an answer that crossed a rename of the same path; see decisions 1a and 2. |
+| The image preview bound uses a stale listing size (P2) | **Fixed.** The bound is applied to the length the hub reports when the file is read, and a file over it is presented as information with the reason given. |
+| Files named binary are never classified by the hub (P2) | **Fixed.** A bodyless `HEAD` on the read route asks the hub what the file is, and its answer decides. |
+| The classification and the body are not one snapshot (P2) | **Recorded**, with the bounded harm: the client's next save is refused as a conflict. Closing it means buffering the file, which is what streaming exists to avoid. |
+| A cancelled listing is not abandoned during its metadata phase (P3) | **Fixed.** The loop over the entries checks the context. |
+| No automated coverage of the component behaviour (test gap) | **Fixed.** A jsdom document, an SFC loader for `node:test`, and nine mounted tests; see `design.md` decision 5. |
+
+### Rounds over those fixes
+
+Four reviewers over disjoint file sets, then three, then one.
+
+- **Round 1 (15 findings).** Three were defects the round's own work introduced: the probe is an
+  await, so a rename can land inside it, and only the read path corrected for that; `Number(null)`
+  is `0`, so an absent `X-File-Size` read as a size of zero and the image bound stopped applying in
+  the case it exists for; and `os.Root.Rename` wraps its refusal in a `LinkError`, so a refused
+  rename reached the client as a server fault. Two more were the round's own tests: a
+  rename-during-probe test whose probe answered "text" and therefore never ran the code it named,
+  and an assertion subsumed by another in the same test.
+- **Round 2 (5 findings).** Two were again its own tests -- the absent-header check had none, and
+  the editor stand-in modelled a multi-change transaction by applying the changes sequentially to
+  the evolving document, where CodeMirror reads every position against the document as it was before
+  the transaction. The stand-in produced a different document for the same input.
+- One reviewer in round 2 **edited the repository** despite being told to work read-only, leaving
+  `internal/files` failing mid-run. The edit was sound -- it keeps a rename's own error shape rather
+  than collapsing it, because a rename carries two paths and a refusal does not say which end left
+  the tree -- and was verified and kept rather than reverted.
+
+### Residuals, all named rather than implied
+
+- A move between two configured roots acts on path strings, because a handle moves within its own
+  tree only.
+- The write's check and its replacement are two adjacent system calls; no primitive makes them one.
+  The browser's side of that is specified.
+- A root of `/` contains everything, so there is nothing for the handle to refuse, and `os.Root` does
+  not prohibit `/proc` traversal by its own documentation.
+- A file modified between its classification and its body can be served with the earlier
+  classification; the client's next save is refused as a conflict.
+- A response that does not report its length is measured rather than refused, which reads a body this
+  function would otherwise have kept off the wire.

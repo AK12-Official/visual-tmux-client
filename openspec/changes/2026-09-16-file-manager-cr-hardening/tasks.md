@@ -67,3 +67,14 @@
 - [x] 10.5 The listing's metadata phase checks the context. Verify: the loop in `List`; the existing cancellation test covers the read phase.
 - [x] 10.6 The classification-and-body race is recorded rather than fixed, with its bounded harm (`design.md`, risks), and stated in the spec under Bounded file reading.
 - [x] 10.7 The DOM harness: `jsdom` and `@vue/test-utils` as devDependencies, `test/vue-loader.mjs`, `test/dom.mjs`, and the editor stub extended to apply a change and call its listener. Verify: `npm test` runs 138 tests including four mounted ones, and `npm run build` still passes.
+
+## 11. Second review of the change
+
+- [x] 11.1 The boundary is enforced through an `os.Root` handle rather than checked against a string, for the configured case only. Verify: the pre-existing symlink and dangling-link suite passes unchanged, `TestAConfinedPathIsRefusedForLeadingOutOfItsRoot` shows a plain call following the link that the confined call refuses, and the rooted operations each have a test of their own.
+- [x] 11.2 A save answer that crossed a rename of the same path is not recorded. Verify: `tabs.test.ts` for the outcome and its precedence, and `FileManagerOverlay.dom.test.ts` for the ordering driven through the menu — reverting the flag fails exactly that test.
+- [x] 11.3 The image bound is applied to the length the hub reports at read time, and a file over it is presented as information with the reason. Verify: `api.test.ts` for both outcomes and the absent-length case; the component test drives the event and the handler, and reverting the handler fails it.
+- [x] 11.4 A file whose name says binary is put to the hub before the browser decides. Verify: the component test asserts the `HEAD` was issued and the editor rendered; removing the probe block fails it.
+- [x] 11.5 The listing's metadata phase is cancellable. Verify: the loop in `List`.
+- [x] 11.6 The classification is three-valued, so "the hub read this as text" and "nobody read this" are distinguishable. Verify: `preview.test.ts` covers all three states, and collapsing them back fails the component test that pins the probe path.
+- [x] 11.7 A DOM test harness: `jsdom` and `@vue/test-utils`, an SFC loader for `node:test`, and a document. Verify: 145 frontend tests including nine mounted ones, and the build still passes.
+- [x] 11.8 The classification-and-body race, the root-of-`/` case, and the move between roots are recorded as residuals with their harm. Verify: `design.md`, risks.
