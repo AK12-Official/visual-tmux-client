@@ -25,7 +25,7 @@ func TestSessionListSerialisesOptionalPaneSummary(t *testing.T) {
 		},
 		{Name: "without-summary", Windows: 1, Attached: 0, Created: 1700000001},
 	}}
-	router := NewRouter(testRouterConfig("tok", nil), svc, &mockTicketIssuer{}, nil)
+	router := NewRouter(testRouterConfig("tok", nil), svc, nil, &mockTicketIssuer{}, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/hosts/local/sessions", nil)
 	req.Header.Set("Authorization", "Bearer tok")

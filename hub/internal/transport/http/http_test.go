@@ -23,7 +23,9 @@ type mockSessionService struct {
 	createFn func(name string) (*session.Session, error)
 	renameFn func(oldName, newName string) error
 	killFn   func(name string) error
-	calls    int
+	// paneDir is what PaneWorkingDirectory answers with; empty means not-found.
+	paneDir string
+	calls   int
 }
 
 func (m *mockSessionService) ListSessions(ctx context.Context) ([]session.Session, error) {
@@ -86,6 +88,16 @@ func (m *mockSessionService) HasSession(ctx context.Context, name string) bool {
 	return err == nil && s != nil
 }
 
+func (m *mockSessionService) PaneWorkingDirectory(ctx context.Context, name string) (string, error) {
+	if _, err := m.GetSession(ctx, name); err != nil {
+		return "", err
+	}
+	if m.paneDir == "" {
+		return "", session.ErrNotFound
+	}
+	return m.paneDir, nil
+}
+
 type mockTicketIssuer struct {
 	issueFn func(session string) (string, time.Time, error)
 }
@@ -101,6 +113,7 @@ func testRouterConfig(token string, staticFS fstest.MapFS) RouterConfig {
 	return RouterConfig{
 		Token:               token,
 		MaxRequestBodyBytes: 64 * 1024,
+		MaxFileSize:         1 << 20,
 		WebConfig: config.WebConfig{
 			SessionPollInterval: config.Duration(5 * time.Second),
 			ActivityDecay:       config.Duration(2 * time.Second),
@@ -129,7 +142,7 @@ func testRouterConfig(token string, staticFS fstest.MapFS) RouterConfig {
 
 func TestAuthMiddleware(t *testing.T) {
 	svc := &mockSessionService{}
-	router := NewRouter(testRouterConfig("valid-secret", nil), svc, &mockTicketIssuer{}, nil)
+	router := NewRouter(testRouterConfig("valid-secret", nil), svc, nil, &mockTicketIssuer{}, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/hosts/local/sessions", nil)
 	rec := httptest.NewRecorder()
@@ -166,7 +179,7 @@ func TestSessionEndpoints(t *testing.T) {
 	svc := &mockSessionService{
 		sessions: []session.Session{{Name: "alpha", Windows: 1}},
 	}
-	router := NewRouter(testRouterConfig("tok", nil), svc, &mockTicketIssuer{}, nil)
+	router := NewRouter(testRouterConfig("tok", nil), svc, nil, &mockTicketIssuer{}, nil)
 
 	// 1. List
 	req := httptest.NewRequest(http.MethodGet, "/api/hosts/local/sessions", nil)
@@ -257,7 +270,7 @@ func TestWSTicketEndpoint(t *testing.T) {
 	svc := &mockSessionService{
 		sessions: []session.Session{{Name: "active-session", Windows: 1}},
 	}
-	router := NewRouter(testRouterConfig("tok", nil), svc, &mockTicketIssuer{}, nil)
+	router := NewRouter(testRouterConfig("tok", nil), svc, nil, &mockTicketIssuer{}, nil)
 
 	// Valid ticket request
 	reqBody, err := json.Marshal(map[string]string{"hostId": "local", "session": "active-session"})
@@ -288,7 +301,7 @@ func TestWSTicketEndpoint(t *testing.T) {
 
 func TestClientConfigEndpoint(t *testing.T) {
 	svc := &mockSessionService{}
-	router := NewRouter(testRouterConfig("secret-token", nil), svc, &mockTicketIssuer{}, nil)
+	router := NewRouter(testRouterConfig("secret-token", nil), svc, nil, &mockTicketIssuer{}, nil)
 
 	// Unauthenticated request
 	req := httptest.NewRequest(http.MethodGet, "/api/client-config", nil)
@@ -335,7 +348,7 @@ func TestStaticSPAHandler(t *testing.T) {
 		"tmux-guide.md":          &fstest.MapFile{Data: []byte("# Tmux Guide")},
 	}
 
-	router := NewRouter(testRouterConfig("tok", mockFS), &mockSessionService{}, &mockTicketIssuer{}, nil)
+	router := NewRouter(testRouterConfig("tok", mockFS), &mockSessionService{}, nil, &mockTicketIssuer{}, nil)
 
 	// 1. Assets immutable caching
 	req := httptest.NewRequest(http.MethodGet, "/assets/bundle.12345.js", nil)
@@ -415,7 +428,7 @@ func TestPathTraversalProtection(t *testing.T) {
 		"secret.txt":             &fstest.MapFile{Data: []byte("topsecret")},
 	}
 
-	router := NewRouter(testRouterConfig("tok", mockFS), &mockSessionService{}, &mockTicketIssuer{}, nil)
+	router := NewRouter(testRouterConfig("tok", mockFS), &mockSessionService{}, nil, &mockTicketIssuer{}, nil)
 
 	traversalPaths := []string{
 		"/../secret.txt",
@@ -480,7 +493,7 @@ func TestContentTypeFor(t *testing.T) {
 func TestAuthHeaderEdgeCases(t *testing.T) {
 	svc := &mockSessionService{}
 
-	emptyTokenRouter := NewRouter(testRouterConfig("", nil), svc, &mockTicketIssuer{}, nil)
+	emptyTokenRouter := NewRouter(testRouterConfig("", nil), svc, nil, &mockTicketIssuer{}, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/hosts/local/sessions", nil)
 	req.Header.Set("Authorization", "Bearer ")
 	rec := httptest.NewRecorder()
@@ -489,7 +502,7 @@ func TestAuthHeaderEdgeCases(t *testing.T) {
 		t.Fatalf("expected 401 with empty server token, got %d", rec.Code)
 	}
 
-	router := NewRouter(testRouterConfig("supersecret", nil), svc, &mockTicketIssuer{}, nil)
+	router := NewRouter(testRouterConfig("supersecret", nil), svc, nil, &mockTicketIssuer{}, nil)
 
 	badHeaders := []string{
 		"",
@@ -522,7 +535,7 @@ func TestMalformedJSONBodies(t *testing.T) {
 	svc := &mockSessionService{
 		sessions: []session.Session{{Name: "sess1", Windows: 1}},
 	}
-	router := NewRouter(testRouterConfig("tok", nil), svc, &mockTicketIssuer{}, nil)
+	router := NewRouter(testRouterConfig("tok", nil), svc, nil, &mockTicketIssuer{}, nil)
 
 	syntaxErrors := []struct {
 		name string
@@ -590,7 +603,7 @@ func TestPayloadSizeLimits(t *testing.T) {
 	}
 	cfg := testRouterConfig("tok", nil)
 	cfg.MaxRequestBodyBytes = 128
-	router := NewRouter(cfg, svc, &mockTicketIssuer{}, nil)
+	router := NewRouter(cfg, svc, nil, &mockTicketIssuer{}, nil)
 
 	oversizedPayload := fmt.Sprintf(`{"name": %q}`, strings.Repeat("A", 256))
 

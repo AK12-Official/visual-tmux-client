@@ -86,3 +86,33 @@ type wsTicketRequest struct {
 	HostID  string `json:"hostId"`
 	Session string `json:"session"`
 }
+
+// fileKindDirectory is the kind a create request uses for a directory. Anything
+// else, including an absent value, creates a file.
+const fileKindDirectory = "dir"
+
+type createFileRequest struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
+}
+
+type renameFileRequest struct {
+	Path    string `json:"path"`
+	NewPath string `json:"new_path"`
+}
+
+type deleteFileRequest struct {
+	Path      string `json:"path"`
+	Recursive bool   `json:"recursive"`
+}
+
+// writeFileResponse returns the target's resulting modification time, so the
+// browser can keep editing without re-reading the file -- and without guessing
+// a value that would make its next save look like a conflict.
+type writeFileResponse struct {
+	Mtime int64 `json:"mtime"`
+}
+
+type workingDirectoryResponse struct {
+	Path string `json:"path"`
+}

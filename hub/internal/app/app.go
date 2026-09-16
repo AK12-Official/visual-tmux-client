@@ -10,6 +10,7 @@ import (
 
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/auth"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/config"
+	"github.com/AK12-Official/visual-tmux-client/hub/internal/files"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/session"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/terminal"
 	thttp "github.com/AK12-Official/visual-tmux-client/hub/internal/transport/http"
@@ -91,6 +92,11 @@ func New(cfg *config.Config, prov config.Provenance, staticFS fs.FS, opt ...Opti
 
 	sessionService := session.NewService(sessBackend)
 
+	fileService, err := newFileService(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	termOpts := terminal.Options{
 		MaxDimension:             cfg.Terminal.MaxDimension,
 		StagingBufferBytes:       cfg.Terminal.StagingBufferBytes,
@@ -119,14 +125,9 @@ func New(cfg *config.Config, prov config.Provenance, staticFS fs.FS, opt ...Opti
 		nil,
 	)
 
-	routerCfg := thttp.RouterConfig{
-		Token:               cfg.Auth.Token,
-		MaxRequestBodyBytes: cfg.Server.MaxRequestBodyBytes,
-		WebConfig:           cfg.Web,
-		StaticFS:            staticFS,
-	}
+	routerCfg := newRouterConfig(cfg, staticFS)
 
-	router := thttp.NewRouter(routerCfg, sessionService, ticketStore, wsHandler)
+	router := thttp.NewRouter(routerCfg, sessionService, fileService, ticketStore, wsHandler)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Server.Addr,
@@ -144,6 +145,33 @@ func New(cfg *config.Config, prov config.Provenance, staticFS fs.FS, opt ...Opti
 		tmuxClient: procFact,
 		sessions:   sessionService,
 	}, nil
+}
+
+// newFileService builds the file manager's service. The roots are resolved once,
+// here, so a root that cannot enclose anything is a startup error rather than
+// every later operation being refused.
+func newFileService(cfg *config.Config) (*files.Service, error) {
+	roots, err := files.NewRootSet(cfg.Files.Roots)
+	if err != nil {
+		return nil, fmt.Errorf("file roots: %w", err)
+	}
+	return files.NewService(files.Options{
+		Roots:         roots,
+		MaxFileSize:   cfg.Files.MaxFileSize,
+		MaxDirEntries: cfg.Files.MaxDirEntries,
+		Enabled:       cfg.Files.Enabled,
+	}), nil
+}
+
+// newRouterConfig projects the runtime configuration onto the HTTP router.
+func newRouterConfig(cfg *config.Config, staticFS fs.FS) thttp.RouterConfig {
+	return thttp.RouterConfig{
+		Token:               cfg.Auth.Token,
+		MaxRequestBodyBytes: cfg.Server.MaxRequestBodyBytes,
+		MaxFileSize:         cfg.Files.MaxFileSize,
+		WebConfig:           cfg.Web,
+		StaticFS:            staticFS,
+	}
 }
 
 // Start begins background workers and starts listening for HTTP/WS requests.
