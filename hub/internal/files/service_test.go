@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -218,7 +219,8 @@ func TestWriteRefusesAConflictAndLeavesTheFileAlone(t *testing.T) {
 	svc := mustService(t, Options{})
 
 	stale := int64(1) // long before the file was written
-	_, err := svc.Write(context.Background(), file, strings.NewReader("replacement"), 11, &stale)
+	_, err := svc.Write(context.Background(), file, strings.NewReader("replacement"), 11,
+		&ExpectedMtime{Millis: stale})
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected a conflict, got: %v", err)
 	}
@@ -324,10 +326,14 @@ func TestWriteReturnsAnMtimeThatMakesTheNextSaveSucceed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != info.ModTime().UnixMilli() {
-		t.Errorf("write reported mtime %d but the file has %d", first, info.ModTime().UnixMilli())
+	if first.Mtime != info.ModTime().UnixMilli() {
+		t.Errorf("write reported mtime %d but the file has %d", first.Mtime, info.ModTime().UnixMilli())
 	}
-	if _, err := svc.Write(context.Background(), file, strings.NewReader("two"), 3, &first); err != nil {
+	if first.MtimeNanos != info.ModTime().UnixNano() {
+		t.Errorf("write reported %d ns but the file has %d", first.MtimeNanos, info.ModTime().UnixNano())
+	}
+	if _, err := svc.Write(context.Background(), file, strings.NewReader("two"), 3,
+		&ExpectedMtime{Millis: first.Mtime, Nanos: &first.MtimeNanos}); err != nil {
 		t.Fatalf("the second save was refused as a conflict: %v", err)
 	}
 	if got := readFile(t, file); got != "two" {
@@ -341,7 +347,7 @@ func TestWriteRefusesAMissingFileWhenAnMtimeWasExpected(t *testing.T) {
 	svc := mustService(t, Options{})
 
 	observed := int64(1)
-	_, err := svc.Write(context.Background(), file, strings.NewReader("x"), 1, &observed)
+	_, err := svc.Write(context.Background(), file, strings.NewReader("x"), 1, &ExpectedMtime{Millis: observed})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected not-found, got: %v", err)
 	}
@@ -639,7 +645,7 @@ func TestWriteRefusesWhenTheTargetChangesDuringTheTransfer(t *testing.T) {
 		},
 	}
 
-	_, err := svc.Write(ctx, file, body, int64(len(stale)), &observed)
+	_, err := svc.Write(ctx, file, body, int64(len(stale)), &ExpectedMtime{Millis: observed})
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected the write to lose the race, got: %v", err)
 	}
@@ -779,31 +785,100 @@ func TestReadClassifiesBinaryFromTheContentsNotTheName(t *testing.T) {
 	}
 }
 
-// A sample is a prefix of the file, so it can end inside a rune. Telling that
-// apart from bytes that are not UTF-8 at all is the whole difficulty: the naive
-// "any valid prefix means text" rule calls {0x68, 0xff, 0xfe} text.
-func TestBinarySampleToleratesOnlyATruncatedRune(t *testing.T) {
-	// A sample that stopped at the sniff bound can end inside a rune.
-	if binarySample([]byte("h\xc3"), false) {
-		t.Error("a prefix ending inside a two-byte rune was called binary")
+// Classification has to survive being reached one chunk at a time, so a chunk
+// that ends inside a rune is not the same thing as bytes that are not UTF-8 at
+// all. The naive "any valid prefix means text" rule calls {0x68, 0xff, 0xfe}
+// text, and the naive per-chunk rule calls ordinary text binary at whichever
+// boundary it happens to land on.
+func TestTextScanToleratesOnlyATruncatedRune(t *testing.T) {
+	decide := func(chunks ...string) bool {
+		var scan textScan
+		for _, chunk := range chunks {
+			if scan.decidedBy([]byte(chunk)) {
+				return true
+			}
+		}
+		// Whatever is still held back was a rune the end of the file cut in half.
+		return len(scan.carry) > 0
 	}
-	if binarySample([]byte("\xe4\xb8"), false) {
-		t.Error("a prefix ending inside a three-byte rune was called binary")
+
+	// A chunk that ended inside a rune is decided by what follows it.
+	if decide("h\xc3", "\xa9llo") {
+		t.Error("text whose two-byte rune straddled a chunk boundary was called binary")
 	}
-	// Bytes that are not UTF-8 anywhere are binary, however the sample ends.
-	if !binarySample([]byte{0x68, 0xff, 0xfe}, false) {
+	if decide("\xe4\xb8", "\xad\xe6\x96\x87") {
+		t.Error("text whose three-byte rune straddled a chunk boundary was called binary")
+	}
+	// Bytes that are not UTF-8 anywhere are binary, however the chunk ends.
+	if !decide("h\xff\xfe") {
 		t.Error("bytes that are not UTF-8 at all were called text")
 	}
-	if !binarySample([]byte("\xe4\xb8\x41"), false) {
+	if !decide("\xe4\xb8\x41") {
 		t.Error("a rune with a bad continuation byte was called text")
 	}
-	// A sample that is the whole file was not cut off by anything, so there is no
-	// truncation for the invalid bytes to be excused by.
-	if !binarySample([]byte("\xe4\xb8"), true) {
-		t.Error("a complete file of invalid UTF-8 was called text")
+	// A rune held back at the end of the file was cut in half by the end of the
+	// file, and nothing completes it.
+	if !decide("\xe4\xb8") {
+		t.Error("a file ending inside a rune was called text")
 	}
-	if binarySample([]byte("plain ascii"), true) {
+	if decide("plain ascii") {
 		t.Error("plain ASCII was called binary")
+	}
+	// A NUL anywhere decides, including one only a chunk boundary away.
+	if !decide("text", "\x00more") {
+		t.Error("a NUL after the first chunk was called text")
+	}
+}
+
+// The whole file decides. A file that opens as text and turns binary further in
+// is the case a bounded sample got wrong, and getting it wrong is not a display
+// problem: the browser decodes the rest into replacement characters and the next
+// save writes those over the bytes the file had.
+func TestBinaryIsDecidedByTheWholeFileNotItsPrefix(t *testing.T) {
+	dir := sandbox(t)
+	svc := mustService(t, Options{})
+	file := filepath.Join(dir, "log.txt")
+
+	// Comfortably longer than any sample, with the binary part past the point a
+	// prefix would have stopped.
+	body := strings.Repeat("a", scanChunk*2) + "\x00binary tail"
+	mustWrite(t, file, body)
+
+	result, err := svc.Read(context.Background(), file)
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	defer func() {
+		_ = result.File.Close() //nolint:errcheck // the test is done with it
+	}()
+	if !result.Binary {
+		t.Error("a file whose binary part came after the first chunk was offered as text")
+	}
+}
+
+// A multi-byte character sitting exactly on a chunk boundary is the case a
+// scanner that judged chunks independently would fail on, and its position is a
+// buffer size rather than anything about the file.
+func TestATextFileIsNotClassifiedByWhereItsChunkBoundariesFall(t *testing.T) {
+	dir := sandbox(t)
+	svc := mustService(t, Options{})
+	file := filepath.Join(dir, "notes.md")
+
+	// Every character is three bytes, so the boundary lands mid-character
+	// whenever scanChunk is not a multiple of three.
+	mustWrite(t, file, strings.Repeat("文", scanChunk))
+	for _, offset := range []int{1, 2} {
+		target := filepath.Join(dir, fmt.Sprintf("shifted-%d.md", offset))
+		mustWrite(t, target, strings.Repeat("x", offset)+strings.Repeat("文", scanChunk))
+
+		result, err := svc.Read(context.Background(), target)
+		if err != nil {
+			t.Fatalf("read failed: %v", err)
+		}
+		if result.Binary {
+			t.Errorf("valid text was called binary when its runes straddled a chunk boundary")
+		}
+		_ = result.File.Close() //nolint:errcheck // the test is done with it
 	}
 }
 
@@ -1242,7 +1317,7 @@ func TestTheStagingRecordIsEmptiedOnEveryPath(t *testing.T) {
 			}
 		},
 	}
-	if _, err := svc.Write(ctx, file, body, 5, &observed); !errors.Is(err, ErrConflict) {
+	if _, err := svc.Write(ctx, file, body, 5, &ExpectedMtime{Millis: observed}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected a conflict, got: %v", err)
 	}
 	if got := recorded(); got != 0 {

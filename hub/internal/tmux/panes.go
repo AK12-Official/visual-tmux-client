@@ -118,9 +118,24 @@ func (c *Client) PaneWorkingDirectory(ctx context.Context, name string) (string,
 		return "", fmt.Errorf("tmux display-message: %s", strings.TrimSpace(stderr))
 	}
 
+	// Only the terminator tmux appends is removed, and exactly one of it.
+	//
+	// TrimSpace would take real characters with it. A directory name may legally
+	// begin or end with a space or a tab, and one that does would be opened at a
+	// different path than the session is actually in -- or, where the trimmed
+	// remainder is empty, reported as a session with no directory at all.
+	//
+	// Exactly one, rather than every trailing newline, because a path may itself
+	// contain one: the file is written as the path followed by a single newline,
+	// so removing a single newline leaves a path that ends in one intact. For the
+	// same reason a carriage return is not stripped here as it is from a listing
+	// line: tmux writes the format's own bytes, so a trailing carriage return is
+	// far more likely to be the last character of the directory's name than half
+	// of a line ending that was never written.
+	//
 	// An unknown format expands to nothing, which is not a directory the file
 	// manager could open at.
-	path := strings.TrimSpace(stdout)
+	path := strings.TrimSuffix(stdout, "\n")
 	if path == "" {
 		return "", session.ErrNotFound
 	}

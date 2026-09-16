@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -20,8 +21,8 @@ type FileService interface {
 	List(ctx context.Context, path string) (files.ListResult, error)
 	Read(ctx context.Context, path string) (files.ReadResult, error)
 	Write(
-		ctx context.Context, path string, body io.Reader, declaredSize int64, expectedMtime *int64,
-	) (int64, error)
+		ctx context.Context, path string, body io.Reader, declaredSize int64, expected *files.ExpectedMtime,
+	) (files.WriteResult, error)
 	Create(ctx context.Context, path string, isDir bool) error
 	Rename(ctx context.Context, path, newPath string) error
 	Delete(ctx context.Context, path string, recursive bool) error
@@ -122,6 +123,11 @@ func (s *handlerState) serveFile(w http.ResponseWriter, r *http.Request, attachm
 	w.Header().Set("Content-Type", fileContentType)
 	w.Header().Set("X-File-Size", strconv.FormatInt(result.Size, 10))
 	w.Header().Set("X-File-Mtime", strconv.FormatInt(result.Mtime, 10))
+	// The exact modification time, as a decimal string rather than a number.
+	// Nanoseconds since the epoch exceed what a JavaScript number holds exactly,
+	// so a client that parsed it would round it to a time that matches nothing;
+	// the browser carries this one back unchanged.
+	w.Header().Set("X-File-Mtime-Nanos", strconv.FormatInt(result.MtimeNanos, 10))
 	// Whether the contents are text is the hub's answer to give: the browser
 	// would otherwise have to guess from the name, and a wrong guess either
 	// renders binary bytes as text or refuses to open a file that is text.
@@ -134,9 +140,14 @@ func (s *handlerState) serveFile(w http.ResponseWriter, r *http.Request, attachm
 			"attachment; filename="+strconv.Quote(filepath.Base(path)))
 	}
 
-	// ServeContent fills in Content-Length and handles range requests, and the
-	// size was already checked against the limit, so nothing oversized is sent.
-	http.ServeContent(w, r, filepath.Base(path), time.UnixMilli(result.Mtime), result.File)
+	// ServeContent handles range requests and fills in Content-Length, and it
+	// takes the length from the reader it is handed -- so it is handed exactly
+	// the bytes that were checked against the limit. Given the descriptor alone
+	// it would measure the file again, and a file that grew after the check would
+	// be served at its new size: past a limit it had already passed, with
+	// X-File-Size describing a length the body does not have.
+	http.ServeContent(w, r, filepath.Base(path), time.Unix(0, result.MtimeNanos),
+		io.NewSectionReader(result.File, 0, result.Size))
 }
 
 func (s *handlerState) writeFile(w http.ResponseWriter, r *http.Request) {
@@ -150,7 +161,7 @@ func (s *handlerState) writeFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
-	expected, ok := parseOptionalInt64(query.Get("expected_mtime"))
+	expected, ok := parseExpectedMtime(r.URL.Query())
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid_body")
 		return
@@ -164,7 +175,7 @@ func (s *handlerState) writeFile(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.MaxFileSize > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxFileSize)
 	}
-	mtime, err := s.files.Write(r.Context(), query.Get("path"), r.Body, declared, expected)
+	result, err := s.files.Write(r.Context(), query.Get("path"), r.Body, declared, expected)
 	if err != nil {
 		var oversized *http.MaxBytesError
 		if errors.As(err, &oversized) {
@@ -174,7 +185,10 @@ func (s *handlerState) writeFile(w http.ResponseWriter, r *http.Request) {
 		mapFileError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, writeFileResponse{Mtime: mtime})
+	writeJSON(w, http.StatusOK, writeFileResponse{
+		Mtime:      result.Mtime,
+		MtimeNanos: strconv.FormatInt(result.MtimeNanos, 10),
+	})
 }
 
 func (s *handlerState) createEntry(w http.ResponseWriter, r *http.Request) {
@@ -244,6 +258,34 @@ func (s *handlerState) sessionWorkingDirectory(w http.ResponseWriter, r *http.Re
 		response.Path, response.Substituted = s.files.StartDirectory(dir)
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+// parseExpectedMtime reads the modification time the caller last observed,
+// returning nil for a forced overwrite.
+//
+// Both precisions are read because a caller is free to report either. The
+// millisecond value is what the JSON contract carries; the nanosecond value is
+// what actually decides whether the file changed, and it travels as a decimal
+// string because it exceeds what a JavaScript number holds exactly. A request
+// that names neither forces the overwrite -- that is how the browser asks for
+// one -- so an absent pair is not an error, where a malformed one is.
+func parseExpectedMtime(query url.Values) (*files.ExpectedMtime, bool) {
+	millis, ok := parseOptionalInt64(query.Get("expected_mtime"))
+	if !ok {
+		return nil, false
+	}
+	nanos, ok := parseOptionalInt64(query.Get("expected_mtime_nanos"))
+	if !ok {
+		return nil, false
+	}
+	if millis == nil && nanos == nil {
+		return nil, true
+	}
+	expected := files.ExpectedMtime{Nanos: nanos}
+	if millis != nil {
+		expected.Millis = *millis
+	}
+	return &expected, true
 }
 
 // parseRequiredInt64 parses a query parameter the request cannot do without.

@@ -13,7 +13,14 @@ import {
   readFile,
   renameEntry,
   writeFile,
+  type Stamp,
 } from './api'
+
+/** stamp is an observed modification time with milliseconds only, which is what
+ * a caller that has nothing more precise can report. */
+function stamp(millis: number): Stamp {
+  return { millis, nanos: null }
+}
 
 interface Call {
   url: string
@@ -86,7 +93,7 @@ test('a refused call carries the hub error code', async () => {
     mockFetch(jsonResponse({ error: 'conflict' }, 409))
 
     await assert.rejects(
-      () => writeFile('/home/user/a.txt', 'body', 1),
+      () => writeFile('/home/user/a.txt', 'body', stamp(1)),
       (err: unknown) => {
         assert.ok(err instanceof FileApiError)
         assert.equal((err as FileApiError).code, 'conflict')
@@ -112,7 +119,7 @@ test('the write path refuses a coerced modification time but tolerates a missing
     for (const body of [{ mtime: false }, { mtime: true }, { mtime: [] }, { mtime: null }, {}]) {
       mockFetch(jsonResponse(body))
       assert.equal(
-        await writeFile('/home/user/a.txt', 'hello', 100),
+        await writeFile('/home/user/a.txt', 'hello', stamp(100)),
         null,
         `an mtime of ${JSON.stringify(body)} must not be adopted`,
       )
@@ -120,12 +127,12 @@ test('the write path refuses a coerced modification time but tolerates a missing
 
     // A reported zero is a number the hub chose, and is adopted.
     mockFetch(jsonResponse({ mtime: 0 }))
-    assert.equal(await writeFile('/home/user/a.txt', 'hello', 100), 0)
+    assert.equal((await writeFile('/home/user/a.txt', 'hello', stamp(100)))?.millis, 0)
 
     // A numeric string is what the read path already accepts, and is read the
     // same way here so the two cannot disagree about a hub's answer.
     mockFetch(jsonResponse({ mtime: '250' }))
-    assert.equal(await writeFile('/home/user/a.txt', 'hello', 100), 250)
+    assert.equal((await writeFile('/home/user/a.txt', 'hello', stamp(100)))?.millis, 250)
   })
 })
 
@@ -134,8 +141,8 @@ test('writeFile declares a byte length rather than a character count', async () 
     const calls = mockFetch(jsonResponse({ mtime: 99 }))
 
     // "é" is two bytes in UTF-8, so a character count would be wrong here.
-    const mtime = await writeFile('/home/user/a.txt', 'é', 7)
-    assert.equal(mtime, 99)
+    const written = await writeFile('/home/user/a.txt', 'é', stamp(7))
+    assert.equal(written?.millis, 99)
 
     const url = new URL(calls[0].url, 'http://localhost')
     assert.equal(url.searchParams.get('size'), '2')
@@ -169,7 +176,8 @@ test('readFile reports the modification time the hub sent', async () => {
 
     const contents = await readFile('/home/user/a.txt')
     assert.equal(contents.text, 'hello')
-    assert.equal(contents.mtime, 1737000000000)
+    assert.equal(contents.stamp.millis, 1737000000000)
+    assert.equal(contents.stamp.nanos, null)
     assert.equal(contents.binary, false)
   })
 })
@@ -193,7 +201,62 @@ test('readFile does not decode contents the hub reported as binary', async () =>
     const contents = await readFile('/home/user/blob.bin')
     assert.equal(contents.binary, true)
     assert.equal(contents.text, '')
-    assert.equal(contents.mtime, 1737000000000)
+    assert.equal(contents.stamp.millis, 1737000000000)
+  })
+})
+
+// The exact modification time is what the next save is checked against, and it
+// travels as the string it arrived as. It does not fit in a JavaScript number --
+// Number('1760000000123456789') is 1760000000123456800 -- and a rounded value
+// matches no file, so adopting one would turn every save into a conflict with
+// nothing on screen explaining why.
+test('readFile carries the exact modification time as an opaque string', async () => {
+  await withoutStorage(async () => {
+    mockFetch(
+      new Response('hello', {
+        status: 200,
+        headers: {
+          'X-File-Size': '5',
+          'X-File-Mtime': '1760000000123',
+          'X-File-Mtime-Nanos': '1760000000123456789',
+        },
+      }),
+    )
+
+    const contents = await readFile('/home/user/a.txt')
+    assert.equal(contents.stamp.millis, 1760000000123)
+    assert.equal(contents.stamp.nanos, '1760000000123456789')
+    assert.equal(typeof contents.stamp.nanos, 'string')
+  })
+})
+
+// A hub that reports only milliseconds is still one this client can edit
+// against: the weaker comparison is what it gave us to compare.
+test('readFile tolerates a hub that reports only milliseconds', async () => {
+  await withoutStorage(async () => {
+    mockFetch(
+      new Response('hello', {
+        status: 200,
+        headers: { 'X-File-Size': '5', 'X-File-Mtime': '1737000000000' },
+      }),
+    )
+
+    const contents = await readFile('/home/user/a.txt')
+    assert.equal(contents.stamp.millis, 1737000000000)
+    assert.equal(contents.stamp.nanos, null)
+  })
+})
+
+// The write path reports it the same way, so the value a save adopts is the one
+// the next save will be compared against.
+test('writeFile adopts the exact modification time it is given back', async () => {
+  await withoutStorage(async () => {
+    mockFetch(jsonResponse({ mtime: 1760000000123, mtime_nanos: '1760000000123456789' }))
+
+    const written = await writeFile('/home/user/a.txt', 'hello', stamp(1))
+
+    assert.equal(written?.millis, 1760000000123)
+    assert.equal(written?.nanos, '1760000000123456789')
   })
 })
 

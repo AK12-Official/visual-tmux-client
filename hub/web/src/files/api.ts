@@ -19,6 +19,34 @@ export interface ListResult {
   truncated: boolean
 }
 
+/**
+ * Stamp is a modification time the hub reported, at whichever precisions it
+ * reported it.
+ *
+ * Two fields rather than one because they answer different questions. `millis`
+ * is a number the client can hold and compare exactly, which is why it is what
+ * travels in the JSON contract. `nanos` is the time the filesystem actually
+ * recorded, kept as the opaque decimal string the hub sent: it exceeds
+ * JavaScript's safe integer range, so parsing it into a number would round it,
+ * and a rounded value matches no file -- turning every save into a conflict the
+ * user has to confirm with nothing on screen explaining why.
+ *
+ * It is `nanos` that a save is checked against when the hub sent one, so two
+ * edits inside the same millisecond are two edits. `millis` is the fallback for
+ * a hub that reported only milliseconds.
+ */
+export interface Stamp {
+  millis: number
+  /** nanos is the exact time, or null when the hub reported only milliseconds. */
+  nanos: string | null
+}
+
+/** stampFromList is the modification time a directory listing reported, which
+ * carries milliseconds only. */
+export function stampFromList(mtime: number): Stamp {
+  return { millis: mtime, nanos: null }
+}
+
 /** FileApiError carries the hub's error code (for example `conflict`). */
 export class FileApiError extends Error {
   readonly code: string
@@ -101,15 +129,37 @@ function optionalMtime(raw: unknown): number | null {
   }
 }
 
+/**
+ * optionalStamp reads the modification time a write reported.
+ *
+ * The millisecond value is required, because a hub that did not report one is a
+ * hub this client cannot edit against safely; a missing or unparsable value
+ * leaves the caller to record the save without a time to compare against.
+ *
+ * The nanosecond value is optional and is never parsed: it is carried back to
+ * the hub exactly as it arrived.
+ */
+function optionalStamp(rawMtime: unknown, rawNanos: unknown): Stamp | null {
+  const millis = optionalMtime(rawMtime)
+  if (millis === null) return null
+  const nanos = typeof rawNanos === 'string' && rawNanos.trim() !== '' ? rawNanos : null
+  return { millis, nanos }
+}
+
 /** mtimeOf reads the modification time the hub reports alongside the bytes. */
-function mtimeOf(res: Response): number {
-  return requireMtime(res.headers.get('X-File-Mtime'))
+function stampOf(res: Response): Stamp {
+  return {
+    millis: requireMtime(res.headers.get('X-File-Mtime')),
+    // Absent from a hub that predates it, in which case the millisecond value is
+    // what the next save is compared against -- weaker, but still a comparison.
+    nanos: res.headers.get('X-File-Mtime-Nanos'),
+  }
 }
 
 export interface FileContents {
   /** text is the decoded contents, empty when the hub reported the file binary. */
   text: string
-  mtime: number
+  stamp: Stamp
   /** binary is the hub's classification, not a guess from the file's name. */
   binary: boolean
 }
@@ -130,9 +180,9 @@ async function releaseBody(res: Response): Promise<void> {
 
 export async function readFile(path: string): Promise<FileContents> {
   const res = await request(withPath('read', path))
-  let mtime: number
+  let stamp: Stamp
   try {
-    mtime = mtimeOf(res)
+    stamp = stampOf(res)
   } catch (err) {
     await releaseBody(res)
     throw err
@@ -142,10 +192,10 @@ export async function readFile(path: string): Promise<FileContents> {
   // original bytes with them.
   if (res.headers.get('X-File-Binary') === '1') {
     await releaseBody(res)
-    return { text: '', mtime, binary: true }
+    return { text: '', stamp, binary: true }
   }
   try {
-    return { text: await res.text(), mtime, binary: false }
+    return { text: await res.text(), stamp, binary: false }
   } catch (err) {
     await releaseBody(res)
     throw err
@@ -172,20 +222,26 @@ export async function downloadFile(path: string): Promise<Blob> {
  * writeFile replaces a file's contents and returns the modification time the hub
  * reports afterwards, or null when it reported none.
  *
- * Pass the mtime last observed to have the hub refuse a write that lost a race,
- * or null to force the overwrite. The declared size is a byte count, because
- * that is what the hub compares it against.
+ * Pass the stamp last observed to have the hub refuse a write that lost a race,
+ * or null to force the overwrite. Both precisions of the stamp are sent: the hub
+ * compares against the exact one when it has it, which is what keeps two edits
+ * inside a single millisecond from looking like no change at all. The declared
+ * size is a byte count, because that is what the hub compares it against.
  */
 export async function writeFile(
   path: string,
   body: string,
-  expectedMtime: number | null,
-): Promise<number | null> {
+  expected: Stamp | null,
+): Promise<Stamp | null> {
   const query = new URLSearchParams({
     path,
     size: String(new TextEncoder().encode(body).length),
   })
-  if (expectedMtime !== null) query.set('expected_mtime', String(expectedMtime))
+  if (expected !== null) {
+    query.set('expected_mtime', String(expected.millis))
+    // Sent as the string it arrived as, never re-encoded through a number.
+    if (expected.nanos !== null) query.set('expected_mtime_nanos', expected.nanos)
+  }
 
   const res = await request(`${BASE}/write?${query.toString()}`, {
     method: 'PUT',
@@ -199,8 +255,11 @@ export async function writeFile(
   // A body that is not JSON is treated the same way as one without the field: a
   // 2xx means the bytes are on disk, and reporting a parse failure would say the
   // save failed while every retry succeeded on disk and failed the same way.
-  const data = (await res.json().catch(() => null)) as { mtime?: number | string | null } | null
-  return optionalMtime(data?.mtime)
+  const data = (await res.json().catch(() => null)) as
+    | { mtime?: unknown; mtime_nanos?: unknown }
+    | null
+    | undefined
+  return optionalStamp(data?.mtime, data?.mtime_nanos)
 }
 
 async function post(route: string, payload: unknown): Promise<void> {

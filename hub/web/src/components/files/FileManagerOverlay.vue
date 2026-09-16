@@ -12,6 +12,7 @@ import {
   fetchWorkingDirectory,
   readFile,
   renameEntry,
+  stampFromList,
   type Entry,
   type StartDirectory,
 } from '../../files/api'
@@ -19,7 +20,15 @@ import { basename, dirname, joinPath, quoteForShell } from '../../files/pathUtil
 import { createRenames } from '../../files/renames'
 import { getConfig } from '../../config'
 import { choosePreview } from '../../files/preview'
-import { applySaved, anyDirty, isDirty, saveOpenFile, type OpenFile } from '../../files/tabs'
+import {
+  anyDirty,
+  editable,
+  isDirty,
+  presentation,
+  saveOpenFile,
+  settleSave,
+  type OpenFile,
+} from '../../files/tabs'
 import {
   createTreeState,
   forgetDirectory,
@@ -72,17 +81,21 @@ let nextTabId = 1
 
 const active = computed(() => tabs.value.find((tab) => tab.path === activePath.value) ?? null)
 const dirty = computed(() => anyDirty(tabs.value))
-const preview = computed(() => {
-  const tab = active.value
-  if (!tab) return null
-  // The hub's classification outranks the file's name: something it reports as
-  // binary is presented as information whatever the name suggests, and decoding
-  // its bytes as text is what would corrupt them on the next save.
-  if (tab.binary) return 'info'
-  return choosePreview(tab.name, tab.size)
-})
+const preview = computed(() => (active.value === null ? null : presentation(active.value)))
 const activeIsMarkdownSource = computed(
   () => active.value !== null && (markdownView.get(active.value.path) ?? 'source') === 'source',
+)
+// editorTabs is every open file whose contents the editor is holding -- which is
+// every open file that is editable at all, not only the one on screen. All of
+// them stay mounted: unmounting the editor for a file the user switched away
+// from would take that file's undo history with it, and history is the thing a
+// user reaches for precisely after switching away and back.
+const editorTabs = computed(() => tabs.value.filter(editable))
+// editorVisible says whether the active file is shown in the editor right now,
+// as opposed to rendered Markdown or a preview of some other kind.
+const editorVisible = computed(
+  () =>
+    preview.value === 'editor' || (preview.value === 'markdown' && activeIsMarkdownSource.value),
 )
 
 watch(dirty, (value) => emit('dirty-change', value), { immediate: true })
@@ -266,7 +279,9 @@ async function openFile(entry: Entry, path: string) {
           name: entry.name,
           text: '',
           saved: '',
-          mtime: entry.mtime,
+          // From the listing, which reports milliseconds only. These files are
+          // never saved, so the weaker precision costs nothing.
+          stamp: stampFromList(entry.mtime),
           size: entry.size,
           binary: false,
         },
@@ -302,7 +317,7 @@ async function openFile(entry: Entry, path: string) {
         name: basename(at),
         text: contents.text,
         saved: contents.text,
-        mtime: contents.mtime,
+        stamp: contents.stamp,
         size: entry.size,
         binary: contents.binary,
       },
@@ -355,16 +370,38 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
   saveTickets.set(tab.id, ticket)
 
   const sent = tab.text
+  // The path this write names, captured because a rename can complete while it
+  // travels and move the tab somewhere else. The answer that comes back
+  // describes the file the write named, and settleSave is what refuses to record
+  // it against a tab that no longer holds that file.
+  const sentPath = tab.path
   try {
-    const mtime = await saveOpenFile(tab, force)
+    const stamp = await saveOpenFile(tab, force)
     if (!isSameTab(tab.id)) return
     if (saveTickets.get(tab.id) !== ticket) return
-    tabs.value = tabs.value.map((candidate) =>
-      candidate.id === tab.id ? applySaved(candidate, mtime, sent) : candidate,
-    )
+    const settled = settleSave(tabs.value, tab.id, sent, sentPath, stamp)
+    tabs.value = settled.files
+    if (settled.outcome === 'moved') {
+      const moved = liveTab(tab.id)
+      emit(
+        'notice',
+        `${tab.name} moved to ${moved?.path ?? 'another path'} while it was being saved; the edit ` +
+          `is still unsaved here. Save again to write it to the new name.`,
+        'warning',
+      )
+    }
   } catch (err) {
     if (!isSameTab(tab.id)) return
     if (saveTickets.get(tab.id) !== ticket) return
+    const moved = liveTab(tab.id)
+    if (moved && moved.path !== sentPath) {
+      // The path moved, so the question a conflict prompt would ask -- overwrite
+      // the file that changed? -- would be about a file this tab no longer
+      // holds. Answering it would write to whatever is at the new name instead,
+      // which the user was never asked about.
+      report(err, `Could not save ${tab.name}, which moved to ${moved.path} while the save travelled`)
+      return
+    }
     if (err instanceof FileApiError && err.code === 'conflict') {
       const overwrite = window.confirm(
         `${tab.name} changed on disk since it was opened. Overwrite it with your version?`,
@@ -381,6 +418,16 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
 // rather than consulted wholesale.
 const renames = createRenames()
 
+/** liveTab is the tab as it is now, by session.
+ *
+ * Everything that happens during a round trip replaces the tab object -- a
+ * rename retargets it, a save rewrites it -- so a reference captured before an
+ * await is a snapshot, and anything that has to be current must be looked up
+ * again rather than held. */
+function liveTab(id: number): OpenFile | undefined {
+  return tabs.value.find((candidate) => candidate.id === id)
+}
+
 /** isSameTab reports whether the editing session a save started from is still
  * open.
  *
@@ -388,9 +435,9 @@ const renames = createRenames()
  * the second time; an answer meant for the first would be folded into the second,
  * marking it saved at a text and a time that describe a write it never made. A
  * rename keeps the session, because the tab that is now at the new path is the
- * one that asked. */
+ * one that asked -- which is why the path is checked separately, in settleSave. */
 function isSameTab(id: number): boolean {
-  return tabs.value.some((candidate) => candidate.id === id)
+  return liveTab(id) !== undefined
 }
 
 function closeTab(path: string) {
@@ -773,26 +820,47 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
           </div>
 
           <div class="fm__content">
-            <ImagePreview
-              v-if="preview === 'image'"
-              :path="active.path"
-              @notice="(text, level) => emit('notice', text, level)"
-            />
-            <MarkdownPreview v-else-if="preview === 'markdown' && !activeIsMarkdownSource" :source="active.text" />
-            <CodeEditor
-              v-else-if="preview === 'editor' || preview === 'markdown'"
-              :key="active.path"
-              v-model="active.text"
-            />
-            <div v-else class="fm__info">
-              <p class="fm__state">
-                {{ active.name }} is not shown here: it is
-                {{ preview === 'info' ? 'binary or too large to preview' : 'not previewable' }}.
-              </p>
-              <p class="fm__meta">{{ formatSize(active.size) }} · {{ active.path }}</p>
-              <button class="fm__btn" type="button" @click="download(active.path, active.name)">
-                Download
-              </button>
+            <template v-if="active">
+              <ImagePreview
+                v-if="preview === 'image'"
+                :path="active.path"
+                @notice="(text, level) => emit('notice', text, level)"
+              />
+              <MarkdownPreview
+                v-else-if="preview === 'markdown' && !activeIsMarkdownSource"
+                :source="active.text"
+              />
+              <div v-else-if="!editorVisible" class="fm__info">
+                <p class="fm__state">
+                  {{ active.name }} is not shown here: it is
+                  {{ preview === 'info' ? 'binary or too large to preview' : 'not previewable' }}.
+                </p>
+                <p class="fm__meta">{{ formatSize(active.size) }} · {{ active.path }}</p>
+                <button class="fm__btn" type="button" @click="download(active.path, active.name)">
+                  Download
+                </button>
+              </div>
+            </template>
+
+            <!--
+              One editor per open file, all of them mounted, only the active one
+              shown. Keyed by the editing session rather than by the path, so a
+              rename keeps the instance (and its undo history) instead of
+              rebuilding it under the new name.
+
+              Keeping the others mounted is the point. The editor owns its own
+              history, and history does not survive being destroyed and
+              rebuilt -- so an editor that were unmounted whenever the user
+              looked at another tab would lose the undo stack of every file they
+              switched away from, which is exactly when they reach for it.
+            -->
+            <div
+              v-for="tab in editorTabs"
+              v-show="tab.id === active?.id && editorVisible"
+              :key="tab.id"
+              class="fm__editor"
+            >
+              <CodeEditor v-model="tab.text" :active="tab.id === active?.id && editorVisible" />
             </div>
           </div>
         </template>
@@ -905,6 +973,11 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
   flex: 1;
   min-height: 0;
   overflow: auto;
+}
+
+/* A hidden editor is out of the flow, so the visible one fills the viewer. */
+.fm__editor {
+  height: 100%;
 }
 
 .fm__state {

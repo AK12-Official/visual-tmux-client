@@ -23,7 +23,7 @@ type mockFileService struct {
 	startFn  func(candidate string) (string, bool)
 	listFn   func(path string) (files.ListResult, error)
 	readFn   func(path string) (files.ReadResult, error)
-	writeFn  func(path string, body io.Reader, size int64, mtime *int64) (int64, error)
+	writeFn  func(path string, body io.Reader, size int64, mtime *files.ExpectedMtime) (files.WriteResult, error)
 	createFn func(path string, isDir bool) error
 	renameFn func(path, newPath string) error
 	deleteFn func(path string, recursive bool) error
@@ -55,12 +55,12 @@ func (m *mockFileService) Read(ctx context.Context, path string) (files.ReadResu
 }
 
 func (m *mockFileService) Write(
-	ctx context.Context, path string, body io.Reader, size int64, mtime *int64,
-) (int64, error) {
+	ctx context.Context, path string, body io.Reader, size int64, mtime *files.ExpectedMtime,
+) (files.WriteResult, error) {
 	if m.writeFn != nil {
 		return m.writeFn(path, body, size, mtime)
 	}
-	return 0, nil
+	return files.WriteResult{}, nil
 }
 
 func (m *mockFileService) Create(ctx context.Context, path string, isDir bool) error {
@@ -330,12 +330,13 @@ func TestReadReportsWhetherTheContentsAreBinary(t *testing.T) {
 // limit rather than the 64 KiB limit every other route uses.
 func TestWriteRouteBoundsTheBodyByTheFileLimit(t *testing.T) {
 	const limit = 16
-	svc := &mockFileService{writeFn: func(_ string, body io.Reader, _ int64, _ *int64) (int64, error) {
+	write := func(_ string, body io.Reader, _ int64, _ *files.ExpectedMtime) (files.WriteResult, error) {
 		if _, err := io.ReadAll(body); err != nil {
-			return 0, err
+			return files.WriteResult{}, err
 		}
-		return 4242, nil
-	}}
+		return files.WriteResult{Mtime: 4242, MtimeNanos: 4242000000}, nil
+	}
+	svc := &mockFileService{writeFn: write}
 
 	cfg := testRouterConfig("tok", nil)
 	cfg.MaxFileSize = limit
@@ -359,6 +360,12 @@ func TestWriteRouteBoundsTheBodyByTheFileLimit(t *testing.T) {
 	decodeBody(t, under, &got)
 	if got.Mtime != 4242 {
 		t.Errorf("expected the new modification time back, got %d", got.Mtime)
+	}
+	// The nanosecond value travels as a string, because as a JSON number it
+	// would be rounded by the client's own arithmetic before it was ever
+	// compared against a file.
+	if got.MtimeNanos != "4242000000" {
+		t.Errorf("expected the exact modification time back as a string, got %q", got.MtimeNanos)
 	}
 }
 
@@ -385,26 +392,64 @@ func TestWriteRouteRequiresAWellFormedDeclaredSize(t *testing.T) {
 // expected_mtime is optional, and its absence is what asks for a forced
 // overwrite, so it has to reach the service as nil rather than as zero.
 func TestWriteRoutePassesAnAbsentExpectedMtimeThrough(t *testing.T) {
-	var seen *int64
-	svc := &mockFileService{writeFn: func(_ string, _ io.Reader, _ int64, mtime *int64) (int64, error) {
+	var seen *files.ExpectedMtime
+	write := func(_ string, _ io.Reader, _ int64, mtime *files.ExpectedMtime) (files.WriteResult, error) {
 		seen = mtime
-		return 1, nil
-	}}
+		return files.WriteResult{}, nil
+	}
+	svc := &mockFileService{writeFn: write}
 	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
 
 	if rec := authedPut(t, router, "/api/hosts/local/files/write?path=/tmp/a&size=1", "x"); rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 	if seen != nil {
-		t.Errorf("expected no observed mtime, got %d", *seen)
+		t.Errorf("expected no observed mtime, got %d", seen.Millis)
 	}
 
 	if rec := authedPut(t, router, "/api/hosts/local/files/write?path=/tmp/a&size=1&expected_mtime=7",
 		"x"); rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	if seen == nil || *seen != 7 {
+	if seen == nil || seen.Millis != 7 {
 		t.Errorf("expected the observed mtime 7 to arrive, got %v", seen)
+	}
+}
+
+// The exact modification time is what a save is actually checked against, and
+// it travels separately from the millisecond value because the two have
+// different jobs: one is displayable, the other is comparable.
+func TestWriteRouteCarriesTheExactModificationTime(t *testing.T) {
+	var seen *files.ExpectedMtime
+	write := func(_ string, _ io.Reader, _ int64, mtime *files.ExpectedMtime) (files.WriteResult, error) {
+		seen = mtime
+		return files.WriteResult{}, nil
+	}
+	svc := &mockFileService{writeFn: write}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+
+	// A value well past JavaScript's safe integer range, which is the whole
+	// reason this one is not a JSON number.
+	rec := authedPut(t, router,
+		"/api/hosts/local/files/write?path=/tmp/a&size=1&expected_mtime=1760000000123"+
+			"&expected_mtime_nanos=1760000000123456789", "x")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if seen == nil || seen.Nanos == nil {
+		t.Fatalf("expected an exact modification time, got %v", seen)
+	}
+	if *seen.Nanos != 1760000000123456789 {
+		t.Errorf("expected the exact modification time through unchanged, got %d", *seen.Nanos)
+	}
+	if seen.Millis != 1760000000123 {
+		t.Errorf("expected the millisecond value alongside it, got %d", seen.Millis)
+	}
+
+	malformed := authedPut(t, router,
+		"/api/hosts/local/files/write?path=/tmp/a&size=1&expected_mtime_nanos=abc", "x")
+	if malformed.Code != http.StatusBadRequest {
+		t.Errorf("expected a malformed exact time to be refused, got %d", malformed.Code)
 	}
 }
 
@@ -550,5 +595,55 @@ func TestFileRoutesRejectANonLocalHost(t *testing.T) {
 	rec := authedGet(t, router, "/api/hosts/remote/files/list?path=/tmp")
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected a non-local host to map to 404, got %d", rec.Code)
+	}
+}
+
+// The length that was checked against the limit is the length that is served.
+//
+// The bug this pins: the service measured the descriptor and the transport then
+// measured the file again, so a file that grew in between was sent at its new
+// size -- past a limit that had already passed, with X-File-Size describing a
+// length the body did not have.
+func TestReadRouteServesExactlyTheLengthItAuthorized(t *testing.T) {
+	result := openReadResult(t, "0123456789")
+	// The descriptor holds ten bytes; four is what was authorized.
+	result.Size = 4
+	svc := &mockFileService{readFn: func(string) (files.ReadResult, error) {
+		return result, nil
+	}}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+
+	rec := authedGet(t, router, "/api/hosts/local/files/read?path=/tmp/grew.log")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if got := rec.Body.String(); got != "0123" {
+		t.Errorf("expected the authorized bytes alone, got %q", got)
+	}
+	if got := rec.Header().Get("Content-Length"); got != "4" {
+		t.Errorf("expected Content-Length 4, got %q", got)
+	}
+	if got := rec.Header().Get("X-File-Size"); got != "4" {
+		t.Errorf("expected X-File-Size 4, got %q", got)
+	}
+}
+
+// The exact modification time is exposed for the client to carry back, and it is
+// a decimal string because the number would not survive the client's arithmetic.
+func TestReadRouteExposesTheExactModificationTime(t *testing.T) {
+	result := openReadResult(t, "contents")
+	result.Mtime = 1760000000123
+	result.MtimeNanos = 1760000000123456789
+	svc := &mockFileService{readFn: func(string) (files.ReadResult, error) {
+		return result, nil
+	}}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+
+	rec := authedGet(t, router, "/api/hosts/local/files/read?path=/tmp/a.txt")
+	if got := rec.Header().Get("X-File-Mtime"); got != "1760000000123" {
+		t.Errorf("expected the millisecond value, got %q", got)
+	}
+	if got := rec.Header().Get("X-File-Mtime-Nanos"); got != "1760000000123456789" {
+		t.Errorf("expected the exact value as a string, got %q", got)
 	}
 }

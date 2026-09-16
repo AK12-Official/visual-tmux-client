@@ -2,6 +2,7 @@ package files
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"syscall"
 	"unicode/utf8"
@@ -161,7 +163,18 @@ func (s *Service) List(ctx context.Context, path string) (ListResult, error) {
 		return ListResult{}, err
 	}
 
-	info, err := os.Stat(resolved)
+	// Opened before it is asked what it is, so that the kind of thing this
+	// listing will read comes from the descriptor rather than from a stat taken
+	// beforehand -- the descriptor is what the reads will use either way.
+	dir, err := openNoBlock(resolved)
+	if err != nil {
+		return ListResult{}, classifyPathError(path, err)
+	}
+	defer func() {
+		_ = dir.Close() //nolint:errcheck // the listing has already been read
+	}()
+
+	info, err := dir.Stat()
 	if err != nil {
 		return ListResult{}, classifyPathError(path, err)
 	}
@@ -169,12 +182,12 @@ func (s *Service) List(ctx context.Context, path string) (ListResult, error) {
 		return ListResult{}, fmt.Errorf("%w: %s is not a directory", ErrInvalidPath, path)
 	}
 
-	children, err := os.ReadDir(resolved)
+	children, cut, err := readListing(ctx, dir, s.maxDirEntries)
 	if err != nil {
 		return ListResult{}, classifyPathError(path, err)
 	}
 
-	dirs, plain := make([]Entry, 0, len(children)), make([]Entry, 0, len(children))
+	entries := make([]Entry, 0, len(children))
 	for _, child := range children {
 		// A staging file belongs to a write that is in flight, and the listing is
 		// exactly where a user would otherwise watch it appear and vanish. Only a
@@ -191,30 +204,126 @@ func (s *Service) List(ctx context.Context, path string) (ListResult, error) {
 		if s.isStaging(filepath.Join(resolved, child.Name())) {
 			continue
 		}
-		entry := Entry{Name: child.Name()}
-		if child.IsDir() {
-			entry.IsDir = true
-			dirs = append(dirs, entry)
-			continue
-		}
-		// An entry that cannot be stat'd still exists, so it is reported without
-		// its size rather than taking the whole listing down.
-		if childInfo, statErr := child.Info(); statErr == nil {
-			entry.Size = childInfo.Size()
-			entry.Mtime = childInfo.ModTime().UnixMilli()
-		}
-		plain = append(plain, entry)
+		entries = append(entries, s.entryFor(resolved, child))
 	}
 
-	// os.ReadDir sorts by name, so grouping is all that is left to do and each
-	// group is already ordered.
-	entries := append(dirs, plain...)
-	result := ListResult{Path: resolved, Truncated: len(entries) > s.maxDirEntries}
-	if result.Truncated {
+	// The order is imposed here rather than taken from the reader. Reading in
+	// batches to bound a listing's cost means the entries arrive in whatever
+	// order the directory stores them, which is no order a caller can use.
+	slices.SortStableFunc(entries, compareEntries)
+
+	result := ListResult{Path: resolved, Truncated: cut || len(entries) > s.maxDirEntries}
+	if len(entries) > s.maxDirEntries {
 		entries = entries[:s.maxDirEntries]
 	}
 	result.Entries = entries
 	return result, nil
+}
+
+// compareEntries orders a listing: directories before files, then by name.
+func compareEntries(a, b Entry) int {
+	if a.IsDir != b.IsDir {
+		if a.IsDir {
+			return -1
+		}
+		return 1
+	}
+	return cmp.Compare(a.Name, b.Name)
+}
+
+// readListing reads a directory up to the point where one entry past the listing
+// bound is known, and reports whether it stopped with entries left unread.
+//
+// Stopping there is the whole point. os.ReadDir reads and sorts the entire
+// directory before its caller can apply any bound, so a directory holding a
+// hundred thousand entries costs a hundred thousand entries' worth of memory and
+// blocks for as long as reading them takes -- to produce a listing that is then
+// cut to the configured maximum. Reading in batches caps that cost at the bound
+// itself, and leaves somewhere to notice that the caller has gone away.
+//
+// An entry left unread is not an error: it is what the truncated flag is for.
+func readListing(ctx context.Context, dir *os.File, limit int) ([]os.DirEntry, bool, error) {
+	// One entry past the bound is all it takes to know there are more, and
+	// reading exactly that many is what makes the bound the bound.
+	want := limit + 1
+	entries := make([]os.DirEntry, 0, want)
+	for len(entries) < want {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		// A short batch is not the end of the directory -- the kernel fills what
+		// the buffer holds -- so the loop keeps going until either the bound or
+		// io.EOF says to stop.
+		batch, err := dir.ReadDir(want - len(entries))
+		entries = append(entries, batch...)
+		if errors.Is(err, io.EOF) {
+			return entries, false, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	return entries, true, nil
+}
+
+// entryFor describes one child of the directory it was read from.
+func (s *Service) entryFor(dir string, child os.DirEntry) Entry {
+	entry := Entry{Name: child.Name()}
+
+	info, err := s.childInfo(dir, child)
+	if err != nil {
+		// An entry that cannot be described still exists, so it is reported
+		// without its size rather than taking the whole listing down.
+		return entry
+	}
+	entry.IsDir = info.IsDir()
+	// A directory reports no size: the size of a directory inode is meaningless
+	// to a browser, and obtaining one would not change that.
+	if !entry.IsDir {
+		entry.Size = info.Size()
+		entry.Mtime = info.ModTime().UnixMilli()
+	}
+	return entry
+}
+
+// childInfo describes a directory child, following a symbolic link to what it
+// points at when the boundary permits one.
+//
+// Following matters because this is where "is it a directory" is decided, and a
+// reader that does not follow reports a link to a directory as a file. The
+// browser offers the first for expanding and the second for opening, so the
+// wrong answer produces an entry that invites a click and then refuses it --
+// which is how a symlinked working directory, an entirely ordinary arrangement,
+// becomes unbrowsable.
+//
+// The link is resolved through the guard rather than with a bare stat, so a link
+// leading outside every configured root is described as the link it is instead
+// of answering with the size and modification time of a path the caller may not
+// name.
+func (s *Service) childInfo(dir string, child os.DirEntry) (os.FileInfo, error) {
+	if child.Type()&os.ModeSymlink == 0 {
+		return child.Info()
+	}
+	target, err := s.roots.Resolve(filepath.Join(dir, child.Name()), ModeRead)
+	if err != nil {
+		return nil, err
+	}
+	return os.Stat(target)
+}
+
+// openNoBlock opens a path for reading without waiting for anything to arrive.
+//
+// A named pipe with no writer blocks in open(2) until one appears, and no
+// context interrupts that wait, so a request that happens to name one would hold
+// its goroutine for as long as the writer takes to show up -- days, if it never
+// does. O_NONBLOCK makes the call return immediately for every kind of file, and
+// for a regular file it changes nothing: the flag has no effect on reading one.
+//
+// What was opened is decided straight afterwards from the descriptor. This
+// function deliberately does not decide it: a check here could only be a check
+// on the path, and the point is to act on what was actually opened.
+func openNoBlock(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 }
 
 // Read opens a file for streaming and reports its size and modification time.
@@ -226,7 +335,7 @@ func (s *Service) Read(ctx context.Context, path string) (ReadResult, error) {
 		return ReadResult{}, err
 	}
 
-	file, err := os.Open(resolved)
+	file, err := openNoBlock(resolved)
 	if err != nil {
 		return ReadResult{}, classifyPathError(path, err)
 	}
@@ -239,34 +348,52 @@ func (s *Service) Read(ctx context.Context, path string) (ReadResult, error) {
 		_ = file.Close() //nolint:errcheck // the stat error is the one worth reporting
 		return ReadResult{}, classifyPathError(path, err)
 	}
-	if info.IsDir() {
+	if err := readableKind(path, info, s.maxFileSize); err != nil {
 		_ = file.Close() //nolint:errcheck // the kind error is the one worth reporting
-		return ReadResult{}, fmt.Errorf("%w: %s is a directory", ErrInvalidPath, path)
-	}
-	if info.Size() > s.maxFileSize {
-		_ = file.Close() //nolint:errcheck // the size error is the one worth reporting
-		return ReadResult{}, fmt.Errorf("%w: %s is %d bytes, over the %d byte limit",
-			ErrFileTooLarge, path, info.Size(), s.maxFileSize)
+		return ReadResult{}, err
 	}
 
-	binary, err := looksBinary(file, info.Size())
+	binary, err := looksBinary(ctx, file, info.Size())
 	if err != nil {
 		_ = file.Close() //nolint:errcheck // the sample error is the one worth reporting
 		return ReadResult{}, classifyPathError(path, err)
 	}
 
 	return ReadResult{
-		File:   file,
-		Size:   info.Size(),
-		Mtime:  info.ModTime().UnixMilli(),
-		Binary: binary,
+		File:       file,
+		Size:       info.Size(),
+		Mtime:      info.ModTime().UnixMilli(),
+		MtimeNanos: info.ModTime().UnixNano(),
+		Binary:     binary,
 	}, nil
 }
 
-// sniffBytes bounds how much of a file is examined to decide whether it is text.
-// A prefix is enough: a file that is text throughout starts as text, and every
-// format the browser would otherwise mangle declares itself early.
-const sniffBytes = 8192
+// readableKind reports why a file may not be read, if it may not.
+//
+// Only regular files are readable. The kind matters as much as the size: a named
+// pipe, a socket, or a device is not a file with contents that a browser could
+// show, and reading one is a different operation with different consequences. A
+// pipe would block a request goroutine until a writer appeared -- which, for a
+// pipe nothing is writing to, is never -- and a device answers with whatever it
+// produces rather than with what it holds.
+func readableKind(path string, info os.FileInfo, maxFileSize int64) error {
+	if info.IsDir() {
+		return fmt.Errorf("%w: %s is a directory", ErrInvalidPath, path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: %s is not a regular file", ErrInvalidPath, path)
+	}
+	if info.Size() > maxFileSize {
+		return fmt.Errorf("%w: %s is %d bytes, over the %d byte limit",
+			ErrFileTooLarge, path, info.Size(), maxFileSize)
+	}
+	return nil
+}
+
+// scanChunk bounds how much of a file is held in memory at a time while
+// deciding whether its contents are text. It is a working-set bound rather than
+// a decision bound: the whole file is examined either way.
+const scanChunk = 32 * 1024
 
 // looksBinary reports whether a file's contents are not text.
 //
@@ -275,46 +402,90 @@ const sniffBytes = 8192
 // than leaving the browser to guess from the file's name -- a name is a guess,
 // and a wrong guess either mojibakes a file or refuses to open a log.
 //
-// The sample is read with ReadAt, which does not move the file offset, so the
-// caller still streams the whole file from the beginning.
-func looksBinary(file *os.File, size int64) (bool, error) {
+// The whole file decides, not a prefix of it. A prefix is a guess of the same
+// kind: text that turns binary further in is ordinary -- a log with a binary
+// record appended, a source file with an embedded blob -- and a reader told the
+// file is text decodes the rest of it into replacement characters, which the
+// next save writes back over the bytes that were there. Scanning costs
+// little more than the sample it replaces: a binary file is refuted by its first
+// decisive byte, and most have one in the first few kilobytes, so only a file
+// that stays text to its end is read to its end -- which is exactly the file
+// whose classification has to be right before it is offered as editable.
+//
+// Reading uses ReadAt, which does not move the file offset, so the caller still
+// streams the whole file from the beginning.
+func looksBinary(ctx context.Context, file *os.File, size int64) (bool, error) {
 	if size == 0 {
 		return false, nil
 	}
-	n := min(int64(sniffBytes), size)
-	sample := make([]byte, n)
-	read, err := file.ReadAt(sample, 0)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return false, err
+	buf := make([]byte, scanChunk)
+	var scan textScan
+	for offset := int64(0); offset < size; {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		read, err := file.ReadAt(buf[:min(int64(len(buf)), size-offset)], offset)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return false, err
+		}
+		if read == 0 {
+			// The file is shorter than it said it was. What is there has been
+			// examined, and it is the whole of it.
+			break
+		}
+		offset += int64(read)
+		if scan.decidedBy(buf[:read]) {
+			return true, nil
+		}
 	}
-	// A sample shorter than the file stopped at the bound rather than at the end,
-	// which is the case that can end inside a rune.
-	return binarySample(sample[:read], size <= int64(sniffBytes)), nil
+	// Bytes still held back at the end of the file were a rune the end of the
+	// file cut in half. No encoding produces those, so they are not text.
+	return len(scan.carry) > 0, nil
 }
 
-// binarySample classifies a sample. A NUL byte is decisive -- no text encoding
-// the browser can read contains one -- and anything that is not valid UTF-8 is
-// treated as binary, since that is what the browser would decode into
-// replacement characters and then save back over the original bytes.
+// textScan classifies a file's contents as they are read, one chunk at a time.
 //
-// complete says whether the sample is the whole file. It matters because a
-// sample that stopped at the sniff bound can end inside a rune, and that is not
-// the same thing as bytes that are not UTF-8 at all.
-func binarySample(sample []byte, complete bool) bool {
+// It exists because a decision about a whole file has to survive being reached
+// in pieces. A multi-byte character can straddle a chunk boundary, and the two
+// chunks around it are neither of them valid UTF-8 on their own -- the first
+// ends inside a rune, the second begins with its continuation bytes. A scanner
+// that judged each chunk alone would call perfectly ordinary text binary at
+// whichever boundary it happened to land on, and the position of that boundary
+// is a buffer size rather than anything about the file.
+type textScan struct {
+	// carry is the tail of the last chunk that could be a rune cut in half,
+	// held back to be decided against the bytes that follow it.
+	carry []byte
+}
+
+// decidedBy reports whether a chunk proves the contents are not text, holding
+// back a trailing rune that the chunk may have cut in half.
+//
+// A NUL byte is decisive -- no text encoding the browser can read contains one
+// -- and so is a byte sequence that is not valid UTF-8, since that is what the
+// browser would decode into replacement characters and then save back over the
+// original bytes.
+func (s *textScan) decidedBy(chunk []byte) bool {
+	sample := chunk
+	if len(s.carry) > 0 {
+		sample = append(append([]byte{}, s.carry...), chunk...)
+		s.carry = nil
+	}
 	if bytes.IndexByte(sample, 0) >= 0 {
 		return true
 	}
 	if utf8.Valid(sample) {
 		return false
 	}
-	if complete {
-		return true
-	}
-	// Only a truncated rune is tolerated: the bytes after the last complete rune
-	// have to be the start of a valid encoding, not merely short enough that what
-	// precedes them happens to parse.
-	for drop := 1; drop <= 3 && drop <= len(sample); drop++ {
-		if utf8.Valid(sample[:len(sample)-drop]) && isPartialRune(sample[len(sample)-drop:]) {
+	// Invalid as it stands, which is either the answer or a consequence of where
+	// this chunk ended. Only a truncated rune is tolerated: everything before it
+	// must be valid, and the bytes after the last complete rune must be the start
+	// of a valid encoding rather than merely short enough that what precedes them
+	// happens to parse.
+	for drop := 1; drop < utf8.UTFMax && drop <= len(sample); drop++ {
+		tail := sample[len(sample)-drop:]
+		if utf8.Valid(sample[:len(sample)-drop]) && isPartialRune(tail) {
+			s.carry = append([]byte{}, tail...)
 			return false
 		}
 	}
@@ -349,29 +520,28 @@ func isPartialRune(b []byte) bool {
 	return true
 }
 
-// Write replaces a file's contents and returns the resulting modification time.
+// Write replaces a file's contents and reports what it produced.
 //
-// expectedMtime is the value the caller last observed. A mismatch is a conflict
-// and nothing is written; a nil expectedMtime forces the overwrite, which is
-// what the browser sends once the user has confirmed. A non-nil expectedMtime
-// against a file that does not exist is a not-found rather than a create: a
-// caller that believes it is editing an existing file must not be handed a new
-// one.
+// expected is the modification time the caller last observed. A mismatch is a
+// conflict and nothing is written; a nil expected forces the overwrite, which is
+// what the browser sends once the user has confirmed. A non-nil expected against
+// a file that does not exist is a not-found rather than a create: a caller that
+// believes it is editing an existing file must not be handed a new one.
 func (s *Service) Write(
-	ctx context.Context, path string, body io.Reader, declaredSize int64, expectedMtime *int64,
-) (int64, error) {
+	ctx context.Context, path string, body io.Reader, declaredSize int64, expected *ExpectedMtime,
+) (WriteResult, error) {
 	resolved, err := s.roots.Resolve(path, ModeCreate)
 	if err != nil {
-		return 0, err
+		return WriteResult{}, err
 	}
 
 	existing, statErr := os.Stat(resolved)
 	exists := statErr == nil
 	if statErr != nil && !os.IsNotExist(statErr) {
-		return 0, classifyPathError(path, statErr)
+		return WriteResult{}, classifyPathError(path, statErr)
 	}
 	if exists && existing.IsDir() {
-		return 0, fmt.Errorf("%w: %s is a directory", ErrInvalidPath, path)
+		return WriteResult{}, fmt.Errorf("%w: %s is a directory", ErrInvalidPath, path)
 	}
 	if !exists {
 		// A name held by a link whose target is gone is not a name to write over.
@@ -380,15 +550,15 @@ func (s *Service) Write(
 		// not to remove a link. Reading it fails on its own, so nothing else can
 		// act on it either, and "no such target" is what is true of it.
 		if info, linkErr := os.Lstat(resolved); linkErr == nil && info.Mode()&os.ModeSymlink != 0 {
-			return 0, fmt.Errorf("%w: %s is a link whose target does not exist", ErrNotFound, path)
+			return WriteResult{}, fmt.Errorf("%w: %s is a link whose target does not exist", ErrNotFound, path)
 		}
 	}
-	if expectedMtime != nil {
+	if expected != nil {
 		if !exists {
-			return 0, fmt.Errorf("%w: %s", ErrNotFound, path)
+			return WriteResult{}, fmt.Errorf("%w: %s", ErrNotFound, path)
 		}
-		if existing.ModTime().UnixMilli() != *expectedMtime {
-			return 0, fmt.Errorf("%w: %s changed since it was read", ErrConflict, path)
+		if !expected.matches(existing) {
+			return WriteResult{}, fmt.Errorf("%w: %s changed since it was read", ErrConflict, path)
 		}
 	}
 
@@ -402,8 +572,11 @@ func (s *Service) Write(
 	// would not preserve a capability -- it would hand one to whoever just wrote
 	// the file. Dropping them is what a plain shell redirect does, and the cost is
 	// a chmod the owner can reapply.
-	opts := writeOptions{expectedMtime: expectedMtime, display: path}
+	opts := writeOptions{expected: expected, display: path}
 	if exists {
+		// What the target was when this write began, whether or not the caller
+		// supplied a time to compare it against. See confirmUnchanged.
+		opts.origin = existing
 		opts.mode = existing.Mode().Perm()
 		opts.preserve = true
 	} else {
@@ -423,9 +596,17 @@ type writeOptions struct {
 	// umask does not reduce. A new file's mode is a default, so creation applies
 	// it and lets the umask decide.
 	preserve bool
-	// expectedMtime is the modification time the caller last observed, re-checked
-	// immediately before the target is replaced.
-	expectedMtime *int64
+	// origin is the target as this write found it, or nil when the name was free.
+	// It is what the target is checked against immediately before it is replaced,
+	// so that a write against an entry that has since been moved, removed, or
+	// taken by something else is refused rather than landing on whatever now
+	// answers to that name.
+	origin os.FileInfo
+	// expected is the modification time the caller last observed, re-checked
+	// immediately before the target is replaced. A nil one forces the overwrite
+	// and is compared against nothing -- the origin check is what still has to
+	// hold.
+	expected *ExpectedMtime
 	// display is the caller's own spelling of the path, for error messages.
 	display string
 }
@@ -436,7 +617,7 @@ type writeOptions struct {
 // and write cannot offer.
 func (s *Service) writeAtomically(
 	ctx context.Context, target string, body io.Reader, declaredSize int64, opts writeOptions,
-) (int64, error) {
+) (WriteResult, error) {
 	// A new file is created with the mode it will keep, so the umask governs it
 	// exactly as it would govern a file created directly. The cost is that an
 	// unfinished copy of a *new* file carries whatever that mode allows, in a
@@ -451,7 +632,7 @@ func (s *Service) writeAtomically(
 	}
 	stage, err := s.createStaged(filepath.Dir(target), createMode)
 	if err != nil {
-		return 0, stageFailure(opts.display, err)
+		return WriteResult{}, stageFailure(opts.display, err)
 	}
 	defer s.unmarkStaging(stage.Name())
 
@@ -464,7 +645,7 @@ func (s *Service) writeAtomically(
 
 	if err := s.copyBody(ctx, stage, body, declaredSize); err != nil {
 		_ = stage.Close() //nolint:errcheck // the copy error is the one worth reporting
-		return 0, err
+		return WriteResult{}, err
 	}
 	// A replacement keeps the target's mode exactly, which the umask must not
 	// reduce -- so it is set here, after the body and before the sync, rather than
@@ -472,47 +653,77 @@ func (s *Service) writeAtomically(
 	if opts.preserve {
 		if err := stage.Chmod(opts.mode); err != nil {
 			_ = stage.Close() //nolint:errcheck // the chmod error is the one worth reporting
-			return 0, fmt.Errorf("%w: chmod: %w", ErrWriteFailed, err)
+			return WriteResult{}, fmt.Errorf("%w: chmod: %w", ErrWriteFailed, err)
 		}
 	}
 	if err := stage.Sync(); err != nil {
 		_ = stage.Close() //nolint:errcheck // the sync error is the one worth reporting
-		return 0, fmt.Errorf("%w: sync: %w", ErrWriteFailed, err)
+		return WriteResult{}, fmt.Errorf("%w: sync: %w", ErrWriteFailed, err)
 	}
 	if err := stage.Close(); err != nil {
-		return 0, fmt.Errorf("%w: close: %w", ErrWriteFailed, err)
+		return WriteResult{}, fmt.Errorf("%w: close: %w", ErrWriteFailed, err)
 	}
 
-	// The caller's observed modification time is checked again here, and this is
-	// the check that makes the write optimistic. The first one happened before
-	// the body was transferred, which for a large file is as long as the request
-	// lasts: a second writer landing inside that window would be overwritten
-	// without either writer being told. What remains is the gap between this stat
-	// and the rename below, two adjacent syscalls rather than a whole upload.
-	if err := confirmUnchanged(target, opts.display, opts.expectedMtime); err != nil {
-		return 0, err
+	// The target is checked again here, and this is the check that makes the write
+	// optimistic. The first one happened before the body was transferred, which for
+	// a large file is as long as the request lasts: a second writer landing inside
+	// that window would be overwritten without either writer being told. What
+	// remains is the gap between this check and the rename below, two adjacent
+	// syscalls rather than a whole upload.
+	if err := confirmUnchanged(target, opts); err != nil {
+		return WriteResult{}, err
 	}
 
 	if err := os.Rename(stage.Name(), target); err != nil {
-		return 0, fmt.Errorf("%w: %w", ErrWriteFailed, err)
+		return WriteResult{}, fmt.Errorf("%w: %w", ErrWriteFailed, err)
 	}
 	committed = true
 
-	return mtimeOf(target)
+	return stampOf(target)
 }
 
-// confirmUnchanged re-applies the observed-modification-time check. A nil
-// expected time is a forced overwrite and has nothing to confirm.
-func confirmUnchanged(target, display string, expectedMtime *int64) error {
-	if expectedMtime == nil {
-		return nil
+// confirmUnchanged re-applies, immediately before the target is replaced, every
+// check that makes a write safe to land.
+//
+// Three things can have gone wrong while the body was travelling, and each is
+// refused rather than resolved:
+//
+//   - the target is gone, or is no longer the file this write started against.
+//     A forced overwrite used to skip this, on the reasoning that the user had
+//     already agreed to replace whatever was there -- but agreeing to replace a
+//     file is not agreeing to recreate one that has since been moved or removed.
+//     A rename landing in this window is the case that matters: the entry comes
+//     back at its old name, holding the edit, while the tab that asked to save it
+//     has followed the file to the new name and is told the save succeeded.
+//   - the target changed, when the caller said what it last observed.
+//   - the name was free when the write began and no longer is, which is the same
+//     hazard from the other side: a create that lands on a file created in the
+//     meantime replaces something its author never agreed to lose.
+//
+// A nil expected modification time means the caller forced the overwrite, so it
+// is compared against nothing. The origin check is not optional in the same way:
+// it asks what the path is, not what the caller expected it to be.
+func confirmUnchanged(target string, opts writeOptions) error {
+	current, err := os.Stat(target)
+	if opts.origin == nil {
+		// The name was free when the write began, so it is still free only if
+		// nothing has taken it.
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return classifyPathError(opts.display, err)
+		}
+		return fmt.Errorf("%w: %s was created while it was being written", ErrConflict, opts.display)
 	}
-	info, err := os.Stat(target)
 	if err != nil {
-		return classifyPathError(display, err)
+		return classifyPathError(opts.display, err)
 	}
-	if info.ModTime().UnixMilli() != *expectedMtime {
-		return fmt.Errorf("%w: %s changed while it was being written", ErrConflict, display)
+	if !os.SameFile(opts.origin, current) {
+		return fmt.Errorf("%w: %s was replaced while it was being written", ErrConflict, opts.display)
+	}
+	if opts.expected != nil && !opts.expected.matches(current) {
+		return fmt.Errorf("%w: %s changed while it was being written", ErrConflict, opts.display)
 	}
 	return nil
 }
@@ -732,13 +943,17 @@ func (r cancelableReader) Read(p []byte) (int, error) {
 	return r.body.Read(p)
 }
 
-// mtimeOf reports a path's modification time in milliseconds since the epoch.
-// Nanoseconds would be finer but unusable: Go's UnixNano exceeds JavaScript's
-// Number.MAX_SAFE_INTEGER and would be silently corrupted by a JSON client.
-func mtimeOf(path string) (int64, error) {
+// stampOf reports a path's modification time in each precision the service
+// speaks: milliseconds, which a JSON client can carry exactly, and nanoseconds,
+// which is what the filesystem records and what the next write is compared
+// against.
+func stampOf(path string) (WriteResult, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return 0, classifyPathError(path, err)
+		return WriteResult{}, classifyPathError(path, err)
 	}
-	return info.ModTime().UnixMilli(), nil
+	return WriteResult{
+		Mtime:      info.ModTime().UnixMilli(),
+		MtimeNanos: info.ModTime().UnixNano(),
+	}, nil
 }

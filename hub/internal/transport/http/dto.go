@@ -122,8 +122,18 @@ type deleteFileRequest struct {
 // writeFileResponse returns the target's resulting modification time, so the
 // browser can keep editing without re-reading the file -- and without guessing
 // a value that would make its next save look like a conflict.
+//
+// Two precisions are reported because they answer different questions.
+// `mtime` is milliseconds, which is what a JavaScript number holds exactly and
+// what the client displays and compares for nothing but reporting. `mtime_nanos`
+// is the exact time the filesystem recorded, carried as a decimal string
+// because it exceeds JavaScript's safe integer range: a number would be rounded
+// on arrival, and the client would then send back a time that matches no file.
+// It is the value the next save is checked against, so two edits inside one
+// millisecond are two edits rather than an unconflicted overwrite.
 type writeFileResponse struct {
-	Mtime int64 `json:"mtime"`
+	Mtime      int64  `json:"mtime"`
+	MtimeNanos string `json:"mtime_nanos"`
 }
 
 // workingDirectoryResponse seeds the file manager's starting directory.
