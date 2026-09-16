@@ -46,6 +46,10 @@ const (
 	DefaultWebNotificationsErrorLifetime   = 8 * time.Second
 	DefaultWebNotificationsWarningLifetime = 5 * time.Second
 	DefaultWebNotificationsInfoLifetime    = 3 * time.Second
+
+	DefaultFilesEnabled       = true
+	DefaultFilesMaxFileSize   = 104857600 // 100 MiB
+	DefaultFilesMaxDirEntries = 1000
 )
 
 // DefaultConfig returns a complete Config populated with all design defaults.
@@ -105,6 +109,11 @@ func DefaultConfig() Config {
 				WarningLifetime: Duration(DefaultWebNotificationsWarningLifetime),
 				InfoLifetime:    Duration(DefaultWebNotificationsInfoLifetime),
 			},
+		},
+		Files: FilesConfig{
+			Enabled:       DefaultFilesEnabled,
+			MaxFileSize:   DefaultFilesMaxFileSize,
+			MaxDirEntries: DefaultFilesMaxDirEntries,
 		},
 	}
 }

@@ -50,6 +50,7 @@ type Config struct {
 	Terminal  TerminalConfig  `yaml:"terminal"`
 	Shutdown  ShutdownConfig  `yaml:"shutdown"`
 	Web       WebConfig       `yaml:"web"`
+	Files     FilesConfig     `yaml:"files"`
 }
 
 // ServerConfig holds HTTP server parameters.
@@ -127,4 +128,17 @@ type NotificationsConfig struct {
 	ErrorLifetime   Duration `yaml:"error_lifetime"`
 	WarningLifetime Duration `yaml:"warning_lifetime"`
 	InfoLifetime    Duration `yaml:"info_lifetime"`
+}
+
+// FilesConfig holds the file manager's enablement and access boundary. Roots is
+// optional: an empty one leaves the boundary at whatever the hub's own
+// operating-system user can reach, mirroring the access that user already has
+// through an attached terminal. A non-empty one confines every file operation
+// to those directories, and each entry is replaced by its canonical resolution
+// while the configuration loads.
+type FilesConfig struct {
+	Enabled       bool     `yaml:"enabled"`
+	Roots         []string `yaml:"roots"`
+	MaxFileSize   int64    `yaml:"max_file_size"`
+	MaxDirEntries int      `yaml:"max_dir_entries"`
 }
