@@ -48,22 +48,41 @@ export function choosePreview(name: string, size: number): PreviewKind {
 }
 
 /**
+ * Classification is what the hub said about a file's contents, or null when it
+ * was never asked.
+ *
+ * Three states, not two, because "not binary" and "not known" are different
+ * questions with different answers: a file the hub read as text is shown as text
+ * whatever it is called, and a file nobody read is shown according to its name.
+ * A boolean could not tell those apart, and the first thing that went wrong was
+ * that a text file named `notes.dat` was read, classified as text, and then
+ * presented as binary anyway -- by its own name, which the classification was
+ * supposed to have overruled.
+ */
+export type Classification = boolean | null
+
+/**
  * presentation decides how a file's contents are shown, given the hub's
  * classification of them.
  *
- * The classification outranks the file's name, and only in the direction that
- * matters: something the hub read and reported as binary is presented as
- * information whatever the name suggests, because decoding its bytes as text is
- * what would replace them on the next save. A name that merely suggests binary
- * does not overrule contents the hub read as text -- a log with no extension
- * opens in the editor.
+ * The classification outranks the file's name in both directions, which is the
+ * point of asking: something the hub read as binary is presented as information
+ * whatever the name suggests, because decoding its bytes as text is what would
+ * replace them on the next save, and something it read as text opens as text
+ * even when the name suggests otherwise.
  *
  * It lives here rather than beside the open-file state because it is a
  * presentation rule: the module that owns the save and conflict rules has no
  * business importing the renderer to answer a question about a file name.
  */
-export function presentation(name: string, size: number, binary: boolean): PreviewKind {
-  if (binary) return 'info'
+export function presentation(name: string, size: number, binary: Classification): PreviewKind {
+  if (binary === true) return 'info'
+  if (binary === false) {
+    // Text the hub read, so the only thing the name still decides is whether it
+    // is Markdown -- which is a rendering choice rather than a guess about the
+    // contents.
+    return choosePreview(name, size) === 'markdown' ? 'markdown' : 'editor'
+  }
   return choosePreview(name, size)
 }
 
@@ -74,7 +93,7 @@ export function presentation(name: string, size: number, binary: boolean): Previ
  * editor that is merely hidden has to stay mounted, because unmounting one is
  * what discards the undo history of the file the user switched away from.
  */
-export function editable(name: string, size: number, binary: boolean): boolean {
+export function editable(name: string, size: number, binary: Classification): boolean {
   const kind = presentation(name, size, binary)
   return kind === 'editor' || kind === 'markdown'
 }

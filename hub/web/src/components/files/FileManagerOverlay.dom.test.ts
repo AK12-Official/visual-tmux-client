@@ -54,7 +54,7 @@ interface Call {
  * about, and a handler that returns a promise the test resolves is how that
  * order is chosen.
  */
-function hubFetch(overrides: Partial<Record<'write' | 'rename', Responder>> = {}): Call[] {
+function hubFetch(overrides: Partial<Record<'write' | 'rename' | 'probe', Responder>> = {}): Call[] {
   const calls: Call[] = []
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
@@ -70,11 +70,15 @@ function hubFetch(overrides: Partial<Record<'write' | 'rename', Responder>> = {}
         entries: [
           { name: 'a.txt', is_dir: false, size: 5, mtime: 1000 },
           { name: 'b.txt', is_dir: false, size: 5, mtime: 1000 },
+          { name: 'notes.dat', is_dir: false, size: 5, mtime: 1000 },
         ],
         truncated: false,
       })
     }
     if (url.includes('/files/read')) {
+      // The probe is the same route asked with HEAD, which is how the manager
+      // asks what a file is without transferring it.
+      if (method === 'HEAD' && overrides.probe) return overrides.probe()
       return text('hello')
     }
     if (url.includes('/files/write')) {
@@ -245,5 +249,88 @@ test('an answer for a file that has moved is not recorded either', async () => {
     notices.some((text) => String(text).includes('moved to /srv/work/b.txt')),
     `expected a notice naming the new path, got ${JSON.stringify(notices)}`,
   )
+  wrapper.unmount()
+})
+
+test('a file the name calls binary is opened when the hub reads it as text', async () => {
+  const calls = hubFetch()
+  const wrapper = await mountManager()
+
+  await openFile(wrapper, 'notes.dat')
+
+  // The hub was asked -- that question is what makes the name a guess rather
+  // than a decision -- and its answer put the file in the editor.
+  assert.ok(
+    calls.some((call) => call.method === 'HEAD'),
+    'the hub was never asked what the file is before it was refused',
+  )
+  assert.equal(
+    wrapper.find('.fm__editor').exists(),
+    true,
+    'text the name called binary did not open in the editor',
+  )
+  wrapper.unmount()
+})
+
+test('a rename that lands during the probe leaves one tab, at the new name', async () => {
+  const probe = deferred()
+  hubFetch({ probe: probe.respond })
+  const wrapper = await mountManager()
+
+  // The click starts a question the test holds open.
+  await row(wrapper, 'notes.dat').find('.tree__label').trigger('click')
+  await flush(2)
+
+  // The user renames the file while it is in flight.
+  await renameViaMenu(wrapper, 'notes.dat', 'renamed.dat')
+  await flush(2)
+
+  // The hub answers that it is binary, which is the branch that builds the tab
+  // from the probe rather than reading the file -- and so the branch whose path
+  // has to be corrected for a rename.
+  probe.release(
+    new Response(null, {
+      status: 200,
+      headers: { 'X-File-Size': '5', 'X-File-Binary': '1' },
+    }),
+  )
+  await flush()
+
+  // Asking the hub is an await, so a rename can complete inside it exactly as it
+  // can inside a read. A tab built at the old name would name a file that is
+  // gone, and a click on the new name would open a second tab for one file.
+  const tabs = wrapper.findAll('.tabs__tab')
+  assert.equal(tabs.length, 1, `expected one tab, got ${tabs.length}`)
+  assert.ok(
+    tabs[0].text().includes('renamed.dat'),
+    `expected the tab at the new name, got ${tabs[0].text()}`,
+  )
+  wrapper.unmount()
+})
+
+test('closing a tab releases its editor, and switching between them does not', async () => {
+  hubFetch()
+  const wrapper = await mountManager()
+  await openFile(wrapper, 'a.txt')
+  await openFile(wrapper, 'b.txt')
+
+  // Switching back is not a release: this is what makes the assertion below mean
+  // something.
+  await wrapper.findAll('.tabs__label')[0].trigger('click')
+  await flush(2)
+  assert.ok(
+    instances.every((view) => !view.destroyed),
+    'switching between open files destroyed an editor',
+  )
+
+  // Closing the tab that is on screen is a release.
+  await wrapper.findAll('.tabs__close')[1].trigger('click')
+  await flush(2)
+  assert.equal(
+    instances.filter((view) => view.destroyed).length,
+    1,
+    'closing a tab did not release exactly its own editor',
+  )
+  assert.equal(wrapper.findAll('.fm__editor').length, 1)
   wrapper.unmount()
 })

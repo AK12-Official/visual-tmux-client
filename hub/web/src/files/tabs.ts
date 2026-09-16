@@ -7,6 +7,7 @@
 // question about a file name would drag it in for nothing.
 
 import { writeFile, type Stamp } from './api'
+import type { Classification } from './preview'
 
 /** OpenFile is one file open in the editor. */
 export interface OpenFile {
@@ -35,14 +36,16 @@ export interface OpenFile {
   /** size is the byte size the directory listing reported. */
   size: number
   /**
-   * binary is the hub's classification of the contents, for a file that was read
-   * as text. It is what decides whether the file may be shown as editable text,
-   * and it outranks the file's name: a name is a guess, and a wrong guess either
-   * mojibakes a file or refuses to open one that is text. A file that was never
-   * read -- an image, or one already known to be uneditable -- is false, and its
-   * presentation is decided by its kind instead.
+   * binary is the hub's classification of the contents: true for binary, false
+   * for text, and null for a file it was never asked about.
+   *
+   * It outranks the file's name, in both directions, because a name is a guess
+   * and a wrong guess either mojibakes a file or refuses to open one that is
+   * text. Null is a different answer from false, and has to be: an image is
+   * never read, and a file the hub read as text is shown as text however it is
+   * named. See Classification in preview.ts.
    */
-  binary: boolean
+  binary: Classification
 }
 
 /** isDirty reports whether a file differs from what was last read or saved. */

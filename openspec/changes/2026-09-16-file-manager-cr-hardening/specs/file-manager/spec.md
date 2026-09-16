@@ -6,7 +6,7 @@ By default the hub SHALL allow file operations on any regular path its own opera
 
 Roots govern what a **caller** may name, and no path supplied through this API reaches outside them: each operation is authorized against the target's resolved form, and one that resolves outside every root is refused.
 
-When roots are configured the hub SHALL also *perform* each operation through an open handle on the containing root, with the path expressed relative to it, so that the components of the target are resolved by the call that performs the operation rather than by an earlier check. This is what makes the boundary hold against another process on the machine and not merely against the caller: a component replaced by a symbolic link between the check and the operation SHALL cause the operation to be refused, rather than silently redirecting it outside the root. Moving an entry between two configured roots is the one operation that cannot be expressed this way -- a handle only moves within its own tree -- and it SHALL be performed on the two absolute paths, with a component replaced during it able to redirect the move. That exception SHALL be the only one.
+When roots are configured the hub SHALL also *perform* each operation through an open handle on the containing root, with the path expressed relative to it, so that the components of the target are resolved by the call that performs the operation rather than by an earlier check. This is what makes the boundary hold against another process on the machine and not merely against the caller: a component replaced between the check and the operation by a symbolic link that leads outside the root SHALL cause the operation to be refused, rather than silently redirecting it. A replacement that leads back inside the same root is followed, which stays within the boundary -- what the handle refuses is leaving it, not being redirected. Moving an entry between two configured roots is the one operation that cannot be expressed this way -- a handle only moves within its own tree -- and it SHALL be performed on the two absolute paths, with a component replaced during it able to redirect the move. That exception SHALL be the only one.
 
 With no roots configured there is no boundary to keep, and none is claimed: the hub acts on plain paths, where a replaced component takes the operation wherever it points. That is the operating-system user's own access, which an attached terminal already grants.
 
@@ -24,8 +24,13 @@ Roots are therefore a boundary against a caller, and -- for every operation but 
 
 #### Scenario: Another local process replaces a path component
 
-- **WHEN** a local process replaces a directory on an authorized path with a symbolic link after the target has been authorized and before the operation is performed
-- **THEN** the hub refuses the operation rather than following the replacement outside the root
+- **WHEN** a local process replaces a directory on an authorized path, after the target has been authorized and before the operation is performed, with a symbolic link that leads outside the root
+- **THEN** the hub refuses the operation rather than following the replacement out of the boundary
+
+#### Scenario: A replacement that stays inside the root
+
+- **WHEN** a local process replaces a directory on an authorized path with a symbolic link whose target is inside that same root
+- **THEN** the operation follows the replacement, because it has not left the boundary
 
 #### Scenario: A move between two configured roots
 
@@ -117,7 +122,7 @@ Reading SHALL be bounded by the same configured maximum, plus the entries the hu
 
 The hub SHALL stream a file's contents to the caller without loading the whole file into memory, and SHALL report the file's byte size and modification time alongside the contents. The hub SHALL refuse to read a file whose size exceeds the configured per-file limit. The hub SHALL allow the caller to distinguish binary content from text content so the browser does not render binary bytes as text. The hub SHALL read only regular files: a directory, a named pipe, a socket, a device, and any other kind SHALL be refused, and the hub SHALL NOT wait on a file that would block the request. The classification of a file's contents as binary or text SHALL be decided by the whole of its contents, not by a prefix of them.
 
-The hub SHALL NOT serve more bytes than the size it checked against the limit, and SHALL report a size that describes the body it sends. The classification of a file and the bytes served are read from the same file at different moments, so a file rewritten in between can be served with a classification taken before the change; a caller that then writes it is refused as a conflict, because the modification time it recorded is no longer the file's. A file that grows after the check is served at the length that was checked; a file that shrinks after it is served as what it holds now, reported at that shorter length. A response never promises more bytes than it carries, because a client cannot tell such a response from one whose transfer failed.
+The hub SHALL NOT serve more bytes than the size it checked against the limit, and SHALL report a size that describes the body it sends. The classification of a file and the bytes served are read from the same file at different moments, so a file rewritten in between can be served with a classification taken before the change; a caller that then writes it is refused as a conflict, because the modification time it recorded is no longer the file's -- unless the change landed within the finest interval the filesystem records, in which case no comparison of times can tell the two apart, which is the same limit that applies to concurrent writes. A file that grows after the check is served at the length that was checked; a file that shrinks after it is served as what it holds now, reported at that shorter length. A response never promises more bytes than it carries, because a client cannot tell such a response from one whose transfer failed.
 
 #### Scenario: Read a text file
 

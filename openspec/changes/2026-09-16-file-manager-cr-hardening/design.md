@@ -269,7 +269,14 @@ layout engine, and the tests would then be measuring CodeMirror); writing a gene
   → *It is produced by `UnixNano()` on the same inode within the same read, and adopted
   verbatim by the client, so a mismatch means the file changed. A filesystem with coarser
   granularity reports a stable value and compares equal to itself.*
-- **[Known wart, accepted] A cancelled or unclassified read reports the catch-all
+- **[Residual] A root of `/` is equivalent to no roots**, and the rule against `/proc` is
+  enforced against the path a *caller* names rather than against every syscall. With the whole
+  filesystem inside the boundary there is nothing for the handle to refuse, and `os.Root` does not
+  prohibit `/proc` traversal by its own documentation — so a local actor who swaps a component inside
+  such a hub can reach it. Unreachable through the API, which refuses `/proc` before any root check,
+  and no different in kind from the pre-migration behaviour. Configured by an operator who has
+  chosen a boundary that contains everything.
+- **[Known wart, accepted] A cancelled or unclassified read or listing reports the catch-all
   wire code**, which is named `write_failed` because the write path was the first
   thing to need a fallback. A request whose client has gone away is answered to
   nobody, so what is lost is a log line that names the wrong operation; an

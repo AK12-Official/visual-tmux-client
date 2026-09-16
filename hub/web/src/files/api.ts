@@ -234,10 +234,19 @@ export async function readFile(path: string): Promise<FileContents> {
   }
 }
 
-/** headerSize reads the length a response reports, or fallback when it did not. */
-function headerSize(res: Response, fallback: number): number {
-  const value = Number(res.headers.get('X-File-Size'))
-  return Number.isSafeInteger(value) && value >= 0 ? value : fallback
+/** headerSize reads the length a response reports, or null when it did not
+ * report one this client can use.
+ *
+ * The absence is checked before the value is turned into a number, because
+ * `Number(null)` is 0 -- and zero is a safe, non-negative integer, so a missing
+ * header would sail through a numeric test as "nothing to worry about" and the
+ * bound below would silently stop applying. Which is the one case it exists for.
+ */
+function headerSize(res: Response): number | null {
+  const header = res.headers.get('X-File-Size')
+  if (header === null || header.trim() === '') return null
+  const value = Number(header)
+  return Number.isSafeInteger(value) && value >= 0 ? value : null
 }
 
 /**
@@ -257,12 +266,19 @@ export type ImageBytes = { blob: Blob } | { tooLarge: number }
  */
 export async function readFileBytes(path: string, limit: number): Promise<ImageBytes> {
   const res = await request(withPath('read', path))
-  const size = headerSize(res, limit + 1)
-  if (size > limit) {
+  const reported = headerSize(res)
+  if (reported !== null && reported > limit) {
     await releaseBody(res)
-    return { tooLarge: size }
+    return { tooLarge: reported }
   }
-  return { blob: await res.blob() }
+  // A hub that did not say how long the body is leaves nothing to check before
+  // reading it, so the answer is measured instead -- and the length handed back
+  // is the one that was really received rather than a guess about what it might
+  // have been. It is also the second chance at the bound: a file that grew
+  // between the header and the body is caught here.
+  const blob = await res.blob()
+  if (blob.size > limit) return { tooLarge: blob.size }
+  return { blob }
 }
 
 /** FileProbe is what the hub says about a file without being asked to send it. */
@@ -292,7 +308,10 @@ export async function probeFile(path: string): Promise<FileProbe> {
   await releaseBody(res)
   return {
     binary: res.headers.get('X-File-Binary') === '1',
-    size: headerSize(res, 0),
+    // Zero when the hub did not say. A tab opened from this probe is one whose
+    // size is only ever displayed, and the listing's size stands in for it until
+    // the file is read for real.
+    size: headerSize(res) ?? 0,
   }
 }
 

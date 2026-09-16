@@ -32,13 +32,23 @@ export class EditorView {
    * dispatch applies a replacement to the document and tells the listeners,
    * which is what the real editor does for an external value written back in and
    * what a test calls to type.
+   *
+   * A transaction may carry one change or several, and the several are applied
+   * one after another to the document as it evolves -- reading only the first
+   * shape would silently build a doubled document for the other, which is a
+   * green test over nonsense. And a transaction that changes nothing reports
+   * nothing: a component driven by a change it never made would be reacting to
+   * something no user could produce.
    */
   dispatch(update) {
-    const change = update?.changes
-    if (change) {
+    const before = this.doc
+    const changes = Array.isArray(update?.changes) ? update.changes : [update?.changes]
+    for (const change of changes) {
+      if (!change) continue
       const insert = String(change.insert ?? '')
       this.doc = this.doc.slice(0, change.from) + insert + this.doc.slice(change.to)
     }
+    if (this.doc === before) return
     const applied = { docChanged: true, state: { doc: { toString: () => this.doc } } }
     for (const listener of this.listeners) listener(applied)
   }

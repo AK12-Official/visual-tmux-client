@@ -58,20 +58,27 @@ type Confined struct {
 }
 
 // join returns the entry called name inside a confined directory.
+//
+// The refusal is carried over, deliberately. Dropping it would make one
+// derivation enough to turn a path this hub may not act on into one it acts on
+// with no boundary at all -- which is the fail-open the error exists to stop,
+// one step further away.
 func (c Confined) join(name string) Confined {
 	return Confined{
 		root: c.root,
 		path: filepath.Join(c.path, name),
 		abs:  filepath.Join(c.abs, name),
+		err:  c.err,
 	}
 }
 
-// dir returns the directory holding a confined entry.
+// dir returns the directory holding a confined entry, carrying the refusal too.
 func (c Confined) dir() Confined {
 	return Confined{
 		root: c.root,
 		path: filepath.Dir(c.path),
 		abs:  filepath.Dir(c.abs),
+		err:  c.err,
 	}
 }
 
@@ -92,11 +99,33 @@ func escapedWithin(err error) error {
 	if err == nil || errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
+	// os.Root wraps its refusal in whatever error the operation uses -- a
+	// PathError for stat and open, a LinkError for a rename -- so the wrapper is
+	// what has to be rebuilt, and the message is what decides. Missing the
+	// LinkError case would leave a refused rename reported as a server fault,
+	// which is the worst place for it: a rename is exactly what a component
+	// replaced at the wrong moment turns into.
 	var pathErr *fs.PathError
-	if errors.As(err, &pathErr) && pathErr.Err != nil && pathErr.Err.Error() == escapesFromParentMessage {
+	if errors.As(err, &pathErr) && refusesToLeave(pathErr.Err) {
 		return &fs.PathError{Op: pathErr.Op, Path: pathErr.Path, Err: fs.ErrNotExist}
 	}
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) && refusesToLeave(linkErr.Err) {
+		return &fs.PathError{Op: linkErr.Op, Path: linkErr.New, Err: fs.ErrNotExist}
+	}
 	return err
+}
+
+// refusesToLeave reports whether err, or anything it wraps, is os.Root saying
+// the path leaves its tree.
+func refusesToLeave(err error) bool {
+	for err != nil {
+		if err.Error() == escapesFromParentMessage {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
 }
 
 // openFile opens a confined path with the given flags.
@@ -247,11 +276,23 @@ func openRoots(resolved []string) ([]*os.Root, error) {
 // it: the handle on the root that contains it, together with the path relative
 // to that root.
 //
-// A path outside every configured root, and a hub with no roots at all, both
-// yield a Confined with no handle. The second is the ordinary case rather than a
-// failure: without a boundary there is nothing for a replaced component to
-// escape from, so those hubs go on acting on plain paths.
+// A hub with no roots at all yields a Confined with no handle, which is the
+// ordinary case rather than a failure: without a boundary there is nothing for a
+// replaced component to escape from, so those hubs go on acting on plain paths.
+// A path outside every configured root yields one carrying an error instead --
+// see the err field for why that must not be the same representation.
 func (s *RootSet) Confine(path string) Confined {
+	if s.closed {
+		// Closing is a test's business, and a test that closes a set while a
+		// service still holds it has made a mistake. Refusing says so; acting
+		// without the handle would be the boundary quietly disappearing, and
+		// indexing past the handles would take the test binary down with it.
+		return Confined{
+			path: path,
+			abs:  path,
+			err:  fmt.Errorf("%w: %s: the root set is closed", ErrPathNotAllowed, path),
+		}
+	}
 	for i, root := range s.roots {
 		if rel, ok := relativeTo(root, path); ok {
 			return Confined{root: s.handles[i], path: rel, abs: path}

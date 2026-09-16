@@ -53,6 +53,9 @@ type RootSet struct {
 	// roots. Acting through a handle is what closes the window between
 	// authorizing a path and performing the operation on it: see Confined.
 	handles []*os.Root
+	// closed records that Close has run, so that a set still in use refuses
+	// rather than behaving as though it had no boundary.
+	closed bool
 }
 
 // NewRootSet canonicalizes each configured root. A root that cannot be resolved
@@ -94,7 +97,11 @@ func (s *RootSet) Close() {
 	for _, handle := range s.handles {
 		_ = handle.Close() //nolint:errcheck // nothing can be done about a descriptor that will not close
 	}
+	// The roots stay and a flag records the close, rather than the handles being
+	// emptied under them: a set that forgot its roots would look unrestricted, and
+	// every later operation would run with no boundary at all.
 	s.handles = nil
+	s.closed = true
 }
 
 // Unrestricted reports whether no roots are configured.

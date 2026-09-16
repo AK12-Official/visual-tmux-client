@@ -3,6 +3,7 @@ package files
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -177,5 +178,193 @@ func TestConfineRefusesAPathOutsideEveryRoot(t *testing.T) {
 	defer unrestricted.Close()
 	if _, err := stat(unrestricted.Confine(file)); err != nil {
 		t.Errorf("an unrestricted hub must act on ordinary paths, got: %v", err)
+	}
+}
+
+// A refusal must survive the wrapper the operation happened to use. os.Root
+// reports a stat or an open through a PathError and a rename through a
+// LinkError, and a rename is the operation a component replaced at the wrong
+// moment is most likely to turn into -- so a refusal reported there as a server
+// fault would be the worst place to lose it.
+func TestARefusedRenameIsReportedAsARefusal(t *testing.T) {
+	outside := sandbox(t)
+	root := sandbox(t)
+	mustWrite(t, filepath.Join(root, "a.txt"), "contents")
+	mustSymlink(t, outside, filepath.Join(root, "escape"))
+
+	set, err := NewRootSet([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.Close()
+
+	// Both ends are inside the root as spellings, and one of them leads out of it.
+	err = renameAt(set.Confine(filepath.Join(root, "a.txt")), set.Confine(filepath.Join(root, "escape", "b.txt")))
+	if err == nil {
+		t.Fatal("a rename through a link out of the root was allowed")
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("expected the refusal to read as not-found rather than as a fault, got: %#v", err)
+	}
+	var pathErr *fs.PathError
+	if !errors.As(err, &pathErr) {
+		t.Errorf("expected a path error so a message can name the path, got: %#v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "a.txt")); statErr != nil {
+		t.Errorf("the source was moved by a refused rename: %v", statErr)
+	}
+}
+
+// A rooted rename that stays inside the root is the ordinary case and must work:
+// the handle only refuses what leaves the tree.
+func TestARootedRenameWithinTheRootSucceeds(t *testing.T) {
+	root := sandbox(t)
+	mustWrite(t, filepath.Join(root, "a.txt"), "contents")
+
+	set, err := NewRootSet([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.Close()
+
+	maxEntries, maxSize := 10, int64(1024)
+	svc := NewService(Options{Roots: set, MaxFileSize: maxSize, MaxDirEntries: maxEntries, Enabled: true})
+	if err := svc.Rename(context.Background(), filepath.Join(root, "a.txt"),
+		filepath.Join(root, "b.txt")); err != nil {
+		t.Fatalf("a rename inside the root was refused: %v", err)
+	}
+	if got := readFile(t, filepath.Join(root, "b.txt")); got != "contents" {
+		t.Errorf("expected the entry at its new name, got %q", got)
+	}
+}
+
+// A refusal has to survive being derived from: join and dir are how every
+// operation builds the path it acts on, and a derivation that dropped the
+// refusal would turn a path this hub may not use into one it uses with no
+// boundary at all.
+func TestARefusalSurvivesDerivingAPath(t *testing.T) {
+	root := sandbox(t)
+	outside := sandbox(t)
+
+	set, err := NewRootSet([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.Close()
+
+	refused := set.Confine(filepath.Join(outside, "child"))
+	for _, derived := range []Confined{refused.join("grandchild"), refused.dir(), refused.dir().join("sibling")} {
+		if _, err := stat(derived); !errors.Is(err, ErrPathNotAllowed) {
+			t.Errorf("expected %s to stay refused, got: %v", derived.abs, err)
+		}
+	}
+}
+
+// A closed set refuses rather than behaving as though it had no boundary, and
+// rather than taking the process down with an index past the handles it no
+// longer has. Closing is a test's business, so this is the shape a test mistake
+// should take.
+func TestAClosedRootSetRefusesRatherThanFailingOpen(t *testing.T) {
+	root := sandbox(t)
+	set, err := NewRootSet([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set.Close()
+	set.Close() // and a second one is harmless
+
+	if _, err := stat(set.Confine(filepath.Join(root, "a.txt"))); !errors.Is(err, ErrPathNotAllowed) {
+		t.Errorf("expected a closed set to refuse, got: %v", err)
+	}
+}
+
+// The rooted branch of every operation is a different code path from the
+// unrestricted one -- a handle rather than a plain path -- and the migration
+// rewrote all of them at once. These are the paths a coverage gap would hide, so
+// they are exercised end to end rather than through the helpers.
+func TestRootedReadServesTheFileThroughItsHandle(t *testing.T) {
+	root := sandbox(t)
+	mustWrite(t, filepath.Join(root, "a.txt"), "contents")
+
+	svc := mustRootedService(t, root)
+	result, err := svc.Read(context.Background(), filepath.Join(root, "a.txt"))
+	if err != nil {
+		t.Fatalf("reading a rooted file failed: %v", err)
+	}
+	defer func() {
+		_ = result.File.Close() //nolint:errcheck // the test is done with it
+	}()
+
+	body, err := io.ReadAll(result.File)
+	if err != nil {
+		t.Fatalf("reading the descriptor failed: %v", err)
+	}
+	if string(body) != "contents" || result.Size != int64(len("contents")) || result.Binary {
+		t.Errorf("expected the file's own bytes, got %q size=%d binary=%v", body, result.Size, result.Binary)
+	}
+}
+
+func TestRootedWriteCreatesAndThenReplacesWithItsOwnStamp(t *testing.T) {
+	root := sandbox(t)
+	svc := mustRootedService(t, root)
+	ctx := context.Background()
+	file := filepath.Join(root, "written.txt")
+
+	created, err := svc.Write(ctx, file, strings.NewReader("one"), 3, nil)
+	if err != nil {
+		t.Fatalf("creating a rooted file failed: %v", err)
+	}
+	// The stamp the write returned is what the next save is compared against,
+	// which is the property the whole optimistic flow rests on.
+	replaced, err := svc.Write(ctx, file, strings.NewReader("two"), 3,
+		&ExpectedMtime{Millis: created.Mtime, Nanos: &created.MtimeNanos})
+	if err != nil {
+		t.Fatalf("the consecutive save was refused: %v", err)
+	}
+	if replaced.MtimeNanos == 0 {
+		t.Error("a rooted write reported no modification time")
+	}
+	if got := readFile(t, file); got != "two" {
+		t.Errorf("expected the replacement contents, got %q", got)
+	}
+
+	// And a stale observation against a rooted file is refused rather than
+	// overwriting it.
+	stale := created.MtimeNanos - 1
+	if _, err := svc.Write(ctx, file, strings.NewReader("three"), 5,
+		&ExpectedMtime{Millis: created.Mtime, Nanos: &stale}); !errors.Is(err, ErrConflict) {
+		t.Errorf("expected a conflict, got: %v", err)
+	}
+}
+
+func TestRootedCreateAndDeleteActInsideTheRoot(t *testing.T) {
+	root := sandbox(t)
+	mustWrite(t, filepath.Join(root, "keep.txt"), "contents")
+	svc := mustRootedService(t, root)
+	ctx := context.Background()
+
+	if err := svc.Create(ctx, filepath.Join(root, "new.txt"), false); err != nil {
+		t.Fatalf("creating a rooted file failed: %v", err)
+	}
+	if err := svc.Create(ctx, filepath.Join(root, "newdir"), true); err != nil {
+		t.Fatalf("creating a rooted directory failed: %v", err)
+	}
+	if err := svc.Create(ctx, filepath.Join(root, "new.txt"), false); !errors.Is(err, ErrConflict) {
+		t.Errorf("expected a taken name to be refused, got: %v", err)
+	}
+
+	// A directory with something in it goes only when that was asked for.
+	mustWrite(t, filepath.Join(root, "newdir", "inside.txt"), "x")
+	if err := svc.Delete(ctx, filepath.Join(root, "newdir"), false); !errors.Is(err, ErrDirNotEmpty) {
+		t.Errorf("expected a non-empty directory to be refused, got: %v", err)
+	}
+	if err := svc.Delete(ctx, filepath.Join(root, "newdir"), true); err != nil {
+		t.Fatalf("recursive delete inside the root failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "newdir")); !os.IsNotExist(err) {
+		t.Error("the directory survived a recursive delete")
+	}
+	if got := readFile(t, filepath.Join(root, "keep.txt")); got != "contents" {
+		t.Errorf("a neighbouring file was touched: %q", got)
 	}
 }

@@ -20,7 +20,7 @@ import {
 import { basename, dirname, joinPath, quoteForShell } from '../../files/pathUtils'
 import { createRenames } from '../../files/renames'
 import { getConfig } from '../../config'
-import { choosePreview, editable, presentation } from '../../files/preview'
+import { choosePreview, editable, presentation, type Classification } from '../../files/preview'
 import {
   anyDirty,
   beginSave,
@@ -159,24 +159,41 @@ function formatSize(bytes: number): string {
 
 /** openWithoutReading opens a tab for a file whose contents are not read: an
  * image, which the preview fetches for itself, or something the hub read as
- * binary. The size is whichever of the two observations is truthful. */
-function openWithoutReading(path: string, entry: Entry, size: number) {
+ * binary. The size is whichever of the two observations is truthful.
+ *
+ * The path is corrected for a rename that landed while this was travelling, the
+ * same way the read path corrects its own. Asking the hub is an await, and a
+ * rename completing inside it moves the file exactly as a read's await allows --
+ * so a tab built at the old name would name a file that is gone, and a click on
+ * the new name would open a second tab for the one file. */
+function openWithoutReading(
+  path: string,
+  startedAt: number,
+  entry: Entry,
+  size: number,
+  binary: Classification,
+) {
+  const at = renames.resolve(path, startedAt)
+  if (tabs.value.some((tab) => tab.path === at)) {
+    activePath.value = at
+    return
+  }
   tabs.value = [
     ...tabs.value,
     {
       id: nextTabId++,
-      path,
-      name: entry.name,
+      path: at,
+      name: basename(at),
       text: '',
       saved: '',
       // From the listing, which reports milliseconds only. These files are
       // never saved, so the weaker precision costs nothing.
       stamp: stampFromList(entry.mtime),
       size,
-      binary: false,
+      binary,
     },
   ]
-  activePath.value = path
+  activePath.value = at
 }
 
 /** onImageTooLarge records the size an image preview refused to render.
@@ -314,7 +331,9 @@ async function openFile(entry: Entry, path: string) {
   try {
     const kind = choosePreview(entry.name, entry.size)
     if (kind === 'image') {
-      openWithoutReading(path, entry, entry.size)
+      // Never read and never asked about: how it is shown is decided from its
+      // name, which is all anyone knows.
+      openWithoutReading(path, startedAt, entry, entry.size, null)
       return
     }
 
@@ -329,7 +348,7 @@ async function openFile(entry: Entry, path: string) {
       const probed = await probeFile(path)
       size = probed.size
       if (probed.binary) {
-        openWithoutReading(path, entry, size)
+        openWithoutReading(path, startedAt, entry, size, true)
         return
       }
     }

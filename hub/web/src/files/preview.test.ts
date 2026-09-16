@@ -148,24 +148,31 @@ test('renderMarkdown returns what the sanitizer produced', () => {
 // must not be unmounted just because the user looked elsewhere. The second half
 // is why this is a question about a *tab*, not about the active one.
 test('the editor holds source, and nothing it must not render as text', () => {
-  assert.equal(editable('main.go', 100, false), true)
-  assert.equal(editable('notes.md', 100, false), true)
-  assert.equal(editable('photo.png', 100, false), false)
-  assert.equal(editable('archive.zip', 100, false), false)
-  // The hub's answer outranks the name in both directions.
+  // Never asked: the name is all there is to go on.
+  assert.equal(editable('main.go', 100, null), true)
+  assert.equal(editable('notes.md', 100, null), true)
+  assert.equal(editable('photo.png', 100, null), false)
+  assert.equal(editable('archive.zip', 100, null), false)
+  // The hub read it as binary: information, whatever the name says.
   assert.equal(editable('main.go', 100, true), false)
   assert.equal(editable('notes.md', 100, true), false)
-  // A name that merely suggests binary does not overrule contents the hub read
-  // as text: a log with no extension opens in the editor.
+  // The hub read it as text: the editor, whatever the name says -- which is what
+  // asking it was for.
+  assert.equal(editable('archive.zip', 100, false), true)
   assert.equal(editable('build.log', 100, false), true)
 })
 
-test('presentation follows the hub over the file name', () => {
-  assert.equal(presentation('photo.png', 100, false), 'image')
-  assert.equal(presentation('notes.md', 100, false), 'markdown')
-  assert.equal(presentation('main.go', 100, false), 'editor')
+test('presentation follows the hub over the file name, in both directions', () => {
+  assert.equal(presentation('photo.png', 100, null), 'image')
+  assert.equal(presentation('notes.md', 100, null), 'markdown')
+  assert.equal(presentation('main.go', 100, null), 'editor')
   assert.equal(presentation('main.go', 100, true), 'info')
-  // Which is the point: decoding bytes the hub read as binary is what would
-  // replace them on the next save, whatever the name suggests.
+  // Which is the point in this direction: decoding bytes the hub read as binary
+  // is what would replace them on the next save, whatever the name suggests.
   assert.equal(presentation('photo.png', 100, true), 'info')
+  // And in the other: text the hub read is text the editor gets, even when the
+  // name said otherwise. Markdown is still Markdown, because that is a rendering
+  // choice rather than a guess about the contents.
+  assert.equal(presentation('archive.zip', 100, false), 'editor')
+  assert.equal(presentation('notes.md', 100, false), 'markdown')
 })
