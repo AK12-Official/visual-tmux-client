@@ -46,12 +46,13 @@ export class EditorView {
    *     the editor reports one: the document is the same, but the change set is
    *     not empty and a listener still runs.
    *
-   * What it does *not* model is the rest of the change set: the editor composes
-   * overlapping changes and refuses a range outside the document, and this stand-in
-   * can do neither -- it would silently apply them and hand back a document the
-   * editor could never hold, which is worse than not answering. So it refuses them
-   * instead, loudly, rather than pretending. A test that needs either belongs
-   * against the real library.
+   * It refuses a change whose range lies outside the document, which is what the
+   * editor does with one. And it refuses overlapping changes, which is *not* what
+   * the editor does: the editor composes them, and this stand-in does not, so it
+   * throws rather than applying them as though it did and handing back a document
+   * the editor could never hold. That is deliberately stricter than the editor --
+   * a loud refusal where the editor would have produced a document -- and a test
+   * that needs composition belongs against the real library.
    */
   dispatch(update) {
     const changes = Array.isArray(update?.changes) ? update.changes : [update?.changes]
