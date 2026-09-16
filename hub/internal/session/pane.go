@@ -32,6 +32,46 @@ const (
 	paneRankActiveWindowPane = 3
 )
 
+// maxPaneFieldRunes caps each free-form pane field. A pane title is set by
+// whatever program runs in the pane, so it is unbounded input from outside the
+// hub: tmux will happily store and report a title of hundreds of kilobytes.
+// Without a cap, one pane could make every session-list poll carry that data,
+// in every response, for every client. The sidebar renders one ellipsised line,
+// so nothing visible is lost.
+const maxPaneFieldRunes = 200
+
+// paneChoice is the ordering key for selecting a session's representative pane.
+type paneChoice struct {
+	rank        int
+	windowIndex int
+	paneIndex   int
+}
+
+// better reports whether candidate should displace incumbent.
+//
+// Rank decides first. Equal ranks are reachable — a session whose split gives it
+// several panes in the active window, for instance — and resolving them by index
+// keeps the result a function of server state rather than of the order in which
+// tmux happens to emit panes.
+func better(candidate, incumbent paneChoice) bool {
+	if candidate.rank != incumbent.rank {
+		return candidate.rank > incumbent.rank
+	}
+	if candidate.windowIndex != incumbent.windowIndex {
+		return candidate.windowIndex < incumbent.windowIndex
+	}
+	return candidate.paneIndex < incumbent.paneIndex
+}
+
+// clampField bounds a free-form pane field to maxPaneFieldRunes.
+func clampField(value string) string {
+	runes := []rune(value)
+	if len(runes) <= maxPaneFieldRunes {
+		return value
+	}
+	return string(runes[:maxPaneFieldRunes])
+}
+
 // paneRank orders panes by how well each represents its session. A pane that has
 // exited ranks as excluded, because it no longer describes anything.
 func paneRank(p Pane) int {
@@ -55,20 +95,21 @@ func paneRank(p Pane) int {
 // rather than as an error.
 func SelectPaneSummaries(panes []Pane) map[string]PaneSummary {
 	best := make(map[string]PaneSummary)
-	ranks := make(map[string]int)
+	chosen := make(map[string]paneChoice)
 	for _, p := range panes {
 		rank := paneRank(p)
 		if rank == paneRankExcluded {
 			continue
 		}
-		if current, ok := ranks[p.Session]; ok && current >= rank {
+		candidate := paneChoice{rank: rank, windowIndex: p.WindowIndex, paneIndex: p.PaneIndex}
+		if incumbent, ok := chosen[p.Session]; ok && !better(candidate, incumbent) {
 			continue
 		}
-		ranks[p.Session] = rank
+		chosen[p.Session] = candidate
 		best[p.Session] = PaneSummary{
-			WindowName:     p.WindowName,
-			Title:          p.Title,
-			CurrentCommand: p.CurrentCommand,
+			WindowName:     clampField(p.WindowName),
+			Title:          clampField(p.Title),
+			CurrentCommand: clampField(p.CurrentCommand),
 			WindowActive:   p.WindowActive,
 		}
 	}

@@ -9,9 +9,9 @@ The web-session-manager capability is the browser client: it lists the tmux sess
 
 The client SHALL present the available tmux sessions, showing for each its name. The list SHALL also show a subtitle beneath each session's name derived from that session's representative pane, so a user can tell what a session is running without attaching to it. The list SHALL reflect server-side changes without the user having to trigger a refresh.
 
-A row SHALL show only its name and, when one is available, its subtitle. Window count and attached state SHALL NOT be shown on the row.
+A row SHALL show only its name and, when one is available, its subtitle. Window count and attached state SHALL NOT be shown on the row, and SHALL NOT be announced as part of the row either: the row's accessible name SHALL describe what the row actually displays, so that a screen-reader user is not told something a sighted user cannot see.
 
-The subtitle SHALL be taken from the first of these that is non-empty: the window name, suffixed with an asterisk when the window is active, followed by `: ` and the pane title when a title is present; otherwise the window name alone; otherwise the command currently running in the pane. When none is available the client SHALL omit the subtitle entirely rather than showing an empty or placeholder line. A subtitle SHALL NOT be shown for a session whose summary is absent, and its absence SHALL NOT be presented as an error.
+The subtitle SHALL be taken from the first of these that is non-empty: the window name — suffixed with an asterisk when the window is active — followed by `: ` and the pane title when a title is present; otherwise the window name and that asterisk on their own; otherwise the command currently running in the pane. When none is available the client SHALL omit the subtitle entirely rather than showing an empty or placeholder line. A subtitle SHALL NOT be shown for a session whose summary is absent, and its absence SHALL NOT be presented as an error. Session names are user-controlled, so the subtitle lookup SHALL treat them as opaque and SHALL NOT resolve a name such as `constructor` or `__proto__` to anything but that session's own subtitle.
 
 The subtitle is supplementary: the session name and the actions available on the row SHALL remain present and usable whether or not a subtitle is shown.
 
@@ -23,7 +23,7 @@ The subtitle is supplementary: the session name and the actions available on the
 #### Scenario: Row content
 
 - **WHEN** a session is listed
-- **THEN** its row shows its name and, when available, its subtitle, and does not show its window count or attached state
+- **THEN** its row shows its name and, when available, its subtitle, and neither shows nor announces its window count or attached state
 
 #### Scenario: Subtitle shows the window and title
 
@@ -33,7 +33,7 @@ The subtitle is supplementary: the session name and the actions available on the
 #### Scenario: Subtitle falls back to the window name
 
 - **WHEN** a session's representative pane has a window name but no title
-- **THEN** the client shows the window name as the subtitle
+- **THEN** the client shows the window name as the subtitle, marked when that window is active
 
 #### Scenario: Subtitle falls back to the running command
 
@@ -44,6 +44,11 @@ The subtitle is supplementary: the session name and the actions available on the
 
 - **WHEN** a session's pane summary is absent, or all of its components are empty
 - **THEN** the client renders the row without a subtitle and without an empty line
+
+#### Scenario: A session is named like a runtime object member
+
+- **WHEN** a session's name is `constructor`, `toString`, `valueOf`, or `__proto__`
+- **THEN** its row shows that session's own subtitle or none at all, and never a value inherited from the language runtime
 
 #### Scenario: Subtitle is supplementary
 

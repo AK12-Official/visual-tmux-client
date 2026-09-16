@@ -7,9 +7,11 @@ The session-hub capability is the server side of the product: it serves the brow
 
 ### Requirement: Session listing
 
-The hub SHALL expose an operation that returns the tmux sessions currently present on the tmux server it manages. Each returned session SHALL carry at least its name, its window count, its attached state, and its creation time. Each returned session SHALL also carry a summary of its most representative pane, comprising that pane's window name, its title, and the command currently running in it.
+The hub SHALL expose an operation that returns the tmux sessions currently present on the tmux server it manages. Each returned session SHALL carry at least its name, its window count, its attached state, and its creation time. Each returned session SHALL also carry a summary of its most representative pane, comprising that pane's window name, its title, the command currently running in it, and whether its window is the session's active window.
 
-The representative pane SHALL be chosen by skipping panes that have exited and then preferring, in order: a pane that is both in the active window and active, then an active pane, then a pane in the active window, then any remaining live pane. Window names, pane titles, and commands are free-form text and SHALL be parsed without assuming any character is absent from them.
+The representative pane SHALL be chosen by skipping panes that have exited and then preferring, in order: a pane that is both in the active window and active, then an active pane, then a pane in the active window, then any remaining live pane. Panes of equal rank SHALL be separated by the lowest window index and then the lowest pane index, so the choice is a function of server state rather than of the order in which tmux emits panes.
+
+Window names, pane titles, and commands are free-form text and SHALL be parsed without assuming any character other than the record terminator is absent from them. Each SHALL be capped in length before it is returned, so that one pane cannot inflate every listing response, and the cap SHALL be applied at character boundaries rather than mid-character. A record that does not carry the expected number of fields SHALL be omitted rather than reported, so that a separator inside a value can never shift one pane's title onto another pane.
 
 When no representative pane can be determined, or when the pane query fails, the hub SHALL still return the session list successfully with the summary absent for the affected sessions, rather than failing the listing.
 
@@ -21,12 +23,17 @@ When no representative pane can be determined, or when the pane query fails, the
 #### Scenario: Pane summary is present
 
 - **WHEN** a caller requests the session list and a session has at least one live pane
-- **THEN** that session's entry carries the representative pane's window name, title, and current command
+- **THEN** that session's entry carries the representative pane's window name, title, current command, and whether that pane's window is the active one
 
 #### Scenario: Represented pane selection
 
 - **WHEN** a session has several live panes, one of them the active pane of the active window
 - **THEN** the summary describes that pane rather than any other
+
+#### Scenario: Equal-ranked panes
+
+- **WHEN** a session has several live panes that rank equally, and tmux reports them in an arbitrary order
+- **THEN** the summary describes the one in the lowest-numbered window, or in the lowest-numbered pane when they share a window, regardless of the order they were reported in
 
 #### Scenario: Exited panes are ignored
 
@@ -41,7 +48,12 @@ When no representative pane can be determined, or when the pane query fails, the
 #### Scenario: Free-form window name and title
 
 - **WHEN** a session's window name, pane title, or current command contains separator characters, spaces, or non-ASCII text
-- **THEN** the hub reports those values verbatim without truncation or misattribution between fields
+- **THEN** the hub reports those values as tmux gave them, without misattribution between fields
+
+#### Scenario: Oversized pane field
+
+- **WHEN** a pane's window name, title, or current command is longer than the length cap
+- **THEN** the hub returns the value capped, cut at a character boundary, rather than returning it in full
 
 #### Scenario: No sessions exist
 

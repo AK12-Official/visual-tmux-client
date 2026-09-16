@@ -2,6 +2,9 @@ package tmux
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -104,8 +107,38 @@ func TestPaneFormatFieldCountMatchesParser(t *testing.T) {
 
 func TestListPanesReportsWhenTmuxIsUnavailable(t *testing.T) {
 	c := NewClient("/nonexistent/tmux-binary-for-test", "")
-	if _, err := c.ListPanes(context.Background()); err == nil {
+	_, err := c.ListPanes(context.Background())
+	if err == nil {
 		t.Fatalf("expected an error when tmux cannot be resolved")
+	}
+	// A caller has to be able to tell "tmux is not installed" from "there are no
+	// panes", which is what an untyped error or an empty slice would conflate.
+	if !errors.Is(err, session.ErrTmuxNotFound) {
+		t.Errorf("error = %v, want it to wrap session.ErrTmuxNotFound", err)
+	}
+}
+
+// The one failure the no-server branch must not swallow: tmux exists, runs, and
+// fails for some other reason. Reporting that as "no panes" would hide a broken
+// server behind a silently empty listing.
+func TestListPanesReportsAFailedQuery(t *testing.T) {
+	fake := filepath.Join(t.TempDir(), "tmux")
+	script := "#!/bin/sh\necho 'server exited unexpectedly' >&2\nexit 1\n"
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	c := NewClient(fake, "")
+
+	_, err := c.ListPanes(context.Background())
+	if err == nil {
+		t.Fatalf("expected an error when tmux runs but the query fails")
+	}
+	if !strings.Contains(err.Error(), "server exited unexpectedly") {
+		t.Errorf("error should carry tmux's message, got %v", err)
+	}
+	// It must not be mistaken for the no-server case, which is not an error.
+	if strings.Contains(err.Error(), "exec ") {
+		t.Errorf("a non-zero exit was reported as an exec failure: %v", err)
 	}
 }
 

@@ -38,6 +38,15 @@ var PaneFormat = strings.Join([]string{
 // A record that does not carry exactly paneFieldCount fields is dropped rather
 // than guessed at: a mis-attributed title would be shown to the user as fact,
 // which is worse than showing no summary at all.
+//
+// Records are split on newlines before the field count is checked, so a newline
+// inside a field splits one pane's record in two, and the tail is then either
+// dropped (the usual case) or, if it happens to carry enough separators of its
+// own, read as a record for a session that does not exist. Field-order is
+// therefore not guaranteed against a value containing a raw newline. That is
+// accepted: tmux rejects a newline in a window name and strips one from a pane
+// title, leaving a process whose executable name contains one, which is not
+// reachable in practice.
 func ParsePanes(stdout string) []session.Pane {
 	out := make([]session.Pane, 0)
 	for _, line := range strings.Split(stdout, "\n") {

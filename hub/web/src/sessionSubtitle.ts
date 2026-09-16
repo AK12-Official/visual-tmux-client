@@ -15,7 +15,9 @@ const ACTIVE_WINDOW_MARK = '*'
  * Precedence, matching the reference implementation:
  *   1. `windowName` (with an asterisk when the window is active), followed by
  *      `: ` and the pane title when a title is present
- *   2. the command currently running in the pane
+ *   2. `windowName` alone, when there is no title (still marked with the
+ *      asterisk if the window is active)
+ *   3. the command currently running in the pane
  *
  * Returning null rather than an empty string lets callers omit the line
  * entirely, so a row never renders an empty element or a placeholder.
@@ -32,4 +34,28 @@ export function formatPaneSubtitle(pane: PaneSummary | null | undefined): string
 
   const command = (pane.current_command ?? '').trim()
   return command || null
+}
+
+/**
+ * buildSubtitleMap derives each row's subtitle from its session's pane summary,
+ * keyed by session name. Sessions with nothing to show are omitted rather than
+ * mapped to an empty string, so a row renders no element at all.
+ *
+ * The result has a null prototype deliberately. Session names are
+ * user-controlled (any name tmux accepts, including `constructor`, `toString`
+ * or `__proto__`), and on a plain object literal those resolve to inherited
+ * Object.prototype members: a row with no summary would test as truthy and
+ * render that member's source as its subtitle, and `__proto__` would silently
+ * swallow the assignment so a real subtitle never appeared. App.vue's nameMap()
+ * guards the same hazard for the maps it keeps.
+ */
+export function buildSubtitleMap(
+  sessions: ReadonlyArray<{ name: string; pane?: PaneSummary | null }>,
+): Record<string, string> {
+  const out: Record<string, string> = Object.create(null)
+  for (const session of sessions) {
+    const text = formatPaneSubtitle(session.pane)
+    if (text) out[session.name] = text
+  }
+  return out
 }
