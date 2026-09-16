@@ -197,7 +197,15 @@ func TestListPanesReportsEveryPane(t *testing.T) {
 		t.Fatalf("ListPanes failed: %v", err)
 	}
 	if len(panes) != 2 {
-		t.Fatalf("got %d panes, want 2", len(panes))
+		// Report what tmux actually said rather than only the count: this test
+		// failing with "0 panes" is otherwise indistinguishable between an empty
+		// listing, a query error and a server that has gone away, and the three
+		// have different causes.
+		out, outErr, code, execErr := c.Exec(ctx, "list-panes", "-a", "-F", PaneFormat)
+		names, namesErr, nameCode, listErr := c.Exec(ctx, "list-sessions", "-F", "#{session_name}")
+		t.Fatalf("got %d panes, want 2\ntmux list-panes: code=%d err=%v errout=%q out=%q\n"+
+			"tmux list-sessions: code=%d err=%v errout=%q out=%q",
+			len(panes), code, execErr, outErr, out, nameCode, listErr, namesErr, names)
 	}
 	for _, p := range panes {
 		if p.Session != "panes" {
