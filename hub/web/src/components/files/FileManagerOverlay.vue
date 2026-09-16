@@ -22,7 +22,8 @@ import { createPending } from '../../files/pending'
 import { reasonFor as reasonForCode } from '../../files/reasons'
 import { createRenames } from '../../files/renames'
 import { getConfig } from '../../config'
-import { choosePreview, editable, presentation, type Classification } from '../../files/preview'
+import type { Classification } from '../../files/classification'
+import { choosePreview, editable, presentation } from '../../files/preview'
 import {
   anyDirty,
   beginSave,
@@ -809,7 +810,11 @@ async function download(path: string, name: string) {
 async function copyPathToClipboard(path: string) {
   const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
   if (!clipboard) {
-    emit('notice', 'Copy failed: the browser exposes no clipboard outside a secure context.', 'warning')
+    emit(
+      'notice',
+      'Copy failed: this browser exposes no clipboard here. It needs a secure context, and not every browser provides one.',
+      'warning',
+    )
     return
   }
   try {

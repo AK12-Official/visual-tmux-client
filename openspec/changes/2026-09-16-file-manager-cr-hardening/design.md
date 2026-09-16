@@ -473,6 +473,23 @@ reads (rejected: a build step and a generated artifact for eleven strings).
   acts on that answer: every operation that touches the filesystem re-enters through `Confine` and is
   refused. Unreachable once the HTTP server has stopped, which is when `Shutdown` closes the set --
   but reachable by an embedder, which is the stated reason `Close` exists at all, so it is named.*
+- **[Accepted] Two exit paths in the CLI do not close the root handles.** → *`run` returns from a
+  failed `Start`, and from the `errCh` branch when `Serve` returns without a shutdown, without
+  calling `App.Shutdown`. `main` exits immediately after either, and the operating system reclaims
+  the descriptors, so nothing leaks in the shipped binary. It is named because `RootSet.Close` is
+  justified by an embedder that outlives the process, and an embedder reusing `run` would inherit
+  exactly these paths.*
+- **[Pre-existing, named not fixed] The in-app help renders Markdown without sanitizing it.** → *`HelpModal.vue` runs `marked.parse` straight into `v-html`, where `MarkdownPreview` runs the same parse through `renderMarkdown` and DOMPurify. The file-manager specification's "Preview rendering safety" requirement governs previewed *file* content and is not violated -- the guide is not file content -- and the in-app-help specification is silent. The injection surface is the build, not the user: the guide is compiled into the binary and fetched from the hub's own origin. Left alone because it is untouched by this change (two components doing one operation differently is a pre-existing inconsistency, not one this change created), and named here because a reader comparing the two would otherwise conclude the difference was considered.*
+- **[Pre-existing, named not fixed] Two message paths the error table does not cover.** → *`report`
+  in the manager maps a `FileApiError` to its code and everything else through `String(err)`, so a
+  token rejected mid-session reaches the user as `Could not open x.txt: AuthError: AUTH_FAILED`, and
+  a transport failure as `...: TypeError: Failed to fetch`. `files/reasons.ts` and its test enumerate
+  the codes the *hub* answers with; what the *browser* raises on its own is a second vocabulary that
+  nothing checks. And `listDirectory` does not guard a malformed 200 the way `writeFile` does, so a
+  non-JSON body surfaces as a `SyntaxError` through the same path. Both predate this change and are
+  unchanged by it -- the manager's `report` is byte-identical to `main` -- which is why they are
+  recorded here rather than swept up: what this change added is the table and the test that make the
+  gap visible.*
 - **[Accepted] A decode failure is sticky until the preview is remounted.** → *`undecodable` is
   cleared by `release()`, which runs on a path change or an unmount. The preview is mounted only for
   the active tab, so switching away and back re-runs the load and clears it -- but a file repaired on

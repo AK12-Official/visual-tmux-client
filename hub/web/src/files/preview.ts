@@ -7,6 +7,7 @@
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { classifyExtension } from './binaryExtensions'
+import type { Classification } from './classification'
 
 /** PreviewKind is what the manager should show for a file. */
 export type PreviewKind =
@@ -47,23 +48,10 @@ export function choosePreview(name: string, size: number): PreviewKind {
   }
 }
 
-/**
- * Classification is what the hub said about a file's contents, or null when it
- * was never asked.
- *
- * Three states, not two, because "not binary" and "not known" are different
- * questions with different answers: a file the hub read as text is shown as text
- * whatever it is called, and a file nobody read is shown according to its name.
- * A boolean could not tell those apart, and the first thing that went wrong was
- * that a text file named `notes.dat` was read, classified as text, and then
- * presented as binary anyway -- by its own name, which the classification was
- * supposed to have overruled.
- */
-export type Classification = boolean | null
 
 /**
  * presentation decides how a file's contents are shown, given the hub's
- * classification of them.
+ * classification of them (see Classification in ./classification).
  *
  * The classification answers one question -- may these bytes be decoded as text?
  * -- and it is the answer to that question, not to "what is this file?", which

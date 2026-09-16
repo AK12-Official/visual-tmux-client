@@ -971,11 +971,13 @@ func (s *Service) Delete(ctx context.Context, path string, recursive bool) error
 		return classifyPathError(path, remove(target))
 	}
 	if !recursive {
-		children, err := readDir(target)
+		// One entry is all it takes to know, and reading more would make the cost
+		// of refusing a directory the size of the directory. See dirHasEntries.
+		hasEntries, err := dirHasEntries(target)
 		if err != nil {
 			return classifyPathError(path, err)
 		}
-		if len(children) > 0 {
+		if hasEntries {
 			return fmt.Errorf("%w: %s", ErrDirNotEmpty, path)
 		}
 		return classifyPathError(path, remove(target))

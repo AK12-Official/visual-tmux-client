@@ -7,7 +7,7 @@
 // question about a file name would drag it in for nothing.
 
 import { writeFile, type Stamp } from './api'
-import type { Classification } from './preview'
+import type { Classification } from './classification'
 
 /** OpenFile is one file open in the editor. */
 export interface OpenFile {
@@ -43,7 +43,7 @@ export interface OpenFile {
    * and a wrong guess either mojibakes a file or refuses to open one that is
    * text. Null is a different answer from false, and has to be: an image is
    * never read, and a file the hub read as text is shown as text however it is
-   * named. See Classification in preview.ts.
+   * named. See Classification in ./classification.
    */
   binary: Classification
 }

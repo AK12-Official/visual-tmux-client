@@ -94,7 +94,7 @@ evidence is the line named in the table:
 | F1 the `moved` notice asserted something false | CLOSED | the text now claims only what the client did |
 | F2 the overlay integration is untested | PARTIAL | see below |
 | F3 dead `immediate: true` | CLOSED | flag and its stale comment gone |
-| F4 `tabs.ts` importing the renderer | CLOSED | it imports `./api` only |
+| F4 `tabs.ts` importing the renderer | CLOSED | it imports `./api` only *(corrected in the seventh review: it also imported the `Classification` type from `./preview`, which erases at compile time but names the sanitizer's module; the type now lives in `files/classification.ts`)* |
 | F5 unqualified history guarantee | CLOSED | spec sentence qualified |
 | F6 unvalidated exact time | CLOSED | `exactNanos`, and this round bounded it to int64 |
 | D1 `roots` statement self-contradicting | CLOSED | spec rewritten |
@@ -566,3 +566,62 @@ with any behaviour at all. The findings have been in the *record* — sentences 
 left standing after the thing they described was replaced — for three rounds running, and each round
 writes more of that record, which is what the next round checks. The lever is to stop growing the
 narrative, not to keep reviewing it.
+
+## The seventh review of the change
+
+The five rounds before this one all reviewed the *latest commit's delta*. This one asked a different
+question of three fresh reviewers: read the branch as one artifact — the code the fifteen commits
+produced, its seams, its configuration, its product documentation — and say whether you would merge
+it. None of them had seen any of it before.
+
+The result is the strongest evidence the change has had, and it is worth stating in their terms
+rather than mine: two of the three opened their verdict with "nothing blocking" / "no", and the
+third's one actionable finding was about a module boundary rather than behaviour.
+
+### What the whole-change read bought that the deltas could not
+
+- **`Delete`'s emptiness check was the last unbounded operation**, and no delta review could see it:
+  each had looked at the commit that introduced a bounded reader, not at the sibling call the change
+  had routed through the new helper without noticing it answers the same question the expensive way.
+  A directory holding a hundred thousand entries cost a hundred thousand entries' worth of memory to
+  establish that it was not empty — in a change whose own design notes promise the opposite. Fixed by
+  reading one entry.
+- **A module boundary that held only by a keyword.** `tabs.ts` claims to be free of the renderer and
+  named the renderer's module in an `import type`. `Classification` now lives in a leaf module of its
+  own. This one had been *declared closed* by the second review, on the evidence that `tabs.ts`
+  imports `./api` only — which was wrong then and is recorded as wrong now.
+- **The seams, re-derived rather than trusted.** That the staging record, the listing filter and the
+  confinement layer all key on the same canonical string; that `looksBinary` scans `[0, size)` while
+  the transport serves `SectionReader(file, 0, size ≤ that)`, so the classification covers a superset
+  of the bytes sent; that `readListing` is correct at both `limit` and `limit+1`, because
+  `File.ReadDir` returns `io.EOF` only alongside an empty slice; and that read and write *follow* a
+  final symlink while delete and rename do not, which is what each operation means.
+- **A product-claim audit that checked numbers, not prose.** Every documented configuration key and
+  environment variable, every quantity the product states, the boundary paragraph, the reserved
+  session-name set, the tmux defaults and `SECURITY.md` were each checked against the code that
+  implements them, and a sweep for the wording this change superseded found none of it left.
+
+### What it found that the deltas had also missed, and what was done with it
+
+Three items were named rather than changed, all pre-existing: the in-app help renders Markdown
+without sanitizing (bounded — the guide is compiled into the binary); two CLI exit paths return
+without closing the root handles (bounded — the process exits); and the manager's `report` renders a
+rejected token and a transport failure as `AuthError: AUTH_FAILED` and `TypeError: Failed to fetch`,
+with `listDirectory` not guarding a malformed body where `writeFile` does. Each is in `design.md`'s
+accepted items with the reason it is bounded, which is the same disposition the change gives its own
+residuals — the difference being that these predate it.
+
+Two of the audit's findings *were* this change's, and both were overstatements of the same kind it
+had spent five rounds removing: the READMEs said a file over the preview bound is "transferred no
+further than the bound" without the condition that makes it true, and a clipboard notice named one
+cause as though it were the only one. Both corrected.
+
+### On stopping
+
+The trajectory over seven rounds: a data race and a real ordering hole; a predicate written in one
+direction; one narrow gap in the guard added to fix it; then nothing wrong with behaviour in two
+consecutive rounds of fix-review; and now, on a fresh whole-change read by reviewers who had seen
+none of it, no correctness or boundary defect either. What remains is a list of accepted costs and
+pre-existing gaps, each with the reason it is bounded — which is the state this change set out to
+reach, and the point at which another round would be reviewing its own summaries rather than the
+code.

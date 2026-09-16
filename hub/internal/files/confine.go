@@ -3,6 +3,7 @@ package files
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -181,23 +182,32 @@ func lstat(c Confined) (os.FileInfo, error) {
 	return info, escapedWithin(err)
 }
 
-// readDir reads a whole confined directory. The batched reader used by List asks
-// the descriptor directly, because a listing must not read more than its bound.
-func readDir(c Confined) ([]os.DirEntry, error) {
+// dirHasEntries reports whether a confined directory holds anything, reading no
+// more than it must to answer that.
+//
+// The question is "is there at least one entry", and the whole-directory reader
+// answers it by reading all of them -- sorted, in the unconfined branch. A
+// directory holding a hundred thousand entries would cost a hundred thousand
+// entries' worth of memory to decide that it is not empty. Delete asks this of a
+// directory the caller has not asked to recurse into, so without this the cost of
+// *refusing* is set by the size of what is being refused, which is the one place
+// left where an operation's cost is the disk's rather than a configured limit's.
+func dirHasEntries(c Confined) (bool, error) {
 	if c.err != nil {
-		return nil, c.err
-	}
-	if c.root == nil {
-		return os.ReadDir(c.path)
+		return false, c.err
 	}
 	handle, err := openDir(c)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 	defer func() {
-		_ = handle.Close() //nolint:errcheck // the entries have already been read
+		_ = handle.Close() //nolint:errcheck // the count has already been read
 	}()
-	return handle.ReadDir(-1)
+	entries, err := handle.ReadDir(1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	return len(entries) > 0, nil
 }
 
 // mkdir creates one confined directory.
