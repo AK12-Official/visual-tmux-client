@@ -31,6 +31,14 @@ let objectUrl: string | null = null
 // newer one started -- or after the component is gone -- must not adopt its blob,
 // because the handle to the URL it replaced would be lost and never revoked.
 let loadAt = 0
+// shownAt is the load the URL on screen came from, and the decode handler needs
+// it for the same reason the fetch has a ticket: revoking a blob to make room for
+// the next file aborts that file's decode, and the browser then raises `error`
+// for a URL this component has already let go of. Without this, that stale event
+// -- which the revoke queues ahead of the next fetch, so it usually arrives first
+// -- would mark the *next* file undecodable, name it in a warning, and hide the
+// image that would have rendered.
+let shownAt = -1
 
 function release() {
   if (objectUrl !== null) {
@@ -39,9 +47,13 @@ function release() {
   }
   url.value = ''
   undecodable.value = false
+  shownAt = -1
 }
 
 function onDecodeFailed() {
+  // An event for a URL this component is no longer showing says nothing about
+  // what it is showing now.
+  if (shownAt !== loadAt) return
   undecodable.value = true
   emit(
     'notice',
@@ -69,6 +81,7 @@ watch(
       }
       objectUrl = URL.createObjectURL(fetched.blob)
       url.value = objectUrl
+      shownAt = attempt
     } catch (err) {
       if (attempt !== loadAt) return
       emit('notice', `Could not preview ${path}: ${String(err)}`, 'error')

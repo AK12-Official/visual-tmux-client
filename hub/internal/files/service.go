@@ -70,7 +70,8 @@ type Service struct {
 // A missing root set becomes an empty one rather than staying nil, because every
 // method here goes through it: a nil one would be a service that panics on the
 // first call rather than a service with no boundary, and that is not a state this
-// type offers. The transport builds the unrestricted set the same way.
+// type offers. The composition root builds the unrestricted set the same way,
+// from a configuration that names no roots.
 func NewService(opts Options) *Service {
 	roots := opts.Roots
 	if roots == nil {
@@ -714,7 +715,7 @@ func (s *Service) writeAtomically(
 	}
 
 	if err := renameAt(staged, target); err != nil {
-		return WriteResult{}, fmt.Errorf("%w: %w", ErrWriteFailed, err)
+		return WriteResult{}, writeFailure(target.abs, err)
 	}
 	committed = true
 
@@ -771,6 +772,17 @@ func confirmUnchanged(target Confined, opts writeOptions) error {
 	return nil
 }
 
+// writeFailure reports a write or removal that could not be completed. A handle
+// closed by a shutdown is the one case that is not a write failure: it is the
+// same cause the closed set reports, and it is reported the same way here so that
+// one cause does not answer differently depending on which route it reached.
+func writeFailure(display string, err error) error {
+	if closed := closedRootError(display, err); closed != nil {
+		return closed
+	}
+	return fmt.Errorf("%w: %w", ErrWriteFailed, err)
+}
+
 // stageFailure reports why a staging file could not be created. A target whose
 // directory is missing, or is not writable, is the caller's situation rather
 // than a server fault, so it is reported the way the other operations report it
@@ -788,7 +800,7 @@ func stageFailure(display string, err error) error {
 	case errors.Is(err, syscall.ENAMETOOLONG):
 		return fmt.Errorf("%w: %s leaves no room for a staging file", ErrInvalidPath, display)
 	default:
-		return fmt.Errorf("%w: %w", ErrWriteFailed, err)
+		return writeFailure(display, err)
 	}
 }
 
@@ -968,7 +980,7 @@ func (s *Service) Delete(ctx context.Context, path string, recursive bool) error
 		return classifyPathError(path, remove(target))
 	}
 	if err := removeAll(target); err != nil {
-		return fmt.Errorf("%w: %w", ErrWriteFailed, err)
+		return writeFailure(path, err)
 	}
 	return nil
 }

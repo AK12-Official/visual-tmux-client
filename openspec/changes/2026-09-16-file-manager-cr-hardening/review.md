@@ -341,7 +341,9 @@ breaks it, and the tests both deleted a *file*. There is a directory test now.
 - "Nothing reaches it: a rename names a sibling of its source." A destination typed into the prompt
   may descend, and a link on the way may lead into another configured root — so the refusal is
   reachable from the browser and needed a client message, which the same round's other reviewer had
-  separately reported missing. Corrected in four places.
+  separately reported missing. The sentence was in six places (`confine.go`, both specifications,
+  both READMEs, `design.md`) and all six were corrected — though the first attempt at that is itself
+  the first item of the next round, below.
 - "`renameAt` is the last call in the package on a plain path." Every helper has a plain-path
   branch; what is true is that with roots configured none of those branches is reachable.
 - "The write that never answers leaves the delete unsent" — true, and incomplete: the marker stays
@@ -372,3 +374,69 @@ reads across the language boundary, and the only way to hold the two halves agai
 - A delete waiting on a write that never answers waits forever, and the marker stays up with it.
   Named in `design.md` 1b rather than described as transient; the tree still shows the file, which is
   the truth.
+
+## The fourth review of the change
+
+Three subagents, again read-only and disjoint: Go confinement and synchronization; the browser; and
+claims, tests and docs. Their brief was to attack the fixes rather than the original code, which is
+where the previous rounds kept finding things — and this one was no different. Four of the findings
+below are defects the fixes introduced.
+
+### A relation written in one direction, used from both ends
+
+The worst of them, and the one nobody reported: it was found by a test written to close a coverage
+gap the browser reviewer had just named. He observed that the *wait* was covered end to end and the
+*refusal* only through the predicate's own unit test, so a mounted test was added for the refusal —
+and it failed immediately, because `isPending` and `idle` are asked from opposite ends and had been
+given one predicate. A delete names an entry and waits for the writes inside it; a save names an
+entry and asks whether anything holding it is being deleted. "Covers what is beneath it" is right for
+the first and exactly backwards for the second, so a save of `/d/dir/f.txt` was refused by an
+outstanding delete of that file and *not* by one of `/d/dir`.
+
+The unit tests had agreed with it, because they asked the predicate from the same end the
+implementation answered from. That is the general lesson of this round, and the reason a coverage
+gap is worth closing even when the code looks right.
+
+### A decode event with no ticket
+
+`ImagePreview` guards its fetch with a ticket precisely because a load can be superseded, and the
+`@error` handler added in the previous commit was the one path in the file without one. Leaving a
+file for another revokes its blob, which aborts the decode and raises `error` for a URL the component
+has already let go of — and the revoke queues that event ahead of the next fetch, so it normally
+arrives while the next file is still loading. Unticketed it marked the *next* file undecodable, named
+it in a warning, and hid the image that would have rendered. Fixed by recording which load the URL on
+screen came from.
+
+### One cause, two answers
+
+Making `Close` a production path meant an operation could fail with a handle closed underneath it,
+and the previous commit mapped that to `path_not_allowed` — but only on the routes that classify
+through `classifyPathError`. A write and a recursive delete report their own failures, so the same
+shutdown race answered `write_failed` on them. The mapping is now shared by all of them.
+
+### Four claims that were still wrong
+
+The pattern this change keeps producing, and this round produced four more:
+
+- `tasks.md` 12.1 still carried the sentence the next item claimed to have corrected.
+- The replacement sentence in `design.md` — "no operation reaches a syscall on a plain path" — was
+  false too, and contradicted `review.md` ninety lines away: the authorization walk itself runs on
+  plain paths, whatever the configuration. `Resolve` canonicalizes and `Lstat`s them; that is what
+  authorizing a path *is*. What is true is narrower: none of the `c.root == nil` branches in
+  `confine.go` is reachable with roots configured.
+- "Corrected in four places" was six.
+- `reasons.ts` claimed reading the Go file was the only way to hold both halves of the code list
+  together, where a generated artifact would also do it, at the cost of a build step.
+
+### Findings accepted rather than fixed
+
+- A listing that loses its handles to a shutdown degrades: an entry whose metadata cannot be read is
+  reported without its size rather than failing the listing, which is what `entryFor` does by design.
+  Newly reachable — before this change the same race panicked — and left as it is.
+- `NewService` substituting an empty root set for a nil one makes "forgot the roots" and "wanted no
+  roots" the same thing at that layer, in the permissive direction. Deliberate: an empty set is the
+  documented default configuration, and the distinction belongs where configuration is read. The
+  comment records the choice.
+- The commit message for the previous round filed the substitution under "claims corrected" when it
+  also changed behaviour. The record has it in `tasks.md` 13.6 and `design.md` 6; noted here because
+  the message alone reads as though nothing changed.

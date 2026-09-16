@@ -12,15 +12,15 @@
 // a save that crossed the second would then be recorded as saved, which is the
 // wrong answer the record exists to prevent.
 //
-// A path and everything beneath it, not the path alone. A delete or a rename
-// names an entry, and the writes that cross it name what is inside: a save of
-// /d/dir/f.txt is one a delete of /d/dir has to wait for, and a save of that
-// file is one a delete of /d/dir must not start. Reading this as exact-path was
-// the first version's mistake, and it survived because the obvious caller -- the
-// delete waiting for the tabs it is about to close -- happens to name the same
-// paths. It stops being obvious the moment a tab is closed while its write is
-// still travelling: the record is keyed by the path the write named, and the tab
-// it came from is gone.
+// An operation covers its neighbourhood rather than one exact path, and the two
+// questions below are asked from opposite ends of it: a delete names an entry and
+// waits for the writes inside it, so it looks *down*; a save names an entry and
+// asks whether anything holding it is being deleted or renamed, so it looks *up*.
+// Both were written as exact-path first, and that survived because the obvious
+// caller -- a delete waiting for the tabs it is about to close -- happens to name
+// the same paths. It stops being obvious the moment a tab is closed while its
+// write is still travelling: the record is keyed by the path the write named, and
+// the tab it came from is gone.
 //
 // What the record is for, in all three of its uses: an operation the browser has
 // sent can be interleaved with another, on the hub, in an order the browser
@@ -39,22 +39,38 @@ export interface Pending {
   /** end records that the operation naming `path` has been answered. */
   end(path: string): void
   /**
-   * isPending reports whether an operation naming `path`, or anything beneath
-   * it, is in flight.
+   * isPending reports whether an operation naming `path`, or naming a directory
+   * above it, is in flight.
+   *
+   * The direction is *upwards*, and that is what its callers ask. A save is about
+   * to name a file, and what makes it unsafe to send is an operation on that file
+   * or on something holding it: a delete of the directory it is in, a rename of
+   * that directory. Looking downwards instead -- at what is inside the path --
+   * would answer a question no caller has, and would miss the one they do.
    */
   isPending(path: string): boolean
   /**
    * idle resolves once nothing is outstanding for `path` or anything beneath it.
    *
-   * What it waits for is a subtree that is clear at the moment it looks, not one
-   * that can never be busy again: the predicate is asked again after every
-   * answer, so an operation begun while the subtree is still busy extends the
-   * wait, and one begun after it has been reported clear is simply a later
-   * operation. That last case is not covered here and does not need to be: the
-   * caller that waits is a delete, which records itself as outstanding before it
-   * waits, and a save declines to start against an outstanding delete.
+   * The direction is *downwards*, deliberately the opposite of isPending, and
+   * likewise what its caller asks. A delete names a directory or a file, and the
+   * writes it has to wait for are the ones naming that entry or what is inside
+   * it. Waiting upwards as well would have a delete of a file wait on a delete of
+   * its directory, which is unrelated work.
    */
   idle(path: string): Promise<void>
+}
+
+/**
+ * within reports whether `path` is `root` itself or an entry beneath it.
+ *
+ * A prefix is a path element, not a string: /d/a does not hold /d/ab. The
+ * trailing separator is checked rather than appended blindly, because the
+ * filesystem root is a path like any other and "/" + "/" names nothing.
+ */
+function within(path: string, root: string): boolean {
+  if (path === root) return true
+  return root.endsWith('/') ? path.startsWith(root) : path.startsWith(`${root}/`)
 }
 
 export function createPending(): Pending {
@@ -64,24 +80,16 @@ export function createPending(): Pending {
   // with the counts.
   let waiters: { path: string; settle: () => void }[] = []
 
-  /**
-   * covers reports whether an operation naming `candidate` is one that `path`
-   * has to account for.
-   *
-   * A prefix is a path element, not a string: /d/a does not cover /d/ab. The
-   * trailing separator is checked rather than appended blindly, because the
-   * filesystem root is a path like any other and "/" + "/" names nothing.
-   */
-  function covers(candidate: string, path: string): boolean {
-    if (candidate === path) return true
-    return path.endsWith('/') ? candidate.startsWith(path) : candidate.startsWith(`${path}/`)
-  }
-
-  function busy(path: string): boolean {
-    for (const candidate of counts.keys()) {
-      if (covers(candidate, path)) return true
+  /** any reports whether some outstanding path satisfies the predicate. */
+  function any(matches: (outstanding: string) => boolean): boolean {
+    for (const outstanding of counts.keys()) {
+      if (matches(outstanding)) return true
     }
     return false
+  }
+
+  function busyBeneath(path: string): boolean {
+    return any((outstanding) => within(outstanding, path))
   }
 
   function settleIdleWaiters() {
@@ -93,7 +101,7 @@ export function createPending(): Pending {
       // subtree is still busy keeps the wait open instead of slipping past it:
       // nothing resolves except from this scan, and this scan sees a count that
       // a later `begin` has already raised.
-      if (busy(waiter.path)) stillWaiting.push(waiter)
+      if (busyBeneath(waiter.path)) stillWaiting.push(waiter)
       else waiter.settle()
     }
     waiters = stillWaiting
@@ -110,10 +118,10 @@ export function createPending(): Pending {
       settleIdleWaiters()
     },
     isPending(path) {
-      return busy(path)
+      return any((outstanding) => within(path, outstanding))
     },
     idle(path) {
-      if (!busy(path)) return Promise.resolve()
+      if (!busyBeneath(path)) return Promise.resolve()
       return new Promise((settle) => {
         waiters.push({ path, settle })
       })

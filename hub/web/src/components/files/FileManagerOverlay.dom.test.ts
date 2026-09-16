@@ -278,7 +278,7 @@ test('an answer that crossed a rename is not recorded as a save', async () => {
   assert.equal(wrapper.find('.fm__dirty').exists(), true, 'the tab must stay modified')
   const notices = (wrapper.emitted('notice') ?? []).flat()
   assert.ok(
-    notices.some((text) => String(text).includes('renamed while it was saved')),
+    notices.some((text) => String(text).includes('was in flight while it was saved')),
     `expected a notice about the rename, got ${JSON.stringify(notices)}`,
   )
 
@@ -482,8 +482,8 @@ test('a save is refused while the delete of that file is in flight', async () =>
   )
   const notices = (wrapper.emitted('notice') ?? []).flat()
   assert.ok(
-    notices.some((text) => String(text).includes('is being deleted')),
-    `expected a notice that the file is being deleted, got ${JSON.stringify(notices)}`,
+    notices.some((text) => String(text).includes('A delete of a.txt is in flight')),
+    `expected a notice that a delete is in flight, got ${JSON.stringify(notices)}`,
   )
 
   remove.release(new Response(null, { status: 204 }))
@@ -529,7 +529,7 @@ test('one of two renames being answered does not clear the other', async () => {
   )
   const notices = (wrapper.emitted('notice') ?? []).flat()
   assert.ok(
-    notices.some((text) => String(text).includes('renamed while it was saved')),
+    notices.some((text) => String(text).includes('was in flight while it was saved')),
     `expected a notice about the crossing rename, got ${JSON.stringify(notices)}`,
   )
 
@@ -711,6 +711,115 @@ test('an image that cannot be decoded offers the file instead of an empty frame'
     calls.some((call) => call.url.includes('/files/download')),
     'the download action did not ask the hub for the file',
   )
+  wrapper.unmount()
+})
+
+// The other half of the subtree rule, at the call site rather than in the
+// predicate: with a delete of the directory outstanding, a save of a file inside
+// it is refused. The two paths do not match, which is the point -- and the tab is
+// still open, so this is the refusal rather than the wait.
+test('a save inside a directory being deleted is refused', async () => {
+  const remove = deferred()
+  const calls = hubFetch({
+    list: (path) =>
+      path === '/srv/work/dir'
+        ? json({
+            path,
+            entries: [{ name: 'f.txt', is_dir: false, size: 5, mtime: 1000 }],
+            truncated: false,
+          })
+        : json({
+            path,
+            entries: [{ name: 'dir', is_dir: true, size: 0, mtime: 1000 }],
+            truncated: false,
+          }),
+    delete: remove.respond,
+  })
+  const wrapper = await mountManager()
+
+  await row(wrapper, 'dir').find('.tree__label').trigger('click')
+  await flush()
+  await openFile(wrapper, 'f.txt')
+  await type()
+
+  await goUp(wrapper)
+  await deleteViaMenu(wrapper, 'dir')
+  await flush(2)
+
+  // The tab is still open on a file inside the directory whose delete is in
+  // flight, so the save is refused rather than sent into that delete.
+  await (await saveButton(wrapper)).trigger('click')
+  await flush(2)
+
+  assert.equal(
+    calls.some((call) => call.url.includes('/files/write')),
+    false,
+    'a write was sent for a file inside a directory being deleted',
+  )
+  const notices = (wrapper.emitted('notice') ?? []).flat()
+  assert.ok(
+    notices.some((text) => String(text).includes('A delete of f.txt is in flight')),
+    `expected a notice that a delete is in flight, got ${JSON.stringify(notices)}`,
+  )
+
+  remove.release(new Response(null, { status: 204 }))
+  await flush()
+  wrapper.unmount()
+})
+
+// A decode event belongs to the load that raised it. Leaving one file for another
+// revokes the first blob to make room, which aborts its decode -- and the browser
+// then raises `error` for a URL this component has already let go of. The revoke
+// queues that event ahead of the next fetch, so it usually arrives while the new
+// file is still loading: read without a ticket, it marks the *next* file
+// undecodable, names it in a warning, and hides the image that would have
+// rendered.
+test('a decode failure for a file that is gone is not read against the next one', async () => {
+  const second = deferred()
+  const reads: Responder[] = [() => text('hello'), () => second.respond()]
+  hubFetch({
+    list: (path) =>
+      json({
+        path,
+        entries: [
+          { name: 'photo.png', is_dir: false, size: 5, mtime: 1000 },
+          { name: 'other.png', is_dir: false, size: 5, mtime: 1000 },
+        ],
+        truncated: false,
+      }),
+    read: () => reads.shift()!(),
+  })
+  const wrapper = await mountManager()
+
+  await openFile(wrapper, 'photo.png')
+  await flush()
+  const stale = wrapper.find('.image-preview__img').element
+  assert.ok(stale, 'the first image was never rendered, so nothing could go stale')
+
+  // Leaving for the second file revokes the first one's URL and starts a load
+  // that has not answered yet.
+  await openFile(wrapper, 'other.png')
+  await flush()
+  assert.equal(wrapper.find('.image-preview__img').exists(), false, 'the second file resolved too early')
+
+  stale.dispatchEvent(new Event('error'))
+  await flush()
+
+  assert.equal(
+    wrapper.find('.image-preview__failed').exists(),
+    false,
+    'a stale decode failure was reported against the file that is loading',
+  )
+  const notices = (wrapper.emitted('notice') ?? []).flat()
+  assert.ok(
+    !notices.some((text) => String(text).includes('could not be rendered as an image')),
+    `a stale decode failure was reported to the user: ${JSON.stringify(notices)}`,
+  )
+
+  // And the second file's own arrival is unaffected.
+  second.release(text('hello'))
+  await flush()
+  assert.ok(wrapper.find('.image-preview__img').exists(), 'the second image never rendered')
   wrapper.unmount()
 })
 

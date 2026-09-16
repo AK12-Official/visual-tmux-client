@@ -425,7 +425,11 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
   // The path being deleted covers what is under it, so this refuses a save of a
   // file inside a directory that is being deleted as well as the entry itself.
   if (deleting.isPending(tab.path)) {
-    emit('notice', `${tab.name} is being deleted, so it was not saved.`, 'warning')
+    // What is known, and no more: a delete of this file has been sent. Whether it
+    // will succeed is not known here, and saying the file "is being deleted" and
+    // then failing to delete it would be the refusal explaining itself with
+    // something that did not happen.
+    emit('notice', `A delete of ${tab.name} is in flight, so it was not saved.`, 'warning')
     return
   }
 
@@ -447,8 +451,10 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
     if (settled.outcome === 'raced') {
       emit(
         'notice',
-        `${tab.name} was being renamed while it was saved, so the answer was not recorded ` +
-          `against it. Save again once the rename finishes.`,
+        // Naming the directory as well as the file, because a rename of either is
+        // what this branch covers: the check is by path and a path has ancestors.
+        `A rename of ${tab.name} or of a directory above it was in flight while it was saved, ` +
+          `so the answer was not recorded. Save again once the rename finishes.`,
         'warning',
       )
     }

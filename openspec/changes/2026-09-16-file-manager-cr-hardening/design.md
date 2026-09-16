@@ -85,11 +85,12 @@ Two more properties of the design, both consequences of the same rules:
   crossing move is one the operator's boundary exists to refuse, not that nobody asks for one. The
   lesson generalises: "no caller can do this" is a claim about a program, and the program has to be
   read rather than recalled.
-- **With roots configured, no operation reaches a syscall on a plain path**, and `renameAt` is the
-  one that would have: every helper in `confine.go` has a `c.root == nil` branch, and what makes
-  them safe is not that the branch is absent but that `Confine` never yields a handle-less
-  `Confined` for a path a set with roots admits. The plain paths are what a hub with *no* roots
-  configured runs on, byte-identical to before the migration.
+- **With roots configured, none of the `c.root == nil` branches in `confine.go` is reachable**, and
+  `renameAt` is the one that could have been: `Confine` yields a handle for every path a set with
+  roots admits, and the plain paths are what a hub with *no* roots runs on, byte-identical to before
+  the migration. The authorization walk itself is a different matter and is unchanged -- `Resolve`
+  canonicalizes and `Lstat`s the caller's plain path whatever the configuration, which is how a path
+  is authorized in the first place.
 
 *Alternatives considered:* leaving the docs to carry the limit (rejected by review twice); a
 component-wise `O_NOFOLLOW` walk by hand (rejected: `os.Root` is that walk, maintained); keeping the
@@ -158,11 +159,22 @@ the tabs under the deleted path -- `doomed`, which is what the delete is about t
 reasoning that the writes which can cross it are the ones those tabs are making. They are not: a
 write outlives its tab. Save a file, close the tab (answering the prompt about unsaved changes), and
 the write is still travelling with no tab left for the delete to find it by, so the wait was empty
-and the delete went out into exactly the window it was meant to avoid. Both the wait and the refusal
-now ask by *path* and cover the subtree, which is what the record was always keyed by
-(`files/pending.ts`). The mistake had a shape worth remembering: the reasoning was written down and
-sounded sound, and the test that would have caught it -- a delete of a *directory* -- was the one
-case not exercised, because both delete tests used a file.
+and the delete went out into exactly the window it was meant to avoid. The record is now asked by
+*path*, which is what it was always keyed by.
+
+**The round after that found the query had been written in one direction, and the two callers ask
+from opposite ends.** A delete names an entry and waits for the writes *inside* it; a save names an
+entry and asks whether anything *holding* it is being deleted or renamed. Written as a single
+"covers what is beneath it" relation, the delete's wait was right and both refusals were wrong: a
+save of `/d/dir/f.txt` was refused by an outstanding delete of `/d/dir/f.txt` and not by one of
+`/d/dir`. `isPending` and `idle` now state their directions separately (`files/pending.ts`), and both
+are tested from both ends.
+
+The two mistakes have the same shape and are worth stating together, because the tests were the
+reason each survived: the first version's tests deleted a *file*, so the subtree case was never
+exercised, and the second version's tests asked `isPending` from the same end as `idle`, so the
+wrong direction agreed with itself. A test written from the same assumption as the code cannot
+contradict it.
 
 The cost of the wait is named rather than hidden: it ends when the write's request does, and this
 client puts no timeout on those, so a write that never answers leaves the delete unsent and the

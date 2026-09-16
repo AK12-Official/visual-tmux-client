@@ -112,25 +112,38 @@ test('two trackers do not see one another', () => {
   assert.equal(saving.isPending('/d/a.txt'), false)
 })
 
-// A path covers what is beneath it, because that is the relationship the manager
-// has to reason about: a delete or a rename names an entry, and the writes that
-// cross it name what is inside. Answering only for the exact path is what let a
-// delete of a directory go out while a write inside it was still travelling.
-test('a path covers everything beneath it', () => {
+// isPending looks *upwards*, which is the direction its callers ask from: a save
+// names a file, and what makes it unsafe to send is an operation on that file or
+// on something holding it -- the directory being deleted or renamed out from
+// under it.
+test('an operation on a directory is reported for what it holds', () => {
+  const pending = createPending()
+  pending.begin('/d/dir')
+
+  assert.equal(pending.isPending('/d/dir'), true)
+  assert.equal(pending.isPending('/d/dir/f.txt'), true, 'a file inside the directory is not covered')
+  assert.equal(pending.isPending('/d/dir/sub/f.txt'), true)
+  assert.equal(pending.isPending('/d'), false, 'a directory was reported for its own parent')
+  assert.equal(pending.isPending('/d/other.txt'), false, 'a sibling was covered')
+})
+
+// And the opposite reading of the same record is false, which is the mistake this
+// predicate was written with first: an operation on a *file* says nothing about
+// the directory holding it, because nothing is being done to that directory.
+test('an operation on a file is reported only for that file', () => {
   const pending = createPending()
   pending.begin('/d/dir/f.txt')
 
   assert.equal(pending.isPending('/d/dir/f.txt'), true)
-  assert.equal(pending.isPending('/d/dir'), true, 'the directory holding the write is not covered by it')
-  assert.equal(pending.isPending('/d'), true, 'an ancestor of the directory is not covered either')
-  assert.equal(pending.isPending('/d/other'), false, 'a sibling was covered')
-  assert.equal(pending.isPending('/d/dir/g.txt'), false, 'another entry in the directory was covered')
+  assert.equal(pending.isPending('/d/dir'), false, 'a file was reported for the directory holding it')
+  assert.equal(pending.isPending('/d/dir/other.txt'), false)
 })
 
-// Which is the whole of the reason a delete can still find a write whose tab has
-// been closed: the record is keyed by the path the write named, and the entry
-// being deleted is found by walking up from it rather than by remembering it.
-test('an idle wait on a directory is resolved only by what is under it', async () => {
+// idle looks *downwards*, which is the direction its caller asks from: a delete
+// names an entry, and the writes it has to wait for name that entry or what is
+// inside it. A delete of a file must not wait on a delete of its directory,
+// which is unrelated work that could block it indefinitely.
+test('an idle wait on a directory is held open by a write inside it', async () => {
   const pending = createPending()
   pending.begin('/d/dir/f.txt')
 
@@ -147,22 +160,42 @@ test('an idle wait on a directory is resolved only by what is under it', async (
   assert.equal(settled, true)
 })
 
+test('an idle wait on a file does not wait on its directory', async () => {
+  const pending = createPending()
+  pending.begin('/d/dir')
+
+  // A delete of /d/dir/f.txt names a file. An operation on the directory above it
+  // is not a write that delete has to wait for.
+  await pending.idle('/d/dir/f.txt')
+})
+
 // A prefix is a path element, not a string -- the same rule renames.ts states for
-// the same reason.
-test('a path does not cover a sibling whose name starts the same way', () => {
+// the same reason -- and both directions have to hold it.
+test('a path is a whole element, not the start of one', async () => {
   const pending = createPending()
   pending.begin('/d/abc/f.txt')
 
-  assert.equal(pending.isPending('/d/abc'), true)
-  assert.equal(pending.isPending('/d/ab'), false, '/d/ab is not the directory holding /d/abc/f.txt')
-  assert.equal(pending.isPending('/d/abcd'), false)
+  assert.equal(pending.isPending('/d/ab'), false, '/d/ab does not hold /d/abc/f.txt')
+  assert.equal(pending.isPending('/d/abcd'), false, '/d/abcd is not /d/abc')
+  assert.equal(pending.isPending('/d/abc'), false, 'a file was reported for the directory holding it')
+  await pending.idle('/d/ab')
 })
 
 // The filesystem root is a path like any other, and the separator must not be
 // appended twice when it already ends in one.
-test('the filesystem root covers everything under it', () => {
+test('the filesystem root holds everything below it', async () => {
   const pending = createPending()
   pending.begin('/d/a.txt')
 
-  assert.equal(pending.isPending('/'), true)
+  let settled = false
+  const idle = pending.idle('/').then(() => {
+    settled = true
+  })
+
+  await Promise.resolve()
+  assert.equal(settled, false, 'an idle wait on the root resolved with an operation outstanding')
+
+  pending.end('/d/a.txt')
+  await idle
+  assert.equal(settled, true)
 })

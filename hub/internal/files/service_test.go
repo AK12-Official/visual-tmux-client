@@ -147,6 +147,45 @@ func TestClosingAServiceReleasesItsRootHandles(t *testing.T) {
 	}
 }
 
+// One cause, one answer. An operation that was handed its handle just before the
+// hub closed the set fails with a closed handle, and that is the same situation
+// the closed-set check reports -- so every route reports it the same way. The
+// write path is the one that classifies its own failures, and without this it
+// answers `write_failed` for what a read beside it answers `path_not_allowed`.
+func TestAClosedHandleIsReportedTheSameWayOnEveryRoute(t *testing.T) {
+	root := sandbox(t)
+	mustWrite(t, filepath.Join(root, "a.txt"), testBody)
+
+	set, err := NewRootSet([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle := set.handles[0]
+	set.Close()
+
+	// What an operation with a handle from before the close sees.
+	_, closedErr := handle.OpenFile("a.txt", os.O_RDONLY, 0)
+	if closedErr == nil {
+		t.Fatal("expected a closed handle to refuse")
+	}
+
+	routes := map[string]error{
+		"classifyPathError": classifyPathError("a.txt", closedErr),
+		"stageFailure":      stageFailure("a.txt", closedErr),
+		"writeFailure":      writeFailure("a.txt", closedErr),
+	}
+	for name, got := range routes {
+		if !errors.Is(got, ErrPathNotAllowed) {
+			t.Errorf("%s reported a closed handle as: %v", name, got)
+		}
+	}
+	// And a cause that is not a close is still a write failure, so the mapping
+	// above is not simply swallowing everything.
+	if got := writeFailure("a.txt", errors.New("disk on fire")); !errors.Is(got, ErrWriteFailed) {
+		t.Errorf("an ordinary write failure was reported as: %v", got)
+	}
+}
+
 func TestListOrdersDirectoriesFirstAndReportsTruncation(t *testing.T) {
 	dir := sandbox(t)
 	mustWrite(t, filepath.Join(dir, "b.txt"), "b")

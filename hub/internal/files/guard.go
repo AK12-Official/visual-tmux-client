@@ -306,8 +306,26 @@ func isBlocked(path string) bool {
 	return false
 }
 
+// closedRootError reports a handle that was closed underneath an operation -- the
+// hub is shutting down and this request outlived it -- as the answer the closed
+// set itself gives, or nil when the error is something else.
+//
+// It is separate from the switch in classifyPathError because not every failure
+// is classified there: the write path and the recursive delete report their own,
+// and one cause answering `path_not_allowed` on a read and `write_failed` on the
+// write beside it is worse than either answer on its own.
+func closedRootError(path string, err error) error {
+	if err == nil || !errors.Is(err, os.ErrClosed) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s: the root set is closed", ErrPathNotAllowed, path)
+}
+
 // classifyPathError turns a filesystem error into the service's vocabulary.
 func classifyPathError(path string, err error) error {
+	if closed := closedRootError(path, err); closed != nil {
+		return closed
+	}
 	switch {
 	case os.IsNotExist(err):
 		return fmt.Errorf("%w: %s", ErrNotFound, path)
@@ -328,12 +346,6 @@ func classifyPathError(path string, err error) error {
 	// way: an ordinary race, not a server fault.
 	case errors.Is(err, syscall.ENOTEMPTY):
 		return fmt.Errorf("%w: %s", ErrDirNotEmpty, path)
-	// A handle that was closed while the operation was in flight: the hub is
-	// shutting down and this request outlived it, which is the answer the closed
-	// set gives and the reason it gives it. Without this arm the shutdown race is
-	// reported as a server fault, which says nothing true about what happened.
-	case errors.Is(err, os.ErrClosed):
-		return fmt.Errorf("%w: %s: the root set is closed", ErrPathNotAllowed, path)
 	default:
 		return err
 	}

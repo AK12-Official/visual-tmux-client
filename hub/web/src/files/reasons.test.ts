@@ -11,8 +11,13 @@ import { REASONS, reasonFor } from './reasons'
  * A list on this side would be a second thing to keep in step, and the failure it
  * would fail to catch is the one that matters: a code added to the hub and not to
  * the browser does not break anything, it just shows the user a bare identifier
- * where a sentence should be. Reading the Go file is the only way one test can
- * hold both halves of that.
+ * where a sentence should be. Reading the Go file holds both halves together in
+ * one place, which a list on either side cannot do -- a generated artifact would,
+ * at the cost of a build step and a checked-in file for eleven strings.
+ *
+ * What it does not catch: an arm written in a shape the pattern below does not
+ * match, such as a table-driven mapper. The count assertion is what turns that
+ * from a test that quietly checks nothing into a failure.
  */
 function hubCodes(): string[] {
   const source = readFileSync(
