@@ -79,8 +79,9 @@ next defect, which round 1 had already demonstrated.
 
 **Closure verification: 21 of 22 findings closed.** Where a finding had a test to revert, the
 closure was verified by reverting the fix in a throwaway copy and watching that test fail (G1, G2,
-T1, D6, D7, D10). The rest are documentation, comment, or acceptance changes with no test to
-revert, and their evidence is the line named in the table:
+T1, D6, D7, D10). The rest are comment, documentation, structure, or
+acceptance changes, none of which has a test that could have been reverted to prove it; their
+evidence is the line named in the table:
 
 | finding | verdict | settling evidence |
 | --- | --- | --- |
@@ -177,9 +178,43 @@ design document already stated the true bound; the spec now does too.
 
 | round | over | findings that changed code or a claim |
 | --- | --- | --- |
-| 1 | the whole CR fix set | 21, including two defects introduced by the fix set itself |
+| 1 | the whole CR fix set | 23 raised across four reviewers, 22 distinct (D4 duplicates F3) — two of them defects introduced by the fix set itself |
 | 2 | the round-1 fixes | 2 — one real (a value bound that checked shape rather than parseability), one partial |
 | 3 | the round-2 fixes | 1 — a comment justifying the right check with the wrong reason — plus 4 bookkeeping errors and 1 spec overstatement |
 
-Each round has been over a smaller surface than the last, and the last one found no defect in the
-code — only a false statement about it.
+Each round has been over a smaller surface than the last, and the last two found no defect in the
+code at all — only false statements about it.
+
+## Round 4
+
+One subagent, over the round-3 diff, deciding convergence. It found one more — the same kind as
+round 3's: a correct check explained by a false reason.
+
+**The round-3 rewrite ranked the two failure modes backwards.** It claimed the dead end was a plain
+integer past 2^53 that the client rounds. Traced end to end, that one is recoverable: the hub parses
+it, the comparison fails, the refusal is `conflict`, the browser offers the overwrite, and
+`save(true)` sends `expected: null` — which the hub skips the comparison for entirely, so the write
+lands. The overwrite *is* the way out. (And with an exact nanosecond time present it is not even a
+conflict, because the comparison prefers that value and the rounded millisecond never reaches it.)
+The genuine dead end is the case the rewrite called lesser: a fraction or an exponent is a request
+the hub cannot read at all, so it answers `invalid_body` rather than a conflict — the browser offers
+no overwrite, and every retry sends the same unreadable value.
+
+**Fixed by shortening, not by rewriting.** Two consecutive rounds found the *justification* of this
+guard wrong while agreeing the guard is right, so the comment now states only what was traced — the
+decimal form the hub parses, and the exact round trip a double cannot always provide — and no longer
+ranks the harms or claims what the user can recover. That analysis lives here instead, where an
+error in it is a note rather than a false statement in the code.
+
+**Two smaller corrections.** `tasks.md` 9.6 described one bound and covered two. The Trajectory
+table's round-1 figure (21) could not be derived from the tables above it, which sum to 23 raised
+and 22 distinct; it now says so.
+
+### Where the loop stands
+
+Rounds 3 and 4 changed no code. Both found false statements *about* code that three independent
+reviewers — including an exhaustive differential probe and a full revert-verified closure pass —
+agree is correct. Each round of prose written to explain the loop has been able to contain its own
+new error, so the honest stopping point is the code being verified sound and the explanations being
+reduced to what can be checked, rather than continuing to add commentary that the next round can
+falsify.
