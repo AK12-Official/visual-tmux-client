@@ -192,20 +192,22 @@ func TestListPanesReportsEveryPane(t *testing.T) {
 		t.Fatalf("split-window failed: code=%d err=%v stderr=%s", code, err, stderr)
 	}
 
+	// The same call ListPanes makes, run first, so a failure names its cause
+	// instead of only the count: "0 panes" is otherwise the same message for an
+	// empty listing, a query error and a server that has gone away.
+	raw, rawStderr, rawCode, rawErr := c.Exec(ctx, "list-panes", "-a", "-F", PaneFormat)
+	if rawErr != nil || rawCode != 0 {
+		t.Fatalf("list-panes just before ListPanes: code=%d err=%v stderr=%q", rawCode, rawErr, rawStderr)
+	}
+
 	panes, err := c.ListPanes(ctx)
 	if err != nil {
 		t.Fatalf("ListPanes failed: %v", err)
 	}
 	if len(panes) != 2 {
-		// Report what tmux actually said rather than only the count: this test
-		// failing with "0 panes" is otherwise indistinguishable between an empty
-		// listing, a query error and a server that has gone away, and the three
-		// have different causes.
-		out, outErr, code, execErr := c.Exec(ctx, "list-panes", "-a", "-F", PaneFormat)
-		names, namesErr, nameCode, listErr := c.Exec(ctx, "list-sessions", "-F", "#{session_name}")
-		t.Fatalf("got %d panes, want 2\ntmux list-panes: code=%d err=%v errout=%q out=%q\n"+
-			"tmux list-sessions: code=%d err=%v errout=%q out=%q",
-			len(panes), code, execErr, outErr, out, nameCode, listErr, namesErr, names)
+		before := c.HasSession(ctx, "panes")
+		t.Fatalf("got %d panes, want 2\nthe list-panes run just before returned %q\n"+
+			"the session still exists: %v", len(panes), raw, before)
 	}
 	for _, p := range panes {
 		if p.Session != "panes" {
