@@ -42,8 +42,11 @@ type RouterConfig struct {
 	// MaxRequestBodyBytes because a write is the one request that legitimately
 	// carries megabytes.
 	MaxFileSize int64
-	WebConfig   config.WebConfig
-	StaticFS    fs.FS
+	// FilesEnabled is published to the browser so it can leave the file manager's
+	// entry point out. It grants nothing: every operation is gated on its own.
+	FilesEnabled bool
+	WebConfig    config.WebConfig
+	StaticFS     fs.FS
 }
 
 type handlerState struct {
@@ -172,7 +175,7 @@ func (s *handlerState) issueTicket(w http.ResponseWriter, r *http.Request) {
 
 func (s *handlerState) getClientConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	dto := NewPublicClientConfig(s.cfg.WebConfig)
+	dto := NewPublicClientConfig(s.cfg.WebConfig, s.cfg.FilesEnabled, s.cfg.MaxFileSize)
 	writeJSON(w, http.StatusOK, dto)
 }
 

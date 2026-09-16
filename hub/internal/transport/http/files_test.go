@@ -297,6 +297,35 @@ func TestReadAndDownloadSetTheirHeaders(t *testing.T) {
 	}
 }
 
+// The browser decides whether it may show a file as editable text from this
+// header rather than from the file's name, so it is present exactly when the hub
+// classified the contents as binary.
+func TestReadReportsWhetherTheContentsAreBinary(t *testing.T) {
+	for _, binary := range []bool{false, true} {
+		t.Run(strconv.FormatBool(binary), func(t *testing.T) {
+			svc := &mockFileService{readFn: func(string) (files.ReadResult, error) {
+				result := openReadResult(t, "contents")
+				result.Binary = binary
+				return result, nil
+			}}
+			router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc,
+				&mockTicketIssuer{}, nil)
+
+			rec := authedGet(t, router, "/api/hosts/local/files/read?path=/tmp/a.bin")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", rec.Code)
+			}
+			want := ""
+			if binary {
+				want = "1"
+			}
+			if got := rec.Header().Get("X-File-Binary"); got != want {
+				t.Errorf("X-File-Binary = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 // The write route carries file content, so its body bound comes from the file
 // limit rather than the 64 KiB limit every other route uses.
 func TestWriteRouteBoundsTheBodyByTheFileLimit(t *testing.T) {

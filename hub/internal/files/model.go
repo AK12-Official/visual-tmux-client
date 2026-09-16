@@ -26,4 +26,9 @@ type ReadResult struct {
 	File  *os.File
 	Size  int64
 	Mtime int64
+	// Binary reports whether the contents are not text, so the caller can decline
+	// to present them as text rather than decoding the bytes into replacement
+	// characters. It is decided from a bounded sample of the file, so it is a
+	// classification rather than a guarantee.
+	Binary bool
 }

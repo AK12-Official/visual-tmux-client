@@ -169,6 +169,7 @@ func newRouterConfig(cfg *config.Config, staticFS fs.FS) thttp.RouterConfig {
 		Token:               cfg.Auth.Token,
 		MaxRequestBodyBytes: cfg.Server.MaxRequestBodyBytes,
 		MaxFileSize:         cfg.Files.MaxFileSize,
+		FilesEnabled:        cfg.Files.Enabled,
 		WebConfig:           cfg.Web,
 		StaticFS:            staticFS,
 	}

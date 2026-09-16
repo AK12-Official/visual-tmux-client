@@ -122,6 +122,12 @@ func (s *handlerState) serveFile(w http.ResponseWriter, r *http.Request, attachm
 	w.Header().Set("Content-Type", fileContentType)
 	w.Header().Set("X-File-Size", strconv.FormatInt(result.Size, 10))
 	w.Header().Set("X-File-Mtime", strconv.FormatInt(result.Mtime, 10))
+	// Whether the contents are text is the hub's answer to give: the browser
+	// would otherwise have to guess from the name, and a wrong guess either
+	// renders binary bytes as text or refuses to open a file that is text.
+	if result.Binary {
+		w.Header().Set("X-File-Binary", "1")
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	if attachment {
 		w.Header().Set("Content-Disposition",

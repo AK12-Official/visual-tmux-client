@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -210,7 +211,14 @@ func TestResolveAlwaysRefusesKernelInterfaces(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, path := range []string{"/proc/self/environ", "/proc", "/sys/kernel", "/dev/null"} {
+		// The differently-cased spellings are part of the list because the check
+		// has to hold on a case-insensitive filesystem, where /DEV/null is the
+		// same file as /dev/null and a case-sensitive test would let it through.
+		paths := []string{
+			"/proc/self/environ", "/proc", "/sys/kernel", "/dev/null",
+			"/DEV/null", "/Proc/self/environ", "/SYS/kernel",
+		}
+		for _, path := range paths {
 			if _, err := set.Resolve(path, ModeRead); !errors.Is(err, ErrPathNotAllowed) {
 				t.Errorf("roots=%v path=%s: expected path_not_allowed, got: %v", roots, path, err)
 			}
@@ -218,6 +226,188 @@ func TestResolveAlwaysRefusesKernelInterfaces(t *testing.T) {
 		// A sibling whose name merely starts with a blocked prefix is ordinary.
 		if _, err := set.Resolve(filepath.Join(sandbox(t), "devices"), ModeCreate); err != nil {
 			t.Errorf("roots=%v: /devices was mistaken for /dev: %v", roots, err)
+		}
+	}
+}
+
+// A root on a kernel interface cannot be honoured, so it has to fail while the
+// configuration loads rather than produce a hub whose every request is refused.
+func TestNewRootSetRefusesARootOnAKernelInterface(t *testing.T) {
+	for _, root := range []string{"/dev", "/dev/shm", "/proc/self", "/sys"} {
+		if _, err := NewRootSet([]string{root}); err == nil {
+			t.Errorf("expected %s to be refused as a root", root)
+		}
+	}
+}
+
+// A path that runs through a regular file is a shape the caller supplied, so it
+// is a bad request rather than a server-side failure.
+func TestResolveReportsAPathThroughAFileAsMalformed(t *testing.T) {
+	base := sandbox(t)
+	file := filepath.Join(base, "a.txt")
+	mustWrite(t, file, "hello")
+	set, err := NewRootSet(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = set.Resolve(filepath.Join(file, "child"), ModeRead)
+	if !errors.Is(err, ErrInvalidPath) {
+		t.Fatalf("expected invalid_path for a path through a file, got: %v", err)
+	}
+}
+
+// A create may not go *through* a link whose target is missing: the caller would
+// be authorized here and the write would land wherever following the link leads.
+// A link *at* the element is a different thing -- the name is taken, and the
+// operations act on the entry rather than following it -- so refusing it would
+// answer "not allowed" for a name the caller may use, where "already exists" is
+// the truth.
+func TestResolveRefusesToCreateThroughALinkWhoseTargetDoesNotExist(t *testing.T) {
+	base := sandbox(t)
+	link := filepath.Join(base, "dangling")
+	if err := os.Symlink(filepath.Join(base, "nowhere"), link); err != nil {
+		t.Fatal(err)
+	}
+	mustMkdir(t, filepath.Join(base, "real"))
+	mustSymlink(t, filepath.Join(base, "absent"), filepath.Join(base, "real", "broken"))
+
+	set, err := NewRootSet([]string{base})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The element itself is an entry that exists, so every mode can name it.
+	for _, mode := range []Mode{ModeRead, ModeCreate} {
+		if _, err := set.Resolve(link, mode); err != nil {
+			t.Errorf("mode=%v: a link at the element must resolve, got: %v", mode, err)
+		}
+	}
+
+	// A link above the element leaves everything below it unreachable.
+	below := filepath.Join(base, "real", "broken", "child.txt")
+	if _, err := set.Resolve(below, ModeCreate); !errors.Is(err, ErrPathNotAllowed) {
+		t.Errorf("expected a create below a dangling link to be refused, got: %v", err)
+	}
+}
+
+// A directory that was empty when it was checked and is not empty when it is
+// removed is the same situation the explicit check reports, reached by a race
+// instead. Both answer with the vocabulary's not-empty error rather than an
+// internal failure.
+func TestClassifyReportsANonEmptyDirectoryTheSameWayReachedByRace(t *testing.T) {
+	raced := &os.PathError{Op: "remove", Path: "/srv/full", Err: syscall.ENOTEMPTY}
+	if err := classifyPathError("/srv/full", raced); !errors.Is(err, ErrDirNotEmpty) {
+		t.Fatalf("expected a not-empty error, got: %v", err)
+	}
+}
+
+// A redundant separator is a spelling, not a different entry. Using filepath.Dir
+// on a path with a trailing separator returns the element itself, which appended
+// the final name twice -- so the same entry answered differently depending on
+// whether it was written with a slash, and a name that did not exist resolved to
+// a path under itself.
+func TestResolveTreatsATrailingSeparatorAsTheSameEntry(t *testing.T) {
+	base := sandbox(t)
+	link := filepath.Join(base, "dangling")
+	mustSymlink(t, filepath.Join(base, "nowhere"), link)
+	set, err := NewRootSet([]string{base})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, spelling := range []string{link, link + "/", link + "//", link + "/."} {
+		if _, err := set.Resolve(spelling, ModeCreate); err != nil {
+			t.Errorf("%q must resolve like the entry it names, got: %v", spelling, err)
+		}
+	}
+
+	got, err := set.Resolve(filepath.Join(base, "newdir")+"/", ModeCreate)
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if want := filepath.Join(base, "newdir"); got != want {
+		t.Errorf("resolved %q, want %q", got, want)
+	}
+}
+
+// Every classification is pinned, in both directions: a caller-shaped failure
+// must reach the caller with a code they can act on, and a server fault must not
+// be dressed up as one of theirs.
+func TestClassifyPathErrorSeparatesCallerMistakesFromServerFaults(t *testing.T) {
+	caller := []struct {
+		errno syscall.Errno
+		want  error
+	}{
+		{syscall.ENOENT, ErrNotFound},
+		{syscall.EACCES, ErrPermissionDenied},
+		{syscall.ENOTDIR, ErrInvalidPath},
+		{syscall.ELOOP, ErrInvalidPath},
+		{syscall.EINVAL, ErrInvalidPath},
+		{syscall.ENAMETOOLONG, ErrInvalidPath},
+		{syscall.ENOTEMPTY, ErrDirNotEmpty},
+	}
+	for _, tc := range caller {
+		err := classifyPathError("/srv/x", &os.PathError{Op: "open", Path: "/srv/x", Err: tc.errno})
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%v: got %v, want it to wrap %v", tc.errno, err, tc.want)
+		}
+	}
+
+	for _, errno := range []syscall.Errno{syscall.EIO, syscall.ENOSPC, syscall.EROFS, syscall.EXDEV} {
+		err := classifyPathError("/srv/x", &os.PathError{Op: "write", Path: "/srv/x", Err: errno})
+		for _, wrong := range []error{ErrNotFound, ErrInvalidPath, ErrPermissionDenied, ErrConflict} {
+			if errors.Is(err, wrong) {
+				t.Errorf("%v: a server fault was reported as %v", errno, wrong)
+			}
+		}
+	}
+}
+
+// The message is matched whole rather than by substring, so a path that merely
+// contains its words cannot turn an unrelated server fault into a caller mistake.
+// A component can be named anything, and the realistic trigger is a disk filling
+// up underneath one.
+func TestClassifyPathErrorIsNotFooledByAPathNamedAfterTheMessage(t *testing.T) {
+	tricky := "/srv/too many links/file"
+	err := classifyPathError(tricky, &os.PathError{Op: "write", Path: tricky, Err: syscall.ENOSPC})
+	if errors.Is(err, ErrInvalidPath) {
+		t.Error("a server fault under a path named after the message was reported as a caller mistake")
+	}
+
+	// The whole message, not the message anywhere in the text. A component can be
+	// named exactly this too, and the path is the only part of a PathError the
+	// caller chooses -- so the match has to be whole for the same reason.
+	tricky = "/srv/" + tooManyLinksMessage + "/file"
+	err = classifyPathError(tricky, &os.PathError{Op: "write", Path: tricky, Err: syscall.ENOSPC})
+	if errors.Is(err, ErrInvalidPath) {
+		t.Error("a server fault under a path named after the whole message was reported as a caller mistake")
+	}
+}
+
+// A link that leads back to itself is a path the caller cannot use. It is the one
+// case here that cannot be recognised by its errno -- the link walker reports it
+// as a plain error rather than a *os.PathError -- so this builds a real loop,
+// which is both the behaviour that matters and the thing that would catch the
+// message it is recognised by changing.
+func TestResolveReportsACircularLinkAsMalformed(t *testing.T) {
+	base := sandbox(t)
+	first := filepath.Join(base, "a")
+	second := filepath.Join(base, "b")
+	if err := os.Symlink(second, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(first, second); err != nil {
+		t.Fatal(err)
+	}
+
+	set, err := NewRootSet([]string{base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{first, filepath.Join(first, "child.txt")} {
+		if _, err := set.Resolve(path, ModeRead); !errors.Is(err, ErrInvalidPath) {
+			t.Errorf("%s: expected a circular link to be reported as malformed, got: %v", path, err)
 		}
 	}
 }
