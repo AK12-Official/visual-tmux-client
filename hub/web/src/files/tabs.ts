@@ -127,8 +127,9 @@ export interface SaveSettlement {
    *               clean at the text that was sent.
    *   `closed` -- the tab is gone, so there is nothing to fold the answer into.
    *   `moved`  -- the tab is open under a different path than the write named.
+   *   `raced`  -- a rename of that path was outstanding when the answer arrived.
    */
-  outcome: 'saved' | 'closed' | 'moved'
+  outcome: 'saved' | 'closed' | 'moved' | 'raced'
 }
 
 /**
@@ -155,10 +156,20 @@ export function settleSave(
   files: OpenFile[],
   request: SaveRequest,
   stamp: Stamp | null,
+  racing = false,
 ): SaveSettlement {
   const tab = files.find((candidate) => candidate.id === request.id)
   if (!tab) return { files, outcome: 'closed' }
   if (tab.path !== request.path) return { files, outcome: 'moved' }
+  // A rename of this path is outstanding, so this answer and that rename crossed
+  // on the wire and the browser cannot tell which reached the hub first. The
+  // write may have landed before the rename carried the entry to its new name --
+  // in which case the tab is saved and this is only a nag -- or the rename may
+  // have landed first, in which case the write recreated the old name and the
+  // entry the tab now holds was never written. Recording the tab as saved would
+  // be a lie in the second case and merely cautious in the first, so the answer
+  // is not recorded. See design.md on the window POSIX rename cannot close.
+  if (racing) return { files, outcome: 'raced' }
   return {
     files: files.map((candidate) =>
       candidate.id === request.id ? applySaved(candidate, stamp, request.text) : candidate,

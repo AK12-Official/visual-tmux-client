@@ -4,9 +4,15 @@
 // a document.
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { readFileBytes } from '../../files/api'
+import { MAX_IMAGE_PREVIEW_BYTES } from '../../files/preview'
 
 const props = defineProps<{ path: string }>()
-const emit = defineEmits<{ (e: 'notice', text: string, level: 'error' | 'warning'): void }>()
+const emit = defineEmits<{
+  (e: 'notice', text: string, level: 'error' | 'warning'): void
+  // too-large says the bytes on disk are past the bound this component renders
+  // within, whatever the listing said about the size when the tab was opened.
+  (e: 'too-large', path: string, size: number): void
+}>()
 
 const url = ref('')
 let objectUrl: string | null = null
@@ -29,9 +35,18 @@ watch(
     const attempt = ++loadAt
     release()
     try {
-      const blob = await readFileBytes(path)
+      const fetched = await readFileBytes(path, MAX_IMAGE_PREVIEW_BYTES)
       if (attempt !== loadAt) return
-      objectUrl = URL.createObjectURL(blob)
+      if ('tooLarge' in fetched) {
+        // The file is larger than the listing said, or larger than it was when
+        // the listing was read. Rendering it would freeze the tab, so it is not
+        // rendered -- and the manager is told, because a file that cannot be
+        // previewed is presented as information with a download action rather
+        // than as an empty frame.
+        emit('too-large', path, fetched.tooLarge)
+        return
+      }
+      objectUrl = URL.createObjectURL(fetched.blob)
       url.value = objectUrl
     } catch (err) {
       if (attempt !== loadAt) return

@@ -84,29 +84,33 @@ func NewService(opts Options) *Service {
 //
 // The name comes from the system's random source rather than a counter, so it
 // cannot be predicted and pre-created to interfere with a write.
-func (s *Service) createStaged(dir string, mode os.FileMode) (*os.File, error) {
+func (s *Service) createStaged(dir Confined, mode os.FileMode) (*os.File, Confined, error) {
 	s.stagingMu.Lock()
 	defer s.stagingMu.Unlock()
 
 	for range stagingNameAttempts {
 		var suffix [8]byte
 		if _, err := rand.Read(suffix[:]); err != nil {
-			return nil, err
+			return nil, Confined{}, err
 		}
-		name := filepath.Join(dir, tempFilePrefix+hex.EncodeToString(suffix[:]))
-		stage, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, mode)
+		stage := dir.join(tempFilePrefix + hex.EncodeToString(suffix[:]))
+		file, err := openFile(stage, os.O_RDWR|os.O_CREATE|os.O_EXCL, mode)
 		if err == nil {
 			if s.staging == nil {
 				s.staging = make(map[string]struct{})
 			}
-			s.staging[name] = struct{}{}
-			return stage, nil
+			// Keyed by the canonical absolute path rather than by whatever form
+			// the syscall was given, because a listing looks the record up by the
+			// path *it* resolved: the two have to be the same string for a
+			// staging file to stay hidden while it is being written.
+			s.staging[stage.abs] = struct{}{}
+			return file, stage, nil
 		}
 		if !os.IsExist(err) {
-			return nil, err
+			return nil, Confined{}, err
 		}
 	}
-	return nil, fmt.Errorf("%w: no free staging name in %s", ErrWriteFailed, dir)
+	return nil, Confined{}, fmt.Errorf("%w: no free staging name in %s", ErrWriteFailed, dir.abs)
 }
 
 // unmarkStaging forgets a staging file, which is what makes it an ordinary
@@ -166,7 +170,7 @@ func (s *Service) List(ctx context.Context, path string) (ListResult, error) {
 	// Opened before it is asked what it is, so that the kind of thing this
 	// listing will read comes from the descriptor rather than from a stat taken
 	// beforehand -- the descriptor is what the reads will use either way.
-	dir, err := openNoBlock(resolved)
+	dir, err := openDir(s.roots.Confine(resolved))
 	if err != nil {
 		return ListResult{}, classifyPathError(path, err)
 	}
@@ -201,16 +205,23 @@ func (s *Service) List(ctx context.Context, path string) (ListResult, error) {
 	// holding exactly as many entries as the bound permits would report itself
 	// truncated -- while showing all of them -- for as long as a write to it was
 	// in flight.
+	target := s.roots.Confine(resolved)
 	children, cut, err := readListing(ctx, dir, s.maxDirEntries, func(name string) bool {
-		return s.isStaging(filepath.Join(resolved, name))
+		return s.isStaging(target.join(name).abs)
 	})
 	if err != nil {
 		return ListResult{}, classifyPathError(path, err)
 	}
 
+	// Describing an entry can be work: a symbolic link is resolved through the
+	// guard and then stat'd, and there may be as many of those as the bound
+	// allows. Nothing below is worth finishing once the caller has gone.
 	entries := make([]Entry, 0, len(children))
 	for _, child := range children {
-		entries = append(entries, s.entryFor(resolved, child))
+		if err := ctx.Err(); err != nil {
+			return ListResult{}, err
+		}
+		entries = append(entries, s.entryFor(target, child))
 	}
 
 	// The order is imposed here rather than taken from the reader. Reading in
@@ -284,7 +295,7 @@ func readListing(
 }
 
 // entryFor describes one child of the directory it was read from.
-func (s *Service) entryFor(dir string, child os.DirEntry) Entry {
+func (s *Service) entryFor(dir Confined, child os.DirEntry) Entry {
 	entry := Entry{Name: child.Name()}
 
 	info, err := s.childInfo(dir, child)
@@ -317,30 +328,15 @@ func (s *Service) entryFor(dir string, child os.DirEntry) Entry {
 // leading outside every configured root is described as the link it is instead
 // of answering with the size and modification time of a path the caller may not
 // name.
-func (s *Service) childInfo(dir string, child os.DirEntry) (os.FileInfo, error) {
+func (s *Service) childInfo(dir Confined, child os.DirEntry) (os.FileInfo, error) {
 	if child.Type()&os.ModeSymlink == 0 {
 		return child.Info()
 	}
-	target, err := s.roots.Resolve(filepath.Join(dir, child.Name()), ModeRead)
+	target, err := s.roots.Resolve(dir.join(child.Name()).abs, ModeRead)
 	if err != nil {
 		return nil, err
 	}
-	return os.Stat(target)
-}
-
-// openNoBlock opens a path for reading without waiting for anything to arrive.
-//
-// A named pipe with no writer blocks in open(2) until one appears, and no
-// context interrupts that wait, so a request that happens to name one would hold
-// its goroutine for as long as the writer takes to show up -- days, if it never
-// does. O_NONBLOCK makes the call return immediately for every kind of file, and
-// for a regular file it changes nothing: the flag has no effect on reading one.
-//
-// What was opened is decided straight afterwards from the descriptor. This
-// function deliberately does not decide it: a check here could only be a check
-// on the path, and the point is to act on what was actually opened.
-func openNoBlock(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	return stat(s.roots.Confine(target))
 }
 
 // Read opens a file for streaming and reports its size and modification time.
@@ -352,7 +348,7 @@ func (s *Service) Read(ctx context.Context, path string) (ReadResult, error) {
 		return ReadResult{}, err
 	}
 
-	file, err := openNoBlock(resolved)
+	file, err := openDir(s.roots.Confine(resolved))
 	if err != nil {
 		return ReadResult{}, classifyPathError(path, err)
 	}
@@ -552,7 +548,8 @@ func (s *Service) Write(
 		return WriteResult{}, err
 	}
 
-	existing, statErr := os.Stat(resolved)
+	target := s.roots.Confine(resolved)
+	existing, statErr := stat(target)
 	exists := statErr == nil
 	if statErr != nil && !os.IsNotExist(statErr) {
 		return WriteResult{}, classifyPathError(path, statErr)
@@ -566,7 +563,7 @@ func (s *Service) Write(
 		// where it pointed without saying so; the caller asked to write a file,
 		// not to remove a link. Reading it fails on its own, so nothing else can
 		// act on it either, and "no such target" is what is true of it.
-		if info, linkErr := os.Lstat(resolved); linkErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		if info, linkErr := lstat(target); linkErr == nil && info.Mode()&os.ModeSymlink != 0 {
 			return WriteResult{}, fmt.Errorf("%w: %s is a link whose target does not exist", ErrNotFound, path)
 		}
 	}
@@ -600,7 +597,7 @@ func (s *Service) Write(
 		opts.mode = os.FileMode(createFileMode)
 	}
 
-	return s.writeAtomically(ctx, resolved, body, declaredSize, opts)
+	return s.writeAtomically(ctx, target, body, declaredSize, opts)
 }
 
 // writeOptions carries what the staging path needs beyond the body itself.
@@ -633,7 +630,7 @@ type writeOptions struct {
 // leaves the target exactly as it was, which is the property a plain truncate
 // and write cannot offer.
 func (s *Service) writeAtomically(
-	ctx context.Context, target string, body io.Reader, declaredSize int64, opts writeOptions,
+	ctx context.Context, target Confined, body io.Reader, declaredSize int64, opts writeOptions,
 ) (WriteResult, error) {
 	// A new file is created with the mode it will keep, so the umask governs it
 	// exactly as it would govern a file created directly. The cost is that an
@@ -647,16 +644,16 @@ func (s *Service) writeAtomically(
 	if opts.preserve {
 		createMode = stagingMode
 	}
-	stage, err := s.createStaged(filepath.Dir(target), createMode)
+	stage, staged, err := s.createStaged(target.dir(), createMode)
 	if err != nil {
 		return WriteResult{}, stageFailure(opts.display, err)
 	}
-	defer s.unmarkStaging(stage.Name())
+	defer s.unmarkStaging(staged.abs)
 
 	committed := false
 	defer func() {
 		if !committed {
-			_ = os.Remove(stage.Name()) //nolint:errcheck // best effort on a failure path
+			_ = remove(staged) //nolint:errcheck // best effort on a failure path
 		}
 	}()
 
@@ -691,7 +688,7 @@ func (s *Service) writeAtomically(
 		return WriteResult{}, err
 	}
 
-	if err := os.Rename(stage.Name(), target); err != nil {
+	if err := renameAt(staged, target); err != nil {
 		return WriteResult{}, fmt.Errorf("%w: %w", ErrWriteFailed, err)
 	}
 	committed = true
@@ -720,7 +717,7 @@ func (s *Service) writeAtomically(
 // A nil expected modification time means the caller forced the overwrite, so it
 // is compared against nothing. The origin check is not optional in the same way:
 // it asks what the path is, not what the caller expected it to be.
-func confirmUnchanged(target string, opts writeOptions) error {
+func confirmUnchanged(target Confined, opts writeOptions) error {
 	if opts.origin == nil {
 		// The name was free when the write began, so it is still free only if
 		// nothing has taken it.
@@ -729,14 +726,14 @@ func confirmUnchanged(target string, opts writeOptions) error {
 		// gone is taken. Stat follows the link, finds nothing where it points,
 		// and reports the name as free -- so the write would replace the link,
 		// which is the shape the check at the start of Write exists to refuse.
-		if _, err := os.Lstat(target); os.IsNotExist(err) {
+		if _, err := lstat(target); os.IsNotExist(err) {
 			return nil
 		} else if err != nil {
 			return classifyPathError(opts.display, err)
 		}
 		return fmt.Errorf("%w: %s was created while it was being written", ErrConflict, opts.display)
 	}
-	current, err := os.Stat(target)
+	current, err := stat(target)
 	if err != nil {
 		return classifyPathError(opts.display, err)
 	}
@@ -802,9 +799,9 @@ func (s *Service) Create(ctx context.Context, path string, isDir bool) error {
 	if err != nil {
 		return err
 	}
+	target := s.roots.Confine(resolved)
 
-	parent := filepath.Dir(resolved)
-	if info, statErr := os.Stat(parent); statErr != nil {
+	if info, statErr := stat(target.dir()); statErr != nil {
 		return classifyPathError(filepath.Dir(path), statErr)
 	} else if !info.IsDir() {
 		return fmt.Errorf("%w: %s is not a directory", ErrInvalidPath, filepath.Dir(path))
@@ -812,19 +809,19 @@ func (s *Service) Create(ctx context.Context, path string, isDir bool) error {
 
 	// Lstat, so that a dangling symlink counts as an existing entry rather than
 	// as a free name to create over.
-	if _, err := os.Lstat(resolved); err == nil {
+	if _, err := lstat(target); err == nil {
 		return fmt.Errorf("%w: %s already exists", ErrConflict, path)
 	} else if !os.IsNotExist(err) {
 		return classifyPathError(path, err)
 	}
 
 	if isDir {
-		if err := os.Mkdir(resolved, createDirMode); err != nil {
+		if err := mkdir(target, createDirMode); err != nil {
 			return classifyPathError(path, err)
 		}
 		return nil
 	}
-	file, err := os.OpenFile(resolved, os.O_CREATE|os.O_EXCL|os.O_WRONLY, createFileMode)
+	file, err := openFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, createFileMode)
 	if err != nil {
 		return classifyPathError(path, err)
 	}
@@ -847,13 +844,13 @@ func (s *Service) Rename(ctx context.Context, path, newPath string) error {
 		return err
 	}
 
-	if _, err := os.Lstat(target); err == nil {
+	if _, err := lstat(target); err == nil {
 		return fmt.Errorf("%w: %s already exists", ErrConflict, newPath)
 	} else if !os.IsNotExist(err) {
 		return classifyPathError(newPath, err)
 	}
 
-	return classifyPathError(newPath, os.Rename(source, target))
+	return classifyPathError(newPath, renameAt(source, target))
 }
 
 // entryTarget resolves a path into the canonical directory that holds the entry
@@ -881,9 +878,9 @@ func (s *Service) Rename(ctx context.Context, path, newPath string) error {
 // A trailing slash is stripped by that normalization, so `link/` names the link
 // rather than what it points at. That is a deliberate divergence from the shell,
 // which follows: following here is what would let a delete reach the target.
-func (s *Service) entryTarget(path string) (string, error) {
+func (s *Service) entryTarget(path string) (Confined, error) {
 	if err := validatePathShape(path); err != nil {
-		return "", err
+		return Confined{}, err
 	}
 	cleaned := filepath.Clean(path)
 	if cleaned == string(os.PathSeparator) {
@@ -891,20 +888,21 @@ func (s *Service) entryTarget(path string) (string, error) {
 		// directory. No listing offers it, which leaves only a caller that named
 		// it by accident -- and handing it to RemoveAll would ask the kernel to
 		// delete the filesystem the hub is standing on.
-		return "", fmt.Errorf("%w: the filesystem root is not an entry", ErrInvalidPath)
+		return Confined{}, fmt.Errorf("%w: the filesystem root is not an entry", ErrInvalidPath)
 	}
 
 	parent := filepath.Dir(cleaned)
 	canonicalParent, err := s.roots.Resolve(parent, ModeRead)
 	if err != nil {
-		return "", err
+		return Confined{}, err
 	}
-	info, err := os.Stat(canonicalParent)
+	parentPath := s.roots.Confine(canonicalParent)
+	info, err := stat(parentPath)
 	if err != nil {
-		return "", classifyPathError(path, err)
+		return Confined{}, classifyPathError(path, err)
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("%w: %s is not a directory", ErrInvalidPath, parent)
+		return Confined{}, fmt.Errorf("%w: %s is not a directory", ErrInvalidPath, parent)
 	}
 
 	// The entry itself, not just its parent. Authorizing the parent covers every
@@ -912,9 +910,9 @@ func (s *Service) entryTarget(path string) (string, error) {
 	// refused -- but the interface's own name has an ordinary parent, so /dev,
 	// /proc and /sys would otherwise be reachable as entries. They are refused
 	// before any root check, so no configuration can expose them.
-	target := filepath.Join(canonicalParent, filepath.Base(cleaned))
-	if isBlocked(target) {
-		return "", fmt.Errorf("%w: %s is not reachable through the file API", ErrPathNotAllowed, path)
+	target := parentPath.join(filepath.Base(cleaned))
+	if isBlocked(target.abs) {
+		return Confined{}, fmt.Errorf("%w: %s is not reachable through the file API", ErrPathNotAllowed, path)
 	}
 	return target, nil
 }
@@ -927,24 +925,24 @@ func (s *Service) Delete(ctx context.Context, path string, recursive bool) error
 		return err
 	}
 
-	info, err := os.Lstat(target)
+	info, err := lstat(target)
 	if err != nil {
 		return classifyPathError(path, err)
 	}
 	if !info.IsDir() {
-		return classifyPathError(path, os.Remove(target))
+		return classifyPathError(path, remove(target))
 	}
 	if !recursive {
-		children, err := os.ReadDir(target)
+		children, err := readDir(target)
 		if err != nil {
 			return classifyPathError(path, err)
 		}
 		if len(children) > 0 {
 			return fmt.Errorf("%w: %s", ErrDirNotEmpty, path)
 		}
-		return classifyPathError(path, os.Remove(target))
+		return classifyPathError(path, remove(target))
 	}
-	if err := os.RemoveAll(target); err != nil {
+	if err := removeAll(target); err != nil {
 		return fmt.Errorf("%w: %w", ErrWriteFailed, err)
 	}
 	return nil
@@ -968,10 +966,10 @@ func (r cancelableReader) Read(p []byte) (int, error) {
 // speaks: milliseconds, which a JSON client can carry exactly, and nanoseconds,
 // which is what the filesystem records and what the next write is compared
 // against.
-func stampOf(path string) (WriteResult, error) {
-	info, err := os.Stat(path)
+func stampOf(target Confined) (WriteResult, error) {
+	info, err := stat(target)
 	if err != nil {
-		return WriteResult{}, classifyPathError(path, err)
+		return WriteResult{}, classifyPathError(target.abs, err)
 	}
 	return WriteResult{
 		Mtime:      info.ModTime().UnixMilli(),

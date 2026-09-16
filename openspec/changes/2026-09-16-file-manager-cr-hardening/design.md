@@ -18,9 +18,9 @@ constraints that shape it are the ones the existing implementation already commi
   `gocyclo` 15, `errcheck` with `check-blank`, `nolintlint` requiring every directive to name
   its rule and explain itself.
 - The design that shipped this feature (`archive/2026-09-15-file-preview-and-editing/design.md`)
-  already records the TOCTOU limit as accepted, with its cost stated. The review's finding is
-  not that the limit exists; it is that the *product* documentation still describes `roots` as
-  a boundary without it.
+  recorded the TOCTOU limit as accepted. The first review round's finding was that the *product*
+  documentation was stronger than that admission; the second round's was that documenting it is not
+  a remedy. Both are answered by decision 1.
 
 ## Goals / Non-Goals
 
@@ -35,56 +35,73 @@ constraints that shape it are the ones the existing implementation already commi
 **Non-Goals:**
 - Upload, git-diff preview, a remote-host file protocol, HTML preview, mobile layout — all
   deferred by the original design and untouched here.
-- Rewriting the path guard to descriptor-relative access. See decision 1.
-- A component test harness (`jsdom` + `@vue/test-utils`). See decision 5.
+- Replacing `os.Root` with a hand-written `openat` walk, or with a `renameat2`-based
+  compare-and-swap for the write's final step. See decisions 1 and 2.
+- Testing CodeMirror or DOMPurify themselves. The harness mounts components; the editor and the
+  sanitizer stay stubs, and what is verified is this project's wiring around them.
 
 ## Decisions
 
-### 1. `roots` is documented as a caller boundary, not implemented as an isolation boundary
+### 1. The boundary is enforced through a handle on the root, not only checked against a string
 
 The review's third release blocker is a TOCTOU: authorization resolves the target with
 `filepath.EvalSymlinks` and checks containment, and the operation is then performed on that
-*presented path*, which the kernel resolves again at syscall time. A local process that can
-replace a component of the path in between redirects the operation.
+*presented path*, which the kernel resolves again at syscall time. A local process that can replace
+a component of the path in between redirects the operation.
 
-The remedy is `openat`-relative access throughout. Go 1.26 has `os.Root` for exactly this, and
-it was probed on the development machine before being rejected for *this* change:
+The first answer to this was to say plainly what the boundary did and did not cover. The second
+review round rejected that, correctly: the hub advertises a boundary, and "we documented the way
+around it" is not one. So the operation is now performed through an open handle on the containing
+root, with the path expressed relative to it, and `os.Root` refuses rather than follows a component
+that leaves the tree.
 
-| probe | result |
-| --- | --- |
-| `Root.Open`/`OpenFile`/`Rename`/`Remove`/`RemoveAll`/`Mkdir`/`ReadDir`/`Chmod` on darwin | all work |
-| symlink whose target leaves the root | refused: `path escapes from parent` |
-| **absolute** symlink whose target stays **inside** the root | **also refused** |
-| error identity | a bare `errors.errorString` inside `*fs.PathError`; **no exported sentinel** |
-| `Root.Lstat` on a dangling link | works (does not follow) |
-| `Root.Stat` on a dangling link with an absolute target | refused (the `Stat` path follows) |
+`os.Root` was probed on the development machine first, and three of its properties shaped the
+implementation:
 
-Two consequences, and together they are why this is not the change for it:
+| probe | result | what it forced |
+| --- | --- | --- |
+| symlink whose target leaves the root | refused: `path escapes from parent` | the behaviour wanted |
+| **absolute** symlink whose target stays **inside** the root | **also refused** | canonicalize *first*, then confine: the handle is only ever handed a symlink-free path, except for the final element, which the entry operations never follow |
+| error identity | a bare `errors.errorString`, no sentinel | `escapedWithin` maps it to not-found, by text, the way `tooManyLinks` already matches `EvalSymlinks` |
 
-- **The absolute-symlink restriction would regress a capability this same review asks to
-  fix.** Finding #6 is that a symlink to a directory cannot be browsed. `os.Root` refuses
-  *any* absolute symlink, including one that points inside the root, so a design that
-  canonicalizes first and then hands the canonical relative path to the Root is required
-  rather than optional — and the paths that survive canonicalization as symlinks are exactly
-  the dangling ones, whose `Stat` through the Root then reports "escapes" where today it
-  reports not-found. Getting the 404s right again means mapping an unexported, unstable Go
-  error string, the way `tooManyLinks` already does for `EvalSymlinks` — a second such
-  dependency, in the same file, on the day of a release-blocker fix.
-- **The residual window is narrow, and the fix is not free.** It needs a concurrent local
-  actor with write permission on a directory the hub traverses, plus the ability to create
-  symlinks there. It is not reachable through the API, and it matters where the hub runs as a
-  more privileged account than those writers — a real but narrow case, not the case `roots`
-  is advertised for.
+Two more properties of the design, both consequences of the same rules:
 
-So this change makes the claim match the code, in the spec and in both READMEs, and records
-the migration with the probe above as the immediately following piece of work. The alternative
-— landing an `openat` migration in the same change as nine behaviour fixes — is how the
-regression the previous review round found (dangling symlinks becoming undeletable) happened.
+- **Only the rooted case changes.** With no roots configured there is no boundary and nothing to
+  escape from, so those hubs go on acting on plain paths. The default configuration's behaviour is
+  therefore byte-identical, which is what makes this migration safe to land in the same change as
+  nine other fixes.
+- **A move between two roots is the exception.** `os.Root.Rename` moves within its own tree only, so
+  a cross-root move is performed on the two absolute paths and a component replaced during it can
+  still redirect it. That is stated in the spec as the one exception rather than left to be found.
 
-*Alternatives considered:* implementing `os.Root` now (rejected above); leaving the docs alone
-because the design doc records the limit (rejected — the design doc is not what an operator
-reads, and the review's point is precisely that the product's claim is stronger than the
-design's admission).
+*Alternatives considered:* leaving the docs to carry the limit (rejected by review twice); a
+component-wise `O_NOFOLLOW` walk by hand (rejected: `os.Root` is that walk, maintained); refusing
+cross-root moves rather than performing them unsafely (rejected: it removes a working feature to
+close a window only a local actor can reach).
+
+### 1a. A save answer that crossed a rename is not recorded
+
+Once the boundary was enforced, the second review round found the *browser's* half of the same
+window: a write and a rename of the same file can be in flight together, and the two can be answered
+in either order. If the answer is recorded whenever the tab still holds the path the write named,
+then a rename that lands first -- moving the entry away, after which the write recreates the old
+name -- leaves the tab marked saved at the new name, which nothing was ever written to.
+
+So the manager records which paths it has an unanswered rename for, and an answer that arrives while
+one is outstanding is not folded in. The two orderings are indistinguishable from the browser, and
+the cost of refusing is a second save in the case where the write did land and the rename carried
+it. That is the trade the specification now states.
+
+*Alternatives considered:* awaiting the rename before sending the save (rejected: a large upload
+would stall the rename the user is watching); re-reading the file after the rename to decide
+(rejected: it cannot distinguish the two orderings either, and it replaces the tab's contents).
+
+### 1b. A listing's metadata phase is cancellable too
+
+Round 2 also found that the context check covered reading the directory but not describing what was
+read: `entryFor` runs up to the bound's worth of times after the last check, and for a symbolic link
+each call resolves a path and stats it. The spec says a cancelled request abandons the listing, so
+the loop checks as well.
 
 ### 2. Writing is bound to the entry it started against, at every precision available
 
@@ -200,7 +217,7 @@ boundary is described as the link it is instead of disclosing the target's size 
 peak is the finding); reading `maxDirEntries × k` to make the truncated subset more useful
 (rejected: no principled `k`, and the subset is arbitrary however large it is).
 
-### 5. Frontend: logic in modules, editors mounted, no new test dependency
+### 5. Frontend: logic in modules, editors mounted, and now a document to test them in
 
 The overlay's editor was keyed on the active path and rendered one at a time, so switching
 tabs destroyed the instance and its undo history — against the comment in `CodeEditor.vue`
@@ -209,13 +226,29 @@ that says one instance per open file. Every editable tab now gets its own mounte
 gains an `active` prop and re-measures when it becomes visible, because an editor laid out
 while hidden has no dimensions.
 
-Everything that could be tested is in `files/tabs.ts` — `settleSave`, `editable`,
-`presentation` — and is covered by the existing `node --test` modules. The remaining gap is
-unchanged and unchanged *deliberately*: there is still no DOM test harness, so CodeMirror's
-mount/unmount and real DOMPurify sanitization are not behaviourally tested. Adding `jsdom` and
-`@vue/test-utils` changes the test environment for the whole project, and mocked CodeMirror
-component tests mostly exercise the mock; that is a decision to take on its own, not as a
-side-effect of a bug-fix branch. It is listed as a follow-up.
+The decisions these rules make are in `files/tabs.ts` — `beginSave`, `settleSave`, `editable`,
+`presentation` — and are tested directly by the existing `node --test` modules, with no document
+involved. That is the right home for them, and it was not enough: two review rounds in a row found
+that the *wiring* around them could be changed without failing anything. Round 1's version of the
+save path re-read the tab at answer time, and round 2's version passed the outstanding-rename flag
+from a set that could simply be left empty; both left every test green.
+
+So the frontend now has a document. `jsdom` and `@vue/test-utils` are devDependencies, and
+`test/vue-loader.mjs` compiles a single-file component on the way in — the part of
+`@vitejs/plugin-vue` these tests need, with `<script setup>` and its template inlined, and
+`<style>` dropped. `test/dom.mjs` installs the globals a mounted component needs, and a test file
+imports it before anything that imports Vue, because the runtime captures the document when it is
+first evaluated.
+
+The editor is still CodeMirror's stand-in, which now applies a change to a document and calls the
+update listener — enough for a test to *type*, and for a second instance to be seen surviving a
+tab switch. What that deliberately does not test is CodeMirror's own behaviour, which is not this
+project's to verify.
+
+*Alternatives considered:* keeping the DOM-free modules and accepting the wiring gap (rejected by
+review twice); mounting components against the real CodeMirror (rejected: it needs a browser's
+layout engine, and the tests would then be measuring CodeMirror); writing a general SFC plugin
+(rejected: this compiles one component per file and nothing else).
 
 ## Risks / Trade-offs
 
@@ -246,8 +279,19 @@ side-effect of a bug-fix branch. It is listed as a follow-up.
   which is where the operation is legible today. One reviewer raised it as a
   finding and one as an out-of-scope observation; recorded here rather than left
   as an oversight.
-- **[Trade-off] The TOCTOU stays open**, with its scope now written down. → *Recorded in the
-  spec as a limit, in both READMEs, and as the follow-up in decision 1.*
+- **[Residual] A move between two configured roots still acts on path strings.** → *The one
+  operation `os.Root` cannot express, since a handle moves within its own tree only. Named as the
+  single exception in the spec; closing it needs a rename between two directory descriptors.*
+- **[Residual] The write's last check and its replacement are two adjacent system calls**, so an
+  entry moved or taken between them is acted on rather than detected. → *No filesystem primitive
+  replaces a name only if it still holds the file that was there. What the browser does when it
+  loses that race is specified under "Editing and unsaved changes": the answer is not recorded, so
+  the outcome the user sees is safe under either ordering.*
+- **[Residual] A file's classification and the bytes served are two reads of a mutable file.** →
+  *A file rewritten in between can be served with a classification taken before the change. The harm
+  is bounded by the same optimistic write: the modification time the client recorded is no longer
+  the file's, so its next save is refused as a conflict. Closing it would mean buffering the whole
+  file to serve a snapshot, which is what the streaming design exists to avoid.*
 
 ## Migration Plan
 
@@ -258,7 +302,11 @@ explicit user action. Rolling back is reverting the release.
 
 ## Open Questions
 
-- Whether to migrate the guard to `os.Root` now that the limit is stated plainly. The probe in
-  decision 1 is the starting point; the work is a change of its own, and it needs the symlink
-  and dangling-link behaviours re-verified against the cases the current tests already cover.
-- Whether the frontend should gain a DOM test environment. Deferred; see decision 5.
+- Whether a move between two configured roots can be made to act on handles rather than on path
+  strings. It needs a rename that takes two directory descriptors, which this hub has no dependency
+  for; it is the single named exception in the specification.
+- Whether the write's final step can be made a compare-and-swap. `renameat2(RENAME_EXCHANGE)` on
+  Linux can swap two names atomically and then be checked, but it is Linux-only and needs
+  `golang.org/x/sys`, and swapping back is its own window.
+- Whether sanitization itself should be tested against a real DOMPurify. The document exists now, so
+  the objection to it has weakened to a dependency question rather than a capability one.

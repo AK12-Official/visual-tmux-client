@@ -9,11 +9,13 @@ Lets an authenticated browser user browse, preview, edit, and organize files on 
 
 By default the hub SHALL allow file operations on any regular path its own operating-system user can access, mirroring the access that user already has through an attached terminal. When an operator configures a set of root directories, the hub SHALL confine every caller-supplied operation to those roots instead. The hub SHALL authorize each operation against the canonical, symlink-resolved form of the target path, not the caller-supplied lexical form, so that a symbolic link cannot be used to reach a target outside a root. The hub SHALL reject `/proc`, `/sys`, and `/dev` before applying any root check, so that no configuration can expose them. A target that does not yet exist SHALL be validated by resolving the canonical form of its nearest existing ancestor and re-appending the remaining segments. A caller SHALL supply absolute, platform-native paths of at most 4096 characters.
 
-Roots govern what a **caller** may name, and that is the whole of what they guarantee: no path supplied through this API reaches outside them, because each operation is authorized against the target's resolved form and one that resolves outside every root is refused.
+Roots govern what a **caller** may name, and no path supplied through this API reaches outside them: each operation is authorized against the target's resolved form, and one that resolves outside every root is refused.
 
-They are not containment against another process on the machine. The operation is performed on the resolved path, which the kernel resolves again when the call is made, so a process that can write to a directory the hub traverses can replace a component of that path in between and have the operation follow the replacement. Closing that requires descriptor-relative access throughout -- `openat`-relative walks, or an equivalent rooted handle -- which this hub does not implement, and which is recorded here so the boundary is not credited with more than it does.
+When roots are configured the hub SHALL also *perform* each operation through an open handle on the containing root, with the path expressed relative to it, so that the components of the target are resolved by the call that performs the operation rather than by an earlier check. This is what makes the boundary hold against another process on the machine and not merely against the caller: a component replaced by a symbolic link between the check and the operation SHALL cause the operation to be refused, rather than silently redirecting it outside the root. Moving an entry between two configured roots is the one operation that cannot be expressed this way -- a handle only moves within its own tree -- and it SHALL be performed on the two absolute paths, with a component replaced during it able to redirect the move. That exception SHALL be the only one.
 
-What it costs is bounded by who can exploit it: a local user who can write inside a directory the hub walks *and* who can read less than the hub's own operating-system user. It is not reachable through the API, and it grants a token holder nothing -- a token already authorizes an interactive terminal as the hub's user, so anyone holding one can reach those paths directly. Where no roots are configured there is no boundary for it to reach past.
+With no roots configured there is no boundary to keep, and none is claimed: the hub acts on plain paths, where a replaced component takes the operation wherever it points. That is the operating-system user's own access, which an attached terminal already grants.
+
+Roots are therefore a boundary against a caller, and -- for every operation but a move between two of them -- against a replaced path component as well. They are not a boundary against the hub's own user, who has the terminal, or against a file being changed while it is read: that is a different problem, specified under Bounded file reading.
 
 #### Scenario: Default boundary
 
@@ -27,8 +29,13 @@ What it costs is bounded by who can exploit it: a local user who can write insid
 
 #### Scenario: Another local process replaces a path component
 
-- **WHEN** a local process replaces a directory on an authorized path with a symbolic link before the operation is performed
-- **THEN** the operation follows the replacement, and this is a recorded limit rather than a guarantee that the boundary held
+- **WHEN** a local process replaces a directory on an authorized path with a symbolic link after the target has been authorized and before the operation is performed
+- **THEN** the hub refuses the operation rather than following the replacement outside the root
+
+#### Scenario: A move between two configured roots
+
+- **WHEN** a caller moves an entry from one configured root to another
+- **THEN** the move is performed on the two absolute paths, which is the one operation a component replaced during it can still redirect
 
 #### Scenario: Target inside a configured root
 
@@ -115,7 +122,7 @@ Reading SHALL be bounded by the same configured maximum, plus the entries the hu
 
 The hub SHALL stream a file's contents to the caller without loading the whole file into memory, and SHALL report the file's byte size and modification time alongside the contents. The hub SHALL refuse to read a file whose size exceeds the configured per-file limit. The hub SHALL allow the caller to distinguish binary content from text content so the browser does not render binary bytes as text. The hub SHALL read only regular files: a directory, a named pipe, a socket, a device, and any other kind SHALL be refused, and the hub SHALL NOT wait on a file that would block the request. The classification of a file's contents as binary or text SHALL be decided by the whole of its contents, not by a prefix of them.
 
-The hub SHALL NOT serve more bytes than the size it checked against the limit, and SHALL report a size that describes the body it sends. A file that grows after the check is served at the length that was checked; a file that shrinks after it is served as what it holds now, reported at that shorter length. A response never promises more bytes than it carries, because a client cannot tell such a response from one whose transfer failed.
+The hub SHALL NOT serve more bytes than the size it checked against the limit, and SHALL report a size that describes the body it sends. The classification of a file and the bytes served are read from the same file at different moments, so a file rewritten in between can be served with a classification taken before the change; a caller that then writes it is refused as a conflict, because the modification time it recorded is no longer the file's. A file that grows after the check is served at the length that was checked; a file that shrinks after it is served as what it holds now, reported at that shorter length. A response never promises more bytes than it carries, because a client cannot tell such a response from one whose transfer failed.
 
 #### Scenario: Read a text file
 
@@ -166,7 +173,7 @@ The hub SHALL NOT serve more bytes than the size it checked against the limit, a
 
 A write SHALL carry the modification time the caller last observed for the target. The hub SHALL refuse the write with a conflict error when that value does not match the file's current modification time. A caller MAY omit the observed modification time to force an overwrite. The hub SHALL write through a temporary file created in the target's own directory and then atomically replace the target, so that a failed, interrupted, or oversized write never leaves a partially written or truncated file at the target path. The hub SHALL remove the temporary file when a write fails. A write whose received body length differs from the declared length SHALL be refused. When a caller supplies an observed modification time for a file that does not exist, the hub SHALL report not-found rather than creating it.
 
-Immediately before replacing the target the hub SHALL re-check that the target is still the entry the write began against, and SHALL refuse with a conflict error if it is not. This check SHALL apply to a forced overwrite too: omitting the observed time is agreement to replace the file that was there, not agreement to recreate a file that has since been moved or removed, nor to replace a different file that has taken the name. A write that began against a name which did not exist SHALL likewise be refused if that name has been taken by the time the body has arrived.
+Immediately before replacing the target the hub SHALL re-check that the target is still the entry the write began against, and SHALL refuse with a conflict error if it is not. That re-check and the replacement are two adjacent system calls rather than one indivisible step, because no filesystem primitive replaces a name only if it still holds the file that was there; an entry moved or taken in that interval is therefore acted on rather than detected. What the browser does when it loses that race is specified under Editing and unsaved changes. This check SHALL apply to a forced overwrite too: omitting the observed time is agreement to replace the file that was there, not agreement to recreate a file that has since been moved or removed, nor to replace a different file that has taken the name. A write that began against a name which did not exist SHALL likewise be refused if that name has been taken by the time the body has arrived.
 
 Modification times SHALL be conveyed as integer milliseconds since the Unix epoch, which a JSON client can hold exactly. When the filesystem records finer precision than that, the hub SHALL convey the exact modification time alongside it as an opaque value the caller carries back unchanged, and SHALL compare against that exact value when the caller supplies one, so that two changes inside a single millisecond are two changes rather than one. A caller that supplies only milliseconds SHALL be compared against milliseconds. A successful write SHALL return the target's resulting modification time at both precisions, so the caller can continue editing without re-reading the file.
 
@@ -354,6 +361,8 @@ Each open file's editor state, including its undo history, SHALL be retained whi
 
 A save whose answer arrives after the file has been renamed SHALL NOT be recorded against the tab at its new path. The browser SHALL report that the file moved and leave the edit unsaved, so that the contents are written to the name the tab holds by a further save, rather than being reported as stored at a name where nothing was written.
 
+The same refusal SHALL apply when a rename of that file is still in flight as the answer arrives. The write and the rename are then racing on the server, and the browser cannot tell which landed first: the write may have landed before the entry moved, in which case the edit is at the new name and refusing to record it only costs a second save, or the rename may have landed first and the write recreated the old name, in which case recording it would report the edit as stored where nothing was written. The browser SHALL report the crossing and leave the tab modified.
+
 #### Scenario: Modify and save
 
 - **WHEN** the user edits an open file and saves
@@ -373,6 +382,11 @@ A save whose answer arrives after the file has been renamed SHALL NOT be recorde
 
 - **WHEN** a file is renamed after a save of it has been sent and before its answer arrives
 - **THEN** the browser reports that the file moved, does not mark the tab saved at the new name, and leaves the edit unsaved
+
+#### Scenario: A rename is still running when the save is answered
+
+- **WHEN** a rename of a file has been sent and not yet been answered at the moment that file's save is answered
+- **THEN** the browser reports that the save crossed a rename, does not record it as saved, and leaves the tab modified
 
 #### Scenario: Close a modified tab
 
@@ -398,7 +412,9 @@ A save whose answer arrives after the file has been renamed SHALL NOT be recorde
 
 The browser SHALL present a file according to its content type. Images SHALL be previewed as images. Markdown SHALL be previewable both as rendered output and as editable source, with the editable source as the default view. Text and source code SHALL open in the editor. Files detected as binary SHALL be presented as information about the file rather than as rendered or editable text. The browser SHALL NOT render file content as an HTML document.
 
-Rendering SHALL be bounded independently of the transfer limit, so that a large file cannot freeze the interface: an image larger than the preview bound SHALL NOT be rendered, and rendered Markdown SHALL be limited to a bounded prefix of the source.
+The browser SHALL NOT decide what a file is from its name alone. A name that suggests binary contents, or an image too large to render, SHALL be put to the hub before the browser presents the file, so that text the hub reads as text opens in the editor whatever it is called. That question SHALL cost the caller no file content.
+
+Rendering SHALL be bounded independently of the transfer limit, so that a large file cannot freeze the interface: an image larger than the preview bound SHALL NOT be rendered, and rendered Markdown SHALL be limited to a bounded prefix of the source. The bound SHALL be applied to the size the hub reports at the moment of the read rather than to a size a directory listing reported earlier, and no content beyond it SHALL be transferred for a preview that will not use it. A file found to be over the bound SHALL be presented as information with a download action, and the user SHALL be told why.
 
 #### Scenario: Image file
 
@@ -409,6 +425,21 @@ Rendering SHALL be bounded independently of the transfer limit, so that a large 
 
 - **WHEN** the user opens an image larger than the browser's image preview bound but within the transfer limit
 - **THEN** the browser presents the file as information with the option to download it, rather than rendering it
+
+#### Scenario: An image that grew after it was listed
+
+- **WHEN** the user opens an image whose size was within the preview bound when the directory was listed and is over it by the time it is read
+- **THEN** the browser transfers no content beyond the bound, presents the file as information with a download action, and says that it is too large to render
+
+#### Scenario: A text file with a binary name
+
+- **WHEN** the user opens a file whose extension suggests binary contents and whose contents the hub reads as text
+- **THEN** the browser opens it in the editor
+
+#### Scenario: A binary file with a text name
+
+- **WHEN** the user opens a file whose extension suggests text and which the hub reads as binary
+- **THEN** the browser presents it as information and does not decode its bytes as text
 
 #### Scenario: Markdown file
 

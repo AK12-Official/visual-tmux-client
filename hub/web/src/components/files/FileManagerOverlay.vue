@@ -10,6 +10,7 @@ import {
   deleteEntry,
   downloadFile,
   fetchWorkingDirectory,
+  probeFile,
   readFile,
   renameEntry,
   stampFromList,
@@ -74,6 +75,11 @@ const opening = new Set<string>()
 // saveTickets is the newest save attempted per tab session, so an out-of-order
 // answer from an older one cannot be folded back in.
 const saveTickets = new Map<number, number>()
+// renaming holds the source path of every rename this manager has asked for and
+// not yet been answered about. A save answer arriving while one is outstanding
+// describes a write that named the same path, and the two crossed on the wire:
+// see settleSave for why that answer is not recorded.
+const renaming = new Set<string>()
 // nextTabId numbers the editing sessions. See OpenFile.id for why an answer is
 // matched to a session rather than to a path.
 let nextTabId = 1
@@ -149,6 +155,40 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
+}
+
+/** openWithoutReading opens a tab for a file whose contents are not read: an
+ * image, which the preview fetches for itself, or something the hub read as
+ * binary. The size is whichever of the two observations is truthful. */
+function openWithoutReading(path: string, entry: Entry, size: number) {
+  tabs.value = [
+    ...tabs.value,
+    {
+      id: nextTabId++,
+      path,
+      name: entry.name,
+      text: '',
+      saved: '',
+      // From the listing, which reports milliseconds only. These files are
+      // never saved, so the weaker precision costs nothing.
+      stamp: stampFromList(entry.mtime),
+      size,
+      binary: false,
+    },
+  ]
+  activePath.value = path
+}
+
+/** onImageTooLarge records the size an image preview refused to render.
+ *
+ * The tab's size came from a directory listing, and that is the only thing that
+ * ever said this file was small enough to render. Correcting it is the whole
+ * fix: how a file is presented is decided from its name and its size, so once
+ * the size is true the file presents as information with a download action --
+ * which is what the specification asks for above the bound. */
+function onImageTooLarge(path: string, size: number) {
+  tabs.value = tabs.value.map((tab) => (tab.path === path ? { ...tab, size } : tab))
+  emit('notice', `${basename(path)} is ${formatSize(size)}, larger than this view renders.`, 'warning')
 }
 
 /** goTo loads a directory and makes it the current one.
@@ -273,24 +313,25 @@ async function openFile(entry: Entry, path: string) {
 
   try {
     const kind = choosePreview(entry.name, entry.size)
-    if (kind === 'info' || kind === 'image') {
-      tabs.value = [
-        ...tabs.value,
-        {
-          id: nextTabId++,
-          path,
-          name: entry.name,
-          text: '',
-          saved: '',
-          // From the listing, which reports milliseconds only. These files are
-          // never saved, so the weaker precision costs nothing.
-          stamp: stampFromList(entry.mtime),
-          size: entry.size,
-          binary: false,
-        },
-      ]
-      activePath.value = path
+    if (kind === 'image') {
+      openWithoutReading(path, entry, entry.size)
       return
+    }
+
+    // A name that calls a file binary, or an image too large to render, is a
+    // guess about contents the hub is the one that can read. One bodyless
+    // request gets its answer, and that answer decides: text the name called
+    // binary opens in the editor rather than being refused a look. The size is
+    // corrected at the same time, since a listing read earlier is the only thing
+    // that ever said how big this file is.
+    let size = entry.size
+    if (kind === 'info') {
+      const probed = await probeFile(path)
+      size = probed.size
+      if (probed.binary) {
+        openWithoutReading(path, entry, size)
+        return
+      }
     }
 
     const contents = await readFile(path)
@@ -321,7 +362,7 @@ async function openFile(entry: Entry, path: string) {
         text: contents.text,
         saved: contents.text,
         stamp: contents.stamp,
-        size: entry.size,
+        size,
         binary: contents.binary,
       },
     ]
@@ -375,8 +416,16 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
     const stamp = await saveOpenFile(request)
     if (!isSameTab(tab.id)) return
     if (saveTickets.get(tab.id) !== ticket) return
-    const settled = settleSave(tabs.value, request, stamp)
+    const settled = settleSave(tabs.value, request, stamp, renaming.has(request.path))
     tabs.value = settled.files
+    if (settled.outcome === 'raced') {
+      emit(
+        'notice',
+        `${tab.name} was being renamed while it was saved, so the answer was not recorded ` +
+          `against it. Save again once the rename finishes.`,
+        'warning',
+      )
+    }
     if (settled.outcome === 'moved') {
       const moved = liveTab(tab.id)
       emit(
@@ -607,12 +656,14 @@ function renameTarget(entry: Entry, path: string) {
   const name = window.prompt('Rename to', entry.name)
   if (!name || name === entry.name) return
   const target = joinPath(dirname(path), name)
+  renaming.add(path)
   void renameEntry(path, target)
     .then(() => {
       retargetTabs(path, target, name)
       return settleMutation(path, target)
     })
     .catch((err: unknown) => report(err, `Could not rename ${entry.name}`))
+    .finally(() => renaming.delete(path))
 }
 
 function deleteTarget(entry: Entry, path: string) {
@@ -821,6 +872,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
                 v-if="preview === 'image'"
                 :path="active.path"
                 @notice="(text, level) => emit('notice', text, level)"
+                @too-large="onImageTooLarge"
               />
               <MarkdownPreview
                 v-else-if="preview === 'markdown' && !activeIsMarkdownSource"

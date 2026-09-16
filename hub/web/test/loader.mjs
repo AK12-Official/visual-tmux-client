@@ -1,6 +1,8 @@
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
+import { compileVue } from './vue-loader.mjs'
+
 export async function resolve(specifier, context, nextResolve) {
   const browserOnly = {
     '@xterm/xterm': './mocks/xterm.mjs',
@@ -35,4 +37,14 @@ export async function resolve(specifier, context, nextResolve) {
     }
     throw err
   }
+}
+
+// A single-file component is compiled on the way in. The format is the one node
+// strips TypeScript from, because the compiled output keeps the script's own
+// annotations -- there is no bundler here to have removed them already.
+export async function load(url, context, nextLoad) {
+  if (url.endsWith('.vue')) {
+    return { format: 'module-typescript', source: compileVue(url), shortCircuit: true }
+  }
+  return nextLoad(url, context)
 }

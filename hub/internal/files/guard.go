@@ -49,6 +49,10 @@ const tooManyLinksMessage = "EvalSymlinks: too many links"
 // token holder out.
 type RootSet struct {
 	roots []string
+	// handles are the open descriptors the roots are acted through, parallel to
+	// roots. Acting through a handle is what closes the window between
+	// authorizing a path and performing the operation on it: see Confined.
+	handles []*os.Root
 }
 
 // NewRootSet canonicalizes each configured root. A root that cannot be resolved
@@ -75,7 +79,22 @@ func NewRootSet(roots []string) (*RootSet, error) {
 		}
 		set.roots = append(set.roots, resolved)
 	}
+	handles, err := openRoots(set.roots)
+	if err != nil {
+		return nil, fmt.Errorf("open root: %w", err)
+	}
+	set.handles = handles
 	return set, nil
+}
+
+// Close releases the handles the roots are acted through. A hub holds them for
+// its lifetime; tests hold one set per case and have to give them back, because
+// each is a file descriptor.
+func (s *RootSet) Close() {
+	for _, handle := range s.handles {
+		_ = handle.Close() //nolint:errcheck // nothing can be done about a descriptor that will not close
+	}
+	s.handles = nil
 }
 
 // Unrestricted reports whether no roots are configured.
@@ -134,16 +153,10 @@ func (s *RootSet) Resolve(path string, mode Mode) (string, error) {
 	return resolved, nil
 }
 
-// contains reports whether resolved lies inside one of the roots. It compares
-// path elements rather than string prefixes, so a root of /tmp/x/root does not
-// appear to contain /tmp/x/root-backup.
+// contains reports whether resolved lies inside one of the roots.
 func (s *RootSet) contains(resolved string) bool {
 	for _, root := range s.roots {
-		rel, err := filepath.Rel(root, resolved)
-		if err != nil {
-			continue
-		}
-		if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
+		if _, ok := relativeTo(root, resolved); ok {
 			return true
 		}
 	}

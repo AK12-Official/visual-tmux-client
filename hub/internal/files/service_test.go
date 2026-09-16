@@ -47,6 +47,9 @@ func mustRootedService(t *testing.T, root string) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The set holds an open descriptor per root, which is what operations below
+	// the root are performed through; a test that never gives it back leaks one.
+	t.Cleanup(set.Close)
 	return mustService(t, Options{Roots: set})
 }
 

@@ -11,6 +11,8 @@ import {
   isFileApiError,
   listDirectory,
   readFile,
+  probeFile,
+  readFileBytes,
   renameEntry,
   writeFile,
   type Stamp,
@@ -403,5 +405,71 @@ test('downloadFile returns the bytes rather than the response', async () => {
       calls[0].url,
       '/api/hosts/local/files/download?path=%2Fhome%2Fuser%2Fa.txt',
     )
+  })
+})
+
+// The hub answers a HEAD on the read route with the same headers and no body,
+// which is what lets the browser ask what a file is instead of guessing from its
+// name. Nothing but headers crosses the wire.
+test('probeFile asks the hub for the classification without the bytes', async () => {
+  await withoutStorage(async () => {
+    const calls = mockFetch(
+      new Response(null, {
+        status: 200,
+        headers: { 'X-File-Size': '4242', 'X-File-Binary': '1' },
+      }),
+    )
+
+    const probe = await probeFile('/home/user/notes.dat')
+
+    assert.equal(probe.binary, true)
+    assert.equal(probe.size, 4242)
+    assert.equal(calls[0].init?.method, 'HEAD')
+    assert.equal(calls[0].url, '/api/hosts/local/files/read?path=%2Fhome%2Fuser%2Fnotes.dat')
+  })
+})
+
+// A file the hub read as text is text whatever it is called, and that is the
+// answer the editor needs before it decides whether to offer one.
+test('probeFile reports a file the hub read as text', async () => {
+  await withoutStorage(async () => {
+    mockFetch(new Response(null, { status: 200, headers: { 'X-File-Size': '12' } }))
+
+    const probe = await probeFile('/home/user/notes.dat')
+
+    assert.equal(probe.binary, false)
+    assert.equal(probe.size, 12)
+  })
+})
+
+// The bound that decides whether an image is rendered is applied to the bytes
+// the hub says it will send, not to the size a directory listing reported
+// earlier: a file that grew since it was listed is the case this exists for.
+test('readFileBytes refuses a file over the bound before reading it', async () => {
+  await withoutStorage(async () => {
+    mockFetch(
+      new Response('pretend these bytes are huge', {
+        status: 200,
+        headers: { 'X-File-Size': '9000000' },
+      }),
+    )
+
+    const fetched = await readFileBytes('/home/user/photo.png', 8 * 1024 * 1024)
+
+    assert.ok('tooLarge' in fetched)
+    assert.equal(fetched.tooLarge, 9000000)
+  })
+})
+
+test('readFileBytes hands back the bytes of a file within the bound', async () => {
+  await withoutStorage(async () => {
+    mockFetch(
+      new Response('pixels', { status: 200, headers: { 'X-File-Size': '6' } }),
+    )
+
+    const fetched = await readFileBytes('/home/user/photo.png', 8 * 1024 * 1024)
+
+    assert.ok('blob' in fetched)
+    assert.equal(await fetched.blob.text(), 'pixels')
   })
 })

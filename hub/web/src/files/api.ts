@@ -234,10 +234,66 @@ export async function readFile(path: string): Promise<FileContents> {
   }
 }
 
-/** readFileBytes fetches the raw bytes, for previewing an image. */
-export async function readFileBytes(path: string): Promise<Blob> {
+/** headerSize reads the length a response reports, or fallback when it did not. */
+function headerSize(res: Response, fallback: number): number {
+  const value = Number(res.headers.get('X-File-Size'))
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback
+}
+
+/**
+ * ImageBytes is what fetching a file for the image preview produced: the bytes,
+ * or the length that made them not worth fetching.
+ */
+export type ImageBytes = { blob: Blob } | { tooLarge: number }
+
+/**
+ * readFileBytes fetches the raw bytes, for previewing an image.
+ *
+ * A file over the bound is refused before its body is read, so nothing enormous
+ * crosses the wire only to be discarded. The length that decides is the one the
+ * response reports rather than the one a directory listing gave earlier: a file
+ * that grew since it was listed is exactly the case this exists for, and the
+ * listing cannot know about it.
+ */
+export async function readFileBytes(path: string, limit: number): Promise<ImageBytes> {
   const res = await request(withPath('read', path))
-  return await res.blob()
+  const size = headerSize(res, limit + 1)
+  if (size > limit) {
+    await releaseBody(res)
+    return { tooLarge: size }
+  }
+  return { blob: await res.blob() }
+}
+
+/** FileProbe is what the hub says about a file without being asked to send it. */
+export interface FileProbe {
+  /** binary is the hub's classification of the whole contents. */
+  binary: boolean
+  /** size is the length the hub would serve. */
+  size: number
+}
+
+/**
+ * probeFile asks the hub what a file is, without fetching it.
+ *
+ * A file whose *name* says binary, or says image at a size too large to render,
+ * is not opened as text -- and the name is a guess. This is the hub's own answer
+ * to the question that guess stands in for, so `notes.dat` holding UTF-8 text can
+ * be opened in the editor instead of being refused a look on the strength of its
+ * extension.
+ *
+ * It costs one request and no body: the read route answers a HEAD with the same
+ * headers and nothing else, and the hub does the classifying it would have done
+ * anyway. A caller that goes on to read the file pays for that twice, which is
+ * the price of asking before deciding rather than deciding from a name.
+ */
+export async function probeFile(path: string): Promise<FileProbe> {
+  const res = await request(withPath('read', path), { method: 'HEAD' })
+  await releaseBody(res)
+  return {
+    binary: res.headers.get('X-File-Binary') === '1',
+    size: headerSize(res, 0),
+  }
 }
 
 /**

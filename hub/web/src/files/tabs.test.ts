@@ -262,3 +262,41 @@ test('a retargeted tab is still the same session', () => {
   assert.equal(settled.files[0].path, '/home/user/b.txt')
   assert.equal(isDirty(settled.files[0]), false)
 })
+
+// A save answer that arrives while a rename of its path is outstanding describes
+// a write whose fate the browser cannot know: the write may have landed before
+// the rename carried the entry away -- in which case the tab is saved -- or the
+// rename may have landed first and the write recreated the old name, in which
+// case the entry the tab now holds was never written. Recording it as saved
+// would be a lie in the second case, so the answer is not recorded.
+test('an answer that crossed a rename is not recorded', () => {
+  const file = openFile({ text: 'edited', saved: 'original' })
+
+  const settled = settleSave([file], beginSave(file), { millis: 900, nanos: null }, true)
+
+  assert.equal(settled.outcome, 'raced')
+  assert.equal(isDirty(settled.files[0]), true)
+  assert.deepEqual(settled.files[0], file)
+})
+
+// A rename is the more specific news: once the tab is at another path, that is
+// why the answer does not describe it, whether or not a rename is still running.
+test('a moved tab is reported as moved even while a rename is outstanding', () => {
+  const file = openFile({ text: 'edited', saved: 'original' })
+  const renamed = { ...file, path: '/home/user/b.txt', name: 'b.txt' }
+
+  const settled = settleSave([renamed], beginSave(file), null, true)
+
+  assert.equal(settled.outcome, 'moved')
+})
+
+// And a rename that has already finished leaves nothing to race with: the answer
+// describes the file the tab holds, because the tab was never moved.
+test('an answer is recorded normally once no rename is outstanding', () => {
+  const file = openFile({ text: 'edited', saved: 'original' })
+
+  const settled = settleSave([file], beginSave(file), { millis: 900, nanos: null }, false)
+
+  assert.equal(settled.outcome, 'saved')
+  assert.equal(isDirty(settled.files[0]), false)
+})
