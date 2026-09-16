@@ -47,6 +47,38 @@ export function choosePreview(name: string, size: number): PreviewKind {
   }
 }
 
+/**
+ * presentation decides how a file's contents are shown, given the hub's
+ * classification of them.
+ *
+ * The classification outranks the file's name, and only in the direction that
+ * matters: something the hub read and reported as binary is presented as
+ * information whatever the name suggests, because decoding its bytes as text is
+ * what would replace them on the next save. A name that merely suggests binary
+ * does not overrule contents the hub read as text -- a log with no extension
+ * opens in the editor.
+ *
+ * It lives here rather than beside the open-file state because it is a
+ * presentation rule: the module that owns the save and conflict rules has no
+ * business importing the renderer to answer a question about a file name.
+ */
+export function presentation(name: string, size: number, binary: boolean): PreviewKind {
+  if (binary) return 'info'
+  return choosePreview(name, size)
+}
+
+/**
+ * editable reports whether a file's contents belong in the editor.
+ *
+ * The file manager asks this of every open file, not only the one on screen: an
+ * editor that is merely hidden has to stay mounted, because unmounting one is
+ * what discards the undo history of the file the user switched away from.
+ */
+export function editable(name: string, size: number, binary: boolean): boolean {
+  const kind = presentation(name, size, binary)
+  return kind === 'editor' || kind === 'markdown'
+}
+
 export interface RenderedMarkdown {
   html: string
   truncated: boolean

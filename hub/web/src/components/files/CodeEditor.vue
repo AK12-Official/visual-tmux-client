@@ -47,17 +47,14 @@ watch(
 
 // An instance that is not on screen has no dimensions, so it cannot measure
 // itself -- and CodeMirror's own sizing follows the element it is given. Showing
-// one again is what asks it to measure, so that is where the request goes.
-//
-// The flag rather than a comparison against the previous value, because an
-// editor can also be created hidden (the parent mounts the editor for a file the
-// user is not looking at) and there is no change to notice in that case.
+// one again is what asks it to measure, so that is where the request goes. The
+// editor measures itself once when it is created, which covers the case of a
+// file that is opened while it is the one being shown.
 watch(
   () => props.active,
   (isActive) => {
     if (isActive) view?.requestMeasure()
   },
-  { immediate: true },
 )
 
 onBeforeUnmount(() => {

@@ -98,6 +98,12 @@ that began against a free name now also requires the name to still be free, clos
 hole from the other side: a create landing on a file created meanwhile would replace something
 its author never agreed to lose.
 
+The free-name branch asks with `Lstat` rather than `Stat`, which review caught: a
+name taken by a link whose target is gone is taken. `Stat` follows the link,
+finds nothing where it points, and reports the name as free -- so the write would
+replace the link, which is precisely the shape the check at the start of `Write`
+exists to refuse.
+
 The origin is captured by the *same* `os.Stat` that the pre-transfer check already performs,
 so this adds one `stat` at commit and no new failure mode when the target never existed.
 
@@ -140,6 +146,40 @@ pipe would hold a request goroutine indefinitely; the flag makes the open return
 for every kind of file, and for a regular file it changes nothing about reading one.
 *Alternatives considered:* `Lstat` before opening (rejected: a check on the path rather than on
 what was opened, which is the TOCTOU of decision 1 in miniature).
+
+*The cost is paid by the download route too*, where the classification is
+discarded: `download` streams bytes to disk and never consults `X-File-Binary`,
+so a large text file is read twice to serve one. Accepted rather than fixed,
+because the alternative is a second read path or a parameter that exists only to
+say "do not classify", and the bound is `files.max_file_size` with the second
+pass usually served from page cache. Recorded here so it is a decision rather
+than an oversight; it was raised by review.
+
+### 3a. The served length is bounded in both directions
+
+The first version of this fix replaced ServeContent's own measurement with a
+`SectionReader` bounded by the size the service authorized. That closes the
+growth direction and opens the opposite one: a file truncated after the check was
+then served with `Content-Length` promising the authorized length and a body
+carrying fewer bytes. `ServeContent` sets the header from the section and copies
+with an error it discards, so the result is a response contradicting its own
+framing -- which the browser reports as a transport failure, and which no client
+can do better with. The old code was self-consistent in that direction
+(`Content-Length: 0` for a file truncated to empty) and wrong only about
+`X-File-Size`. Review found this; it is the shape of regression a fix invites
+when it is reasoned about in one direction.
+
+So the section is bounded by the smaller of the authorized length and what the
+descriptor holds *now*, and `X-File-Size` reports that same number: never more
+than was checked, never more than is there. The modification time stays the one
+the service observed even where the body is shorter, because it is the token the
+next save is checked against -- handing the client the time of a change it never
+saw would let it overwrite that change with no prompt.
+
+The window is narrowed, not closed: a file truncated *during* the copy still
+under-delivers, which is inherent to putting a length in a header and then
+streaming a file. That direction is detectable by the client, and what it
+produces is a failed transfer rather than wrong data.
 
 ### 4. A listing's cost is bounded by the listing bound
 

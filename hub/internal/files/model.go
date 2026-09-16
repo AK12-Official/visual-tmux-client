@@ -32,6 +32,13 @@ type ReadResult struct {
 	// and it is what a later write is compared against. The two travel together
 	// because they answer different questions: Mtime is what a client can carry
 	// without losing digits, and this is what decides whether the file changed.
+	//
+	// It must be the file's real time: a caller echoes it back as the observation
+	// its next write is compared against, and there is no way to say "unknown"
+	// here. A zero is the epoch, which is a time a file may genuinely have, so an
+	// implementation that leaves this unset is reporting a file written in 1970
+	// -- and the client's next save would be refused as a conflict with nothing
+	// on screen explaining why.
 	MtimeNanos int64
 	// Binary reports whether the contents are not text, so the caller can decline
 	// to present them as text rather than decoding the bytes into replacement

@@ -247,6 +247,45 @@ test('readFile tolerates a hub that reports only milliseconds', async () => {
   })
 })
 
+// The exact time is carried back to the hub verbatim, so a value the hub would
+// reject must not be adopted as an observation: echoing it would make every
+// later save answer invalid-body, and reopening the file would be the only way
+// out. Anything that is not a plain decimal count is treated as the hub not
+// reporting one, which costs the finer comparison and nothing else.
+test('an exact modification time is adopted only when it can be carried back', async () => {
+  await withoutStorage(async () => {
+    const cases: Array<[string, string | null]> = [
+      ['1760000000123456789', '1760000000123456789'],
+      ['0', '0'],
+      ['-1', '-1'],
+      ['', null],
+      ['abc', null],
+      ['1e9', null],
+      ['12 34', null],
+      ['1760000000123456789.5', null],
+    ]
+    for (const [header, want] of cases) {
+      mockFetch(
+        new Response('hello', {
+          status: 200,
+          headers: {
+            'X-File-Size': '5',
+            'X-File-Mtime': '1737000000000',
+            'X-File-Mtime-Nanos': header,
+          },
+        }),
+      )
+      const contents = await readFile('/home/user/a.txt')
+      assert.equal(contents.stamp.nanos, want, `a header of ${JSON.stringify(header)}`)
+    }
+
+    // The write path adopts it the same way, since that value is what the next
+    // save sends.
+    mockFetch(jsonResponse({ mtime: 1, mtime_nanos: 'not a count' }))
+    assert.equal((await writeFile('/home/user/a.txt', 'x', stamp(1)))?.nanos, null)
+  })
+})
+
 // The write path reports it the same way, so the value a save adopts is the one
 // the next save will be compared against.
 test('writeFile adopts the exact modification time it is given back', async () => {

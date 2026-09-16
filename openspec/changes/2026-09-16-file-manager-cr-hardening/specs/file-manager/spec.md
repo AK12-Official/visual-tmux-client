@@ -2,9 +2,13 @@
 
 ### Requirement: Filesystem access boundary
 
-By default the hub SHALL allow file operations on any regular path its own operating-system user can access, mirroring the access that user already has through an attached terminal. When an operator configures a set of root directories, the hub SHALL confine every operation to those roots instead. The hub SHALL authorize each operation against the canonical, symlink-resolved form of the target path, not the caller-supplied lexical form, so that a symbolic link cannot be used to reach a target outside a root. The hub SHALL reject `/proc`, `/sys`, and `/dev` before applying any root check, so that no configuration can expose them. A target that does not yet exist SHALL be validated by resolving the canonical form of its nearest existing ancestor and re-appending the remaining segments. A caller SHALL supply absolute, platform-native paths of at most 4096 characters.
+By default the hub SHALL allow file operations on any regular path its own operating-system user can access, mirroring the access that user already has through an attached terminal. When an operator configures a set of root directories, the hub SHALL confine every caller-supplied operation to those roots instead. The hub SHALL authorize each operation against the canonical, symlink-resolved form of the target path, not the caller-supplied lexical form, so that a symbolic link cannot be used to reach a target outside a root. The hub SHALL reject `/proc`, `/sys`, and `/dev` before applying any root check, so that no configuration can expose them. A target that does not yet exist SHALL be validated by resolving the canonical form of its nearest existing ancestor and re-appending the remaining segments. A caller SHALL supply absolute, platform-native paths of at most 4096 characters.
 
-Roots govern what a **caller** may name, and that is the whole of what they guarantee. The hub SHALL NOT be described as containing a caller against another process on the same machine: authorization is decided against the target's resolved path and the operation is then performed on that path, which the kernel resolves again when the call is made, so a local process that can replace a component of the path in between has the operation follow the replacement. Closing that requires descriptor-relative access throughout — `openat`-relative walks, or an equivalent rooted handle — which this hub does not implement. This is a recorded limit of the implementation, stated so that the boundary is not credited with more than it does; it is not reachable through the API, and it is distinct from the guarantee below, which is about a caller who holds the token and nothing else.
+Roots govern what a **caller** may name, and that is the whole of what they guarantee: no path supplied through this API reaches outside them, because each operation is authorized against the target's resolved form and one that resolves outside every root is refused.
+
+They are not containment against another process on the machine. The operation is performed on the resolved path, which the kernel resolves again when the call is made, so a process that can write to a directory the hub traverses can replace a component of that path in between and have the operation follow the replacement. Closing that requires descriptor-relative access throughout -- `openat`-relative walks, or an equivalent rooted handle -- which this hub does not implement, and which is recorded here so the boundary is not credited with more than it does.
+
+What it costs is bounded by who can exploit it: a local user who can write inside a directory the hub walks *and* who can read less than the hub's own operating-system user. It is not reachable through the API, and it grants a token holder nothing -- a token already authorizes an interactive terminal as the hub's user, so anyone holding one can reach those paths directly. Where no roots are configured there is no boundary for it to reach past.
 
 #### Scenario: Default boundary
 
@@ -13,7 +17,7 @@ Roots govern what a **caller** may name, and that is the whole of what they guar
 
 #### Scenario: A caller names a path that resolves outside every root
 
-- **WHEN** roots are configured and a caller names a path whose resolved form lies outside all of them
+- **WHEN** roots are configured and a caller supplies a path whose resolved form lies outside all of them
 - **THEN** the hub refuses the operation with a not-allowed error, which is the guarantee roots do make
 
 #### Scenario: Another local process replaces a path component
@@ -58,7 +62,7 @@ Roots govern what a **caller** may name, and that is the whole of what they guar
 
 ### Requirement: Directory listing
 
-The hub SHALL return the immediate children of a directory, each carrying at least its name, whether it is a directory, its size, and its modification time. A child that is a symbolic link SHALL be described by what it points at, within the boundary: a link to a directory SHALL be reported as a directory, so the browser offers it for expanding rather than for opening. A link whose target lies outside every configured root SHALL NOT be described by that target, so a listing never answers with the size or modification time of a path the caller may not name. Listing SHALL order directories before files, and each group by name. Listing SHALL be bounded by the configured maximum number of entries and SHALL report whether the result was truncated. Listing a directory with no children SHALL succeed and return an empty result, not an error.
+The hub SHALL return the immediate children of a directory, each carrying at least its name, whether it is a directory, its size, and its modification time. A child that is a symbolic link SHALL be described by what it points at, within the boundary: a link to a directory SHALL be reported as a directory, so the browser offers it for expanding rather than for opening. A link whose target lies outside every configured root SHALL NOT be described by that target, so a listing never answers with the size or modification time of a path the caller may not name. An entry that cannot be described at all SHALL be reported as present without a size or modification time, rather than failing the listing or reporting the link's own size in place of a target's; a link whose target is missing is one of those. Listing SHALL order directories before files, and each group by name. Listing SHALL be bounded by the configured maximum number of entries and SHALL report whether the result was truncated. Listing a directory with no children SHALL succeed and return an empty result, not an error.
 
 Reading SHALL be bounded by the same configured maximum, so that the cost of listing a directory is the cost of the listing and not the cost of the directory. A directory holding more entries than that bound SHALL be reported as truncated, and which of its entries appear in a truncated listing is not specified. The hub SHALL abandon a listing when the caller's request is cancelled.
 
@@ -92,6 +96,11 @@ Reading SHALL be bounded by the same configured maximum, so that the cost of lis
 - **WHEN** roots are configured and a listed directory contains a symbolic link whose target lies outside every root
 - **THEN** the entry is not described by its target, and no size or modification time of it is disclosed
 
+#### Scenario: A symbolic link whose target is missing
+
+- **WHEN** a caller lists a directory containing a symbolic link whose target does not exist
+- **THEN** the entry is reported as present, without a size or modification time
+
 #### Scenario: Target is not a directory
 
 - **WHEN** a caller lists a path that is a regular file, or that does not exist
@@ -99,7 +108,9 @@ Reading SHALL be bounded by the same configured maximum, so that the cost of lis
 
 ### Requirement: Bounded file reading
 
-The hub SHALL stream a file's contents to the caller without loading the whole file into memory, and SHALL report the file's byte size and modification time alongside the contents. The hub SHALL refuse to read a file whose size exceeds the configured per-file limit. The hub SHALL allow the caller to distinguish binary content from text content so the browser does not render binary bytes as text. The hub SHALL read only regular files: a directory, a named pipe, a socket, a device, and any other kind SHALL be refused, and the hub SHALL NOT wait on a file that would block the request. The bytes served SHALL be exactly the bytes whose size was checked against the limit and reported to the caller, so that a file which changes size while it is being served is neither sent beyond the limit nor described by metadata that disagrees with its body. The classification of a file's contents as binary or text SHALL be decided by the whole of its contents, not by a prefix of them.
+The hub SHALL stream a file's contents to the caller without loading the whole file into memory, and SHALL report the file's byte size and modification time alongside the contents. The hub SHALL refuse to read a file whose size exceeds the configured per-file limit. The hub SHALL allow the caller to distinguish binary content from text content so the browser does not render binary bytes as text. The hub SHALL read only regular files: a directory, a named pipe, a socket, a device, and any other kind SHALL be refused, and the hub SHALL NOT wait on a file that would block the request. The classification of a file's contents as binary or text SHALL be decided by the whole of its contents, not by a prefix of them.
+
+The hub SHALL NOT serve more bytes than the size it checked against the limit, and SHALL report a size that describes the body it sends. A file that grows after the check is served at the length that was checked; a file that shrinks after it is served as what it holds now, reported at that shorter length. A response never promises more bytes than it carries, because a client cannot tell such a response from one whose transfer failed.
 
 #### Scenario: Read a text file
 
@@ -115,6 +126,11 @@ The hub SHALL stream a file's contents to the caller without loading the whole f
 
 - **WHEN** a file grows after its size has been checked and read
 - **THEN** the hub serves exactly the bytes that were checked, and the size it reports describes the body it sent
+
+#### Scenario: A file truncated while it is opened
+
+- **WHEN** a file is truncated after its size has been checked
+- **THEN** the hub serves what the file holds now and reports that length, rather than promising the length it measured
 
 #### Scenario: Read a missing file
 
@@ -227,7 +243,7 @@ The hub SHALL expose the working directory of a session's active pane, so the br
 
 The browser SHALL allow multiple files to be open at once, each in its own tab, and SHALL mark a file as modified while its in-memory contents differ from what was last read or saved. The browser SHALL surface that unsaved changes exist outside the editor, so that closing the manager or the terminal can warn before discarding them. Closing a modified tab SHALL require confirmation. When a save is refused because the file changed externally, the browser SHALL tell the user and offer to overwrite.
 
-Each open file's editor state, including its undo history, SHALL be retained for as long as its tab is open: viewing another file SHALL NOT discard it, because the undo stack a user reaches for is usually the one belonging to the file they just switched away from.
+Each open file's editor state, including its undo history, SHALL be retained while its tab is open and its contents are shown in the editor. Viewing another file SHALL NOT discard it, because the undo stack a user reaches for is usually the one belonging to the file they just switched away from. Renaming a file to a kind that is not shown in the editor is the one case that does discard it: the tab keeps its contents and its unsaved marks, and only the editor and its history go.
 
 A save whose answer arrives after the file has been renamed SHALL NOT be recorded against the tab at its new path. The browser SHALL report that the file moved and leave the edit unsaved, so that the contents are written to the name the tab holds by a further save, rather than being reported as stored at a name where nothing was written.
 

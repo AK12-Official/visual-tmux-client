@@ -1,8 +1,12 @@
 // Open-file state for the file manager, kept free of the DOM so the save and
 // conflict rules can be exercised directly.
+//
+// Free of the renderer too, deliberately: how a file's contents should be shown
+// is a presentation rule and lives in preview.ts, which imports the sanitizer.
+// A save has no opinion about either, and importing the renderer to answer a
+// question about a file name would drag it in for nothing.
 
 import { writeFile, type Stamp } from './api'
-import { choosePreview } from './preview'
 
 /** OpenFile is one file open in the editor. */
 export interface OpenFile {
@@ -52,43 +56,51 @@ export function anyDirty(files: OpenFile[]): boolean {
 }
 
 /**
- * editable reports whether a file's contents belong in the editor.
+ * SaveRequest is everything one save is sent with, captured together.
  *
- * It exists so the answer is in one place: the overlay has to know which files
- * the editor is holding before it renders, because an editor that is merely off
- * screen must stay mounted rather than be unmounted and rebuilt.
+ * Captured together, and not read again later, is the whole point. Everything
+ * here happens around an await, and a rename completes inside that window: the
+ * tab moves to a new name, and an answer that arrives afterwards describes the
+ * write that named the old one. A save that re-read the tab at answer time would
+ * compare the tab against itself and agree, and would mark the file at the new
+ * name saved having never written a byte there. So what is sent and what the
+ * answer is matched against are the same object, taken once.
  */
-export function editable(file: OpenFile): boolean {
-  const kind = presentation(file)
-  return kind === 'editor' || kind === 'markdown'
+export interface SaveRequest {
+  /** id is the editing session that asked, which survives a rename. */
+  id: number
+  /** path is the file the write names. */
+  path: string
+  /** text is the exact contents the write carries. */
+  text: string
+  /** expected is what the write is compared against, or null to force it. */
+  expected: Stamp | null
 }
 
 /**
- * presentation decides how a file's contents are shown.
- *
- * The hub's classification outranks the file's name: something it reports as
- * binary is presented as information whatever the name suggests, and decoding
- * its bytes as text is what would corrupt them on the next save.
- */
-export function presentation(file: OpenFile): ReturnType<typeof choosePreview> {
-  if (file.binary) return 'info'
-  return choosePreview(file.name, file.size)
-}
-
-/**
- * saveOpenFile writes a file's current contents and returns the modification
- * time the hub reports, or null when it reported none.
- *
- * The caller must adopt a returned value. Guessing it instead -- which is what a
- * client that assumed the current time would do -- dates the file behind itself
- * and makes the very next save look like a conflict.
+ * beginSave captures what a save will send.
  *
  * `force` is what the user's confirmation after a conflict asks for: it drops the
  * observed modification time, which is the only thing that asks the hub to
  * overwrite regardless.
  */
-export async function saveOpenFile(file: OpenFile, force = false): Promise<Stamp | null> {
-  return writeFile(file.path, file.text, force ? null : file.stamp)
+export function beginSave(file: OpenFile, force = false): SaveRequest {
+  return {
+    id: file.id,
+    path: file.path,
+    text: file.text,
+    expected: force ? null : file.stamp,
+  }
+}
+
+/** saveOpenFile sends a captured save and reports the modification time the hub
+ * answered with, or null when it reported none.
+ *
+ * The caller must adopt a returned value. Guessing it instead -- which is what a
+ * client that assumed the current time would do -- dates the file behind itself
+ * and makes the very next save look like a conflict. */
+export async function saveOpenFile(request: SaveRequest): Promise<Stamp | null> {
+  return writeFile(request.path, request.text, request.expected)
 }
 
 /** applySaved folds a successful save back into the file's state.
@@ -122,34 +134,34 @@ export interface SaveSettlement {
 /**
  * settleSave folds a save's answer back into the open files.
  *
- * `sentPath` is the path the write named, captured before it was sent, and this
- * is why it has to be. Everything here happens around an await, and a rename
- * completes inside that window: it moves the tab to the new name, and the answer
- * that arrives afterwards describes the file the write named -- which the tab no
- * longer holds. Applying it anyway is worse than doing nothing, because it
- * records the tab as saved, at the new path, having never written a byte there:
- * the edit is left only at the old name, and the tab reports no unsaved changes.
- * So the answer is passed back to the caller as `moved` instead, and the user is
- * told to save again -- which writes the edit to the name the tab now holds.
+ * The request carries the path the write named, and this is why it has to. A
+ * rename completes while the write is travelling: it moves the tab to the new
+ * name, and the answer that arrives afterwards describes the file the write
+ * named -- which the tab no longer holds. Applying it anyway is worse than doing
+ * nothing, because it records the tab as saved, at the new name, having never
+ * written a byte there: the edit is left only at the old name, and the tab
+ * reports no unsaved changes. So the answer is passed back to the caller as
+ * `moved` instead, and the user is told to save again -- which writes the edit to
+ * the name the tab now holds.
  *
  * The tab is identified by session rather than by path throughout, because a
  * rename replaces the tab object: the one captured before the await is a
  * snapshot whose path is the old one, and comparing against it would agree with
- * itself and mark the wrong file saved.
+ * itself and mark the wrong file saved. That is why the request is an argument
+ * rather than a set of loose values -- there is nothing here for the caller to
+ * pass the wrong way round.
  */
 export function settleSave(
   files: OpenFile[],
-  id: number,
-  sent: string,
-  sentPath: string,
+  request: SaveRequest,
   stamp: Stamp | null,
 ): SaveSettlement {
-  const tab = files.find((candidate) => candidate.id === id)
+  const tab = files.find((candidate) => candidate.id === request.id)
   if (!tab) return { files, outcome: 'closed' }
-  if (tab.path !== sentPath) return { files, outcome: 'moved' }
+  if (tab.path !== request.path) return { files, outcome: 'moved' }
   return {
     files: files.map((candidate) =>
-      candidate.id === id ? applySaved(candidate, stamp, sent) : candidate,
+      candidate.id === request.id ? applySaved(candidate, stamp, request.text) : candidate,
     ),
     outcome: 'saved',
   }

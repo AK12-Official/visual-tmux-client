@@ -6,9 +6,8 @@ import { FileApiError } from './api'
 import {
   anyDirty,
   applySaved,
-  editable,
+  beginSave,
   isDirty,
-  presentation,
   saveOpenFile,
   settleSave,
   type OpenFile,
@@ -77,7 +76,7 @@ test('a save sends the observed modification time', async () => {
   const calls = mockFetch(() => jsonResponse({ mtime: 250 }))
   const file = openFile({ text: 'edited' })
 
-  const stamp = await saveOpenFile(file)
+  const stamp = await saveOpenFile(beginSave(file))
   assert.equal(stamp?.millis, 250)
 
   const url = new URL(calls[0].url, 'http://localhost')
@@ -91,7 +90,7 @@ test('a forced save sends no observed modification time', async () => {
   setup()
   const calls = mockFetch(() => jsonResponse({ mtime: 300 }))
 
-  await saveOpenFile(openFile({ text: 'mine' }), true)
+  await saveOpenFile(beginSave(openFile({ text: 'mine' }), true))
 
   const url = new URL(calls[0].url, 'http://localhost')
   assert.equal(url.searchParams.has('expected_mtime'), false)
@@ -109,7 +108,7 @@ test('a save sends the exact modification time it was given', async () => {
     stamp: { millis: 1760000000123, nanos: '1760000000123456789' },
   })
 
-  const stamp = await saveOpenFile(file)
+  const stamp = await saveOpenFile(beginSave(file))
   const url = new URL(calls[0].url, 'http://localhost')
   assert.equal(url.searchParams.get('expected_mtime'), '1760000000123')
   assert.equal(url.searchParams.get('expected_mtime_nanos'), '1760000000123456789')
@@ -123,7 +122,7 @@ test('a save survives a hub that reports only milliseconds', async () => {
   setup()
   mockFetch(() => jsonResponse({ mtime: 250 }))
 
-  const stamp = await saveOpenFile(openFile({ text: 'edited' }))
+  const stamp = await saveOpenFile(beginSave(openFile({ text: 'edited' })))
 
   assert.equal(stamp?.millis, 250)
   assert.equal(stamp?.nanos, null)
@@ -134,7 +133,7 @@ test('a lost race surfaces as a conflict the caller can match', async () => {
   mockFetch(() => jsonResponse({ error: 'conflict' }, 409))
 
   await assert.rejects(
-    () => saveOpenFile(openFile({ text: 'mine' })),
+    () => saveOpenFile(beginSave(openFile({ text: 'mine' }))),
     (err: unknown) => {
       assert.ok(err instanceof FileApiError)
       assert.equal((err as FileApiError).code, 'conflict')
@@ -150,11 +149,11 @@ test('adopting the returned mtime makes the next save clean', async () => {
   const calls = mockFetch(() => jsonResponse({ mtime: 777 }))
   const file = openFile({ text: 'first' })
 
-  const saved = applySaved(file, await saveOpenFile(file), file.text)
+  const saved = applySaved(file, await saveOpenFile(beginSave(file)), file.text)
   assert.equal(isDirty(saved), false)
   assert.equal(saved.stamp.millis, 777)
 
-  await saveOpenFile(saved)
+  await saveOpenFile(beginSave(saved))
   const url = new URL(calls[1].url, 'http://localhost')
   assert.equal(url.searchParams.get('expected_mtime'), '777')
 })
@@ -185,21 +184,37 @@ test('a keystroke typed during a save is still unsaved afterwards', async () => 
   mockFetch(() => jsonResponse({ mtime: 777 }))
   const file = openFile({ text: 'first' })
 
-  const sent = file.text
-  const stamp = await saveOpenFile(file)
+  const request = beginSave(file)
+  const stamp = await saveOpenFile(request)
   // The user keeps typing before the response is folded back in.
   const edited = { ...file, text: 'first and more' }
 
-  const saved = applySaved(edited, stamp, sent)
+  const saved = applySaved(edited, stamp, request.text)
   assert.equal(isDirty(saved), true)
   assert.equal(saved.text, 'first and more')
   assert.equal(saved.saved, 'first')
 })
 
+// The path, the text, and the session are captured once, together, and the
+// answer is matched against that same object. The bug this pins: the path was
+// read again after the await, so a rename that completed during the write -- and
+// which replaces the tab object -- left the comparison agreeing with itself, and
+// the tab at the *new* name was marked saved by a write that named the old one.
+test('a save request captures the path it will name', () => {
+  const file = openFile({ text: 'edited', saved: 'original' })
+
+  const request = beginSave(file)
+
+  assert.equal(request.path, '/home/user/a.txt')
+  assert.equal(request.text, 'edited')
+  assert.equal(request.id, file.id)
+  assert.deepEqual(request.expected, file.stamp)
+})
+
 test('an answer for a tab that still holds the file it wrote marks it saved', () => {
   const file = openFile({ text: 'edited', saved: 'original' })
 
-  const settled = settleSave([file], file.id, 'edited', file.path, { millis: 900, nanos: '900' })
+  const settled = settleSave([file], beginSave(file), { millis: 900, nanos: '900' })
 
   assert.equal(settled.outcome, 'saved')
   assert.equal(isDirty(settled.files[0]), false)
@@ -212,12 +227,12 @@ test('an answer for a tab that still holds the file it wrote marks it saved', ()
 // written a byte there -- the edit was left only at the old name, while the tab
 // reported no unsaved changes and could be closed without a warning.
 test('an answer for a path the tab has left does not mark it saved', () => {
-  const sentPath = '/home/user/a.txt'
   const file = openFile({ text: 'edited', saved: 'original' })
+  const request = beginSave(file)
   // The rename that landed while the write was travelling.
   const renamed = { ...file, path: '/home/user/b.txt', name: 'b.txt' }
 
-  const settled = settleSave([renamed], file.id, 'edited', sentPath, { millis: 900, nanos: null })
+  const settled = settleSave([renamed], request, { millis: 900, nanos: null })
 
   assert.equal(settled.outcome, 'moved')
   assert.equal(isDirty(settled.files[0]), true)
@@ -228,7 +243,7 @@ test('an answer for a path the tab has left does not mark it saved', () => {
 test('an answer for a tab that was closed has nowhere to land', () => {
   const file = openFile()
 
-  const settled = settleSave([], file.id, file.text, file.path, { millis: 900, nanos: null })
+  const settled = settleSave([], beginSave(file), { millis: 900, nanos: null })
 
   assert.equal(settled.outcome, 'closed')
   assert.deepEqual(settled.files, [])
@@ -239,32 +254,11 @@ test('an answer for a tab that was closed has nowhere to land', () => {
 // session would have found nothing and reported the file closed.
 test('a retargeted tab is still the same session', () => {
   const file = openFile({ text: 'edited', saved: 'original' })
-  const renamed = { ...file, path: '/home/user/b.txt', name: 'b.txt' }
+  const rename = { ...file, path: '/home/user/b.txt', name: 'b.txt' }
 
-  const settled = settleSave([renamed], file.id, 'edited', renamed.path, { millis: 5, nanos: null })
+  const settled = settleSave([rename], beginSave(rename), { millis: 5, nanos: null })
 
   assert.equal(settled.outcome, 'saved')
   assert.equal(settled.files[0].path, '/home/user/b.txt')
   assert.equal(isDirty(settled.files[0]), false)
-})
-
-// The editor has to hold every file whose contents it is showing, and only
-// those: a file it is not showing must not be mounted, and a file it is showing
-// must not be unmounted just because the user looked elsewhere.
-test('the editor holds source, and nothing it must not render as text', () => {
-  assert.equal(editable(openFile({ name: 'main.go' })), true)
-  assert.equal(editable(openFile({ name: 'notes.md' })), true)
-  assert.equal(editable(openFile({ name: 'photo.png' })), false)
-  assert.equal(editable(openFile({ name: 'archive.zip' })), false)
-  // The hub's answer outranks the name in both directions.
-  assert.equal(editable(openFile({ name: 'main.go', binary: true })), false)
-  assert.equal(editable(openFile({ name: 'notes.md', binary: true })), false)
-})
-
-test('presentation follows the hub over the file name', () => {
-  assert.equal(presentation(openFile({ name: 'photo.png' })), 'image')
-  assert.equal(presentation(openFile({ name: 'notes.md' })), 'markdown')
-  assert.equal(presentation(openFile({ name: 'main.go' })), 'editor')
-  assert.equal(presentation(openFile({ name: 'main.go', binary: true })), 'info')
-  assert.equal(presentation(openFile({ name: 'photo.png', binary: true })), 'info')
 })

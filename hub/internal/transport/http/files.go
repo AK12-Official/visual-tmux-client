@@ -120,13 +120,37 @@ func (s *handlerState) serveFile(w http.ResponseWriter, r *http.Request, attachm
 		_ = result.File.Close() //nolint:errcheck // the response has already been written
 	}()
 
+	// What this response will actually carry.
+	//
+	// The service measured the file and checked that measurement against the
+	// limit; this reads the same descriptor again, which cannot be a different
+	// file. The result can therefore be shorter than what was authorized -- a
+	// file truncated after it was checked, which is what a rotating log does --
+	// and can never be longer.
+	//
+	// Reporting the length that is really sent is what keeps Content-Length,
+	// X-File-Size, and the body from disagreeing. A response whose headers
+	// promise more bytes than it carries is a framing error, and the browser
+	// rejects the whole fetch: the user is told the transfer failed, which says
+	// nothing about the file. A short body reported as short is simply what the
+	// file holds now.
+	size := result.Size
+	if info, statErr := result.File.Stat(); statErr == nil && info.Size() < size {
+		size = info.Size()
+	}
+
 	w.Header().Set("Content-Type", fileContentType)
-	w.Header().Set("X-File-Size", strconv.FormatInt(result.Size, 10))
+	w.Header().Set("X-File-Size", strconv.FormatInt(size, 10))
 	w.Header().Set("X-File-Mtime", strconv.FormatInt(result.Mtime, 10))
 	// The exact modification time, as a decimal string rather than a number.
 	// Nanoseconds since the epoch exceed what a JavaScript number holds exactly,
 	// so a client that parsed it would round it to a time that matches nothing;
 	// the browser carries this one back unchanged.
+	//
+	// It stays the time the service observed even where the body is shorter than
+	// what it measured. This header is what the next save is checked against, and
+	// a client that observed a file which then changed must be told so rather
+	// than handed the time of the change it did not see.
 	w.Header().Set("X-File-Mtime-Nanos", strconv.FormatInt(result.MtimeNanos, 10))
 	// Whether the contents are text is the hub's answer to give: the browser
 	// would otherwise have to guess from the name, and a wrong guess either
@@ -142,12 +166,12 @@ func (s *handlerState) serveFile(w http.ResponseWriter, r *http.Request, attachm
 
 	// ServeContent handles range requests and fills in Content-Length, and it
 	// takes the length from the reader it is handed -- so it is handed exactly
-	// the bytes that were checked against the limit. Given the descriptor alone
-	// it would measure the file again, and a file that grew after the check would
-	// be served at its new size: past a limit it had already passed, with
-	// X-File-Size describing a length the body does not have.
+	// the bytes that were checked against the limit, and no more even if the file
+	// has grown since. Given the descriptor alone it would measure the file
+	// again, and a file that grew after the check would be served at its new
+	// size: past a limit it had already passed.
 	http.ServeContent(w, r, filepath.Base(path), time.Unix(0, result.MtimeNanos),
-		io.NewSectionReader(result.File, 0, result.Size))
+		io.NewSectionReader(result.File, 0, size))
 }
 
 func (s *handlerState) writeFile(w http.ResponseWriter, r *http.Request) {

@@ -142,17 +142,34 @@ function optionalMtime(raw: unknown): number | null {
 function optionalStamp(rawMtime: unknown, rawNanos: unknown): Stamp | null {
   const millis = optionalMtime(rawMtime)
   if (millis === null) return null
-  const nanos = typeof rawNanos === 'string' && rawNanos.trim() !== '' ? rawNanos : null
-  return { millis, nanos }
+  return { millis, nanos: exactNanos(rawNanos) }
 }
 
-/** mtimeOf reads the modification time the hub reports alongside the bytes. */
+/** NANOS is a decimal nanosecond count, which is how the exact modification time
+ * travels. It is never parsed -- the value exceeds what a JavaScript number holds
+ * exactly, so it is carried back to the hub as the string it arrived as. */
+const NANOS = /^-?\d+$/
+
+/** exactNanos reads an exact modification time, or null when the value is not one
+ * this client can carry back.
+ *
+ * Only a value that is entirely a decimal count is adopted. Absent, empty, and
+ * otherwise malformed are all "not reported": this value goes back to the hub on
+ * the next save, and echoing something the hub cannot parse would make every
+ * later save answer invalid-body, with reopening the file as the only way out.
+ * Reporting "no exact time" instead costs the finer comparison and nothing
+ * else. */
+function exactNanos(raw: unknown): string | null {
+  return typeof raw === 'string' && NANOS.test(raw) ? raw : null
+}
+
+/** stampOf reads the modification time the hub reports alongside the bytes. */
 function stampOf(res: Response): Stamp {
   return {
     millis: requireMtime(res.headers.get('X-File-Mtime')),
     // Absent from a hub that predates it, in which case the millisecond value is
     // what the next save is compared against -- weaker, but still a comparison.
-    nanos: res.headers.get('X-File-Mtime-Nanos'),
+    nanos: exactNanos(res.headers.get('X-File-Mtime-Nanos')),
   }
 }
 

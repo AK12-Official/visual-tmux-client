@@ -647,3 +647,37 @@ func TestReadRouteExposesTheExactModificationTime(t *testing.T) {
 		t.Errorf("expected the exact value as a string, got %q", got)
 	}
 }
+
+// A file truncated between the size check and the transfer is served as what it
+// holds now, reported at that length.
+//
+// The bug this pins: the section handed to ServeContent was bounded by the
+// authorized length alone. A shortened file then produced a response whose
+// Content-Length promised ten bytes and whose body carried four -- a framing
+// error the browser reports as a failed transfer, which says nothing about the
+// file. A short body reported as short is simply what the file holds now.
+func TestReadRouteServesAShortenedFileAtItsNewLength(t *testing.T) {
+	result := openReadResult(t, "0123456789")
+	// The file loses six bytes after the service measured it.
+	if err := result.File.Truncate(4); err != nil {
+		t.Fatal(err)
+	}
+	svc := &mockFileService{readFn: func(string) (files.ReadResult, error) {
+		return result, nil
+	}}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+
+	rec := authedGet(t, router, "/api/hosts/local/files/read?path=/tmp/shrunk.log")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if got := rec.Body.String(); got != "0123" {
+		t.Errorf("expected what the file holds now, got %q", got)
+	}
+	if got := rec.Header().Get("Content-Length"); got != "4" {
+		t.Errorf("expected Content-Length 4, got %q", got)
+	}
+	if got := rec.Header().Get("X-File-Size"); got != "4" {
+		t.Errorf("expected X-File-Size 4, got %q", got)
+	}
+}

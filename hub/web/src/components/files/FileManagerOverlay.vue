@@ -19,12 +19,11 @@ import {
 import { basename, dirname, joinPath, quoteForShell } from '../../files/pathUtils'
 import { createRenames } from '../../files/renames'
 import { getConfig } from '../../config'
-import { choosePreview } from '../../files/preview'
+import { choosePreview, editable, presentation } from '../../files/preview'
 import {
   anyDirty,
-  editable,
+  beginSave,
   isDirty,
-  presentation,
   saveOpenFile,
   settleSave,
   type OpenFile,
@@ -81,7 +80,9 @@ let nextTabId = 1
 
 const active = computed(() => tabs.value.find((tab) => tab.path === activePath.value) ?? null)
 const dirty = computed(() => anyDirty(tabs.value))
-const preview = computed(() => (active.value === null ? null : presentation(active.value)))
+const preview = computed(() =>
+  active.value === null ? null : presentation(active.value.name, active.value.size, active.value.binary),
+)
 const activeIsMarkdownSource = computed(
   () => active.value !== null && (markdownView.get(active.value.path) ?? 'source') === 'source',
 )
@@ -90,7 +91,9 @@ const activeIsMarkdownSource = computed(
 // them stay mounted: unmounting the editor for a file the user switched away
 // from would take that file's undo history with it, and history is the thing a
 // user reaches for precisely after switching away and back.
-const editorTabs = computed(() => tabs.value.filter(editable))
+const editorTabs = computed(() =>
+  tabs.value.filter((tab) => editable(tab.name, tab.size, tab.binary)),
+)
 // editorVisible says whether the active file is shown in the editor right now,
 // as opposed to rendered Markdown or a preview of some other kind.
 const editorVisible = computed(
@@ -348,16 +351,14 @@ async function toggleDirectory(path: string) {
 
 /** save writes one tab, named by its session rather than by its path.
  *
- * The tab is identified rather than looked up by path because everything here
- * happens around an await: the user can rename the file, or switch to another
- * tab, while the write travels. Naming the session is what makes the conflict
- * prompt re-save the file the question was about even then, and what keeps a
- * rename from stranding the answer on a path nothing holds any more.
- *
- * `sent` is the exact text this call sends. applySaved has to compare against it
- * rather than against whatever the tab holds when the response lands, or
- * keystrokes typed during the round trip are recorded as saved without being
- * written. */
+ * The session, the path, and the text are captured together as one SaveRequest
+ * before the write travels, and the answer is matched against that same object.
+ * Everything here happens around an await: the user can rename the file or
+ * switch tabs while the write is in flight, and a rename is the one that bites.
+ * It moves the tab to a new path and replaces the tab object, so anything read
+ * again at answer time would describe the tab as it now is -- and agreeing with
+ * itself is what would mark the file at the new path saved by a write that named
+ * the old one. See settleSave. */
 async function save(force = false, tabId: number | null = active.value?.id ?? null) {
   const tab = tabs.value.find((candidate) => candidate.id === tabId)
   if (!tab) return
@@ -369,24 +370,19 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
   const ticket = (saveTickets.get(tab.id) ?? 0) + 1
   saveTickets.set(tab.id, ticket)
 
-  const sent = tab.text
-  // The path this write names, captured because a rename can complete while it
-  // travels and move the tab somewhere else. The answer that comes back
-  // describes the file the write named, and settleSave is what refuses to record
-  // it against a tab that no longer holds that file.
-  const sentPath = tab.path
+  const request = beginSave(tab, force)
   try {
-    const stamp = await saveOpenFile(tab, force)
+    const stamp = await saveOpenFile(request)
     if (!isSameTab(tab.id)) return
     if (saveTickets.get(tab.id) !== ticket) return
-    const settled = settleSave(tabs.value, tab.id, sent, sentPath, stamp)
+    const settled = settleSave(tabs.value, request, stamp)
     tabs.value = settled.files
     if (settled.outcome === 'moved') {
       const moved = liveTab(tab.id)
       emit(
         'notice',
-        `${tab.name} moved to ${moved?.path ?? 'another path'} while it was being saved; the edit ` +
-          `is still unsaved here. Save again to write it to the new name.`,
+        `${tab.name} moved to ${moved?.path ?? 'another path'} while it was being saved, so the ` +
+          `answer was not recorded against it. Save again to write the edit to the new name.`,
         'warning',
       )
     }
@@ -394,7 +390,7 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
     if (!isSameTab(tab.id)) return
     if (saveTickets.get(tab.id) !== ticket) return
     const moved = liveTab(tab.id)
-    if (moved && moved.path !== sentPath) {
+    if (moved && moved.path !== request.path) {
       // The path moved, so the question a conflict prompt would ask -- overwrite
       // the file that changed? -- would be about a file this tab no longer
       // holds. Answering it would write to whatever is at the new name instead,

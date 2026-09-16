@@ -167,7 +167,7 @@ func TestReadListingStopsOneEntryPastTheBound(t *testing.T) {
 		_ = handle.Close() //nolint:errcheck // the test is done with it
 	}()
 
-	entries, more, err := readListing(context.Background(), handle, 3)
+	entries, more, err := readListing(context.Background(), handle, 3, keepEverything)
 	if err != nil {
 		t.Fatalf("readListing failed: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestReadListingReportsNoTruncationForADirectoryThatFits(t *testing.T) {
 		_ = handle.Close() //nolint:errcheck // the test is done with it
 	}()
 
-	entries, more, err := readListing(context.Background(), handle, 3)
+	entries, more, err := readListing(context.Background(), handle, 3, keepEverything)
 	if err != nil {
 		t.Fatalf("readListing failed: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestReadListingStopsWhenTheCallerIsGone(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := readListing(ctx, handle, 3); !errors.Is(err, context.Canceled) {
+	if _, _, err := readListing(ctx, handle, 3, keepEverything); !errors.Is(err, context.Canceled) {
 		t.Errorf("expected the read to stop with the caller, got: %v", err)
 	}
 
@@ -244,13 +244,16 @@ func TestListReportsALinkToADirectoryAsADirectory(t *testing.T) {
 		t.Fatalf("List failed: %v", err)
 	}
 
+	var sawDirLink, sawFileLink bool
 	for _, entry := range result.Entries {
 		switch entry.Name {
 		case "to-dir":
+			sawDirLink = true
 			if !entry.IsDir {
 				t.Error("a link to a directory was reported as a file")
 			}
 		case "to-file":
+			sawFileLink = true
 			if entry.IsDir {
 				t.Error("a link to a file was reported as a directory")
 			}
@@ -260,6 +263,11 @@ func TestListReportsALinkToADirectoryAsADirectory(t *testing.T) {
 				t.Errorf("a link to a file reported size %d, want %d", entry.Size, len("contents"))
 			}
 		}
+	}
+	// Without these, a listing that returned nothing at all would pass every
+	// assertion above by never entering the loop.
+	if !sawDirLink || !sawFileLink {
+		t.Errorf("expected both links in the listing, got %v", names(result))
 	}
 }
 
@@ -278,16 +286,23 @@ func TestListDoesNotFollowALinkOutOfTheBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
 	}
+	found := false
 	for _, entry := range result.Entries {
 		if entry.Name != "escape" {
 			continue
 		}
+		found = true
 		if entry.IsDir {
 			t.Error("a link leading outside the boundary was offered as an expandable directory")
 		}
 		if entry.Size != 0 {
 			t.Error("a listing disclosed the size of a path outside the boundary")
 		}
+	}
+	// The link is the only entry, and a listing that returned nothing would
+	// otherwise pass this by having nothing to check.
+	if !found {
+		t.Errorf("expected the link in the listing, got %v", names(result))
 	}
 }
 
@@ -331,5 +346,88 @@ func TestReadRefusesADirectoryAndEveryOtherKind(t *testing.T) {
 
 	if _, err := svc.Read(context.Background(), filepath.Join(dir, "sub")); !errors.Is(err, ErrInvalidPath) {
 		t.Errorf("expected a directory to be refused, got: %v", err)
+	}
+}
+
+// keepEverything is the skip predicate for a listing with nothing to omit.
+func keepEverything(string) bool { return false }
+
+// A name taken by a link whose target is gone is taken. Stat follows the link,
+// finds nothing where it points, and reports the name as free -- which is the
+// shape Write refuses when a write begins against one, so the check made
+// immediately before the replacement has to refuse it too rather than replacing
+// the link with a regular file.
+func TestAWriteRefusesANameTakenByADanglingLink(t *testing.T) {
+	dir := sandbox(t)
+	file := filepath.Join(dir, "new.txt")
+
+	svc := mustService(t, Options{})
+	body := &raceReader{
+		inner: strings.NewReader("created"),
+		race: func() {
+			if err := os.Symlink(filepath.Join(dir, "gone"), file); err != nil {
+				t.Errorf("creating the link failed: %v", err)
+			}
+		},
+	}
+
+	if _, err := svc.Write(context.Background(), file, body, 7, nil); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected a conflict, got: %v", err)
+	}
+	info, err := os.Lstat(file)
+	if err != nil {
+		t.Fatalf("a refused write removed the link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("a refused write replaced the link with a regular file")
+	}
+	if residue := stagingResidue(t, dir); len(residue) != 0 {
+		t.Errorf("a refused write left a staging file behind: %v", residue)
+	}
+}
+
+// A staging file is not part of what the listing bound is a bound on. Counting
+// one against the bound made a directory holding exactly as many entries as the
+// bound permits report itself truncated -- while showing all of them -- for as
+// long as a write to it was in flight.
+func TestAWriteInFlightDoesNotMakeAListingLookTruncated(t *testing.T) {
+	dir := sandbox(t)
+	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
+		mustWrite(t, filepath.Join(dir, name), "")
+	}
+	svc := mustService(t, Options{MaxDirEntries: 3})
+	ctx := context.Background()
+
+	listed, err := svc.List(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed.Truncated {
+		t.Fatal("a directory holding exactly the bound reported truncation with no write in flight")
+	}
+
+	var during *ListResult
+	body := &raceReader{
+		inner: strings.NewReader("replacement"),
+		race: func() {
+			inner, lerr := svc.List(ctx, dir)
+			if lerr != nil {
+				t.Errorf("listing during a write failed: %v", lerr)
+				return
+			}
+			during = &inner
+		},
+	}
+	if _, err := svc.Write(ctx, filepath.Join(dir, "a.txt"), body, int64(len("replacement")), nil); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if during == nil {
+		t.Fatal("the listing taken during the write did not run")
+	}
+	if during.Truncated {
+		t.Error("a write in flight made a listing of the whole directory report itself truncated")
+	}
+	if len(during.Entries) != 3 {
+		t.Errorf("expected the three entries, got %v", names(*during))
 	}
 }

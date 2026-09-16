@@ -182,28 +182,34 @@ func (s *Service) List(ctx context.Context, path string) (ListResult, error) {
 		return ListResult{}, fmt.Errorf("%w: %s is not a directory", ErrInvalidPath, path)
 	}
 
-	children, cut, err := readListing(ctx, dir, s.maxDirEntries)
+	// A staging file belongs to a write that is in flight, and the listing is
+	// exactly where a user would otherwise watch it appear and vanish. Only a
+	// file this service is writing right now is omitted: recognising one by its
+	// name instead would hide a file the user named that way, and put it beyond
+	// the only interface that could remove it.
+	//
+	// The record is keyed by the path a write resolved, and the lookup by the
+	// path a listing resolved. Both come from the same resolver, so they agree --
+	// except across two spellings that differ only in case on a case-insensitive
+	// volume, where a listing can still catch the file. That costs a transient
+	// entry in a listing nobody asked for twice; closing it needs the directory's
+	// identity rather than its name.
+	//
+	// The skip is applied as the directory is read rather than to the result, so
+	// that the bound counts entries the caller will be shown. Filtering
+	// afterwards would count a staging file against the bound, and a directory
+	// holding exactly as many entries as the bound permits would report itself
+	// truncated -- while showing all of them -- for as long as a write to it was
+	// in flight.
+	children, cut, err := readListing(ctx, dir, s.maxDirEntries, func(name string) bool {
+		return s.isStaging(filepath.Join(resolved, name))
+	})
 	if err != nil {
 		return ListResult{}, classifyPathError(path, err)
 	}
 
 	entries := make([]Entry, 0, len(children))
 	for _, child := range children {
-		// A staging file belongs to a write that is in flight, and the listing is
-		// exactly where a user would otherwise watch it appear and vanish. Only a
-		// file this service is writing right now is omitted: recognising one by
-		// its name instead would hide a file the user named that way, and put it
-		// beyond the only interface that could remove it.
-		//
-		// The record is keyed by the path a write resolved, and the lookup by the
-		// path a listing resolved. Both come from the same resolver, so they agree
-		// -- except across two spellings that differ only in case on a
-		// case-insensitive volume, where a listing can still catch the file. That
-		// costs a transient entry in a listing nobody asked for twice; closing it
-		// needs the directory's identity rather than its name.
-		if s.isStaging(filepath.Join(resolved, child.Name())) {
-			continue
-		}
 		entries = append(entries, s.entryFor(resolved, child))
 	}
 
@@ -212,12 +218,11 @@ func (s *Service) List(ctx context.Context, path string) (ListResult, error) {
 	// order the directory stores them, which is no order a caller can use.
 	slices.SortStableFunc(entries, compareEntries)
 
-	result := ListResult{Path: resolved, Truncated: cut || len(entries) > s.maxDirEntries}
+	// At most one entry past the bound, which is what the flag was decided by.
 	if len(entries) > s.maxDirEntries {
 		entries = entries[:s.maxDirEntries]
 	}
-	result.Entries = entries
-	return result, nil
+	return ListResult{Path: resolved, Entries: entries, Truncated: cut}, nil
 }
 
 // compareEntries orders a listing: directories before files, then by name.
@@ -231,8 +236,8 @@ func compareEntries(a, b Entry) int {
 	return cmp.Compare(a.Name, b.Name)
 }
 
-// readListing reads a directory up to the point where one entry past the listing
-// bound is known, and reports whether it stopped with entries left unread.
+// readListing reads a directory until one entry past the listing bound has been
+// kept, and reports whether it stopped with entries left unread.
 //
 // Stopping there is the whole point. os.ReadDir reads and sorts the entire
 // directory before its caller can apply any bound, so a directory holding a
@@ -242,7 +247,15 @@ func compareEntries(a, b Entry) int {
 // itself, and leaves somewhere to notice that the caller has gone away.
 //
 // An entry left unread is not an error: it is what the truncated flag is for.
-func readListing(ctx context.Context, dir *os.File, limit int) ([]os.DirEntry, bool, error) {
+//
+// skip is applied as entries arrive rather than to the result, so the bound
+// counts what the caller will actually be shown. The entries it removes are the
+// ones a write in flight has staged, of which there are as many as there are
+// concurrent writes -- so a directory cannot be inflated into an unbounded read
+// by naming files the way this service names its staging files.
+func readListing(
+	ctx context.Context, dir *os.File, limit int, skip func(name string) bool,
+) ([]os.DirEntry, bool, error) {
 	// One entry past the bound is all it takes to know there are more, and
 	// reading exactly that many is what makes the bound the bound.
 	want := limit + 1
@@ -255,7 +268,11 @@ func readListing(ctx context.Context, dir *os.File, limit int) ([]os.DirEntry, b
 		// the buffer holds -- so the loop keeps going until either the bound or
 		// io.EOF says to stop.
 		batch, err := dir.ReadDir(want - len(entries))
-		entries = append(entries, batch...)
+		for _, entry := range batch {
+			if !skip(entry.Name()) {
+				entries = append(entries, entry)
+			}
+		}
 		if errors.Is(err, io.EOF) {
 			return entries, false, nil
 		}
@@ -704,18 +721,22 @@ func (s *Service) writeAtomically(
 // is compared against nothing. The origin check is not optional in the same way:
 // it asks what the path is, not what the caller expected it to be.
 func confirmUnchanged(target string, opts writeOptions) error {
-	current, err := os.Stat(target)
 	if opts.origin == nil {
 		// The name was free when the write began, so it is still free only if
 		// nothing has taken it.
-		if os.IsNotExist(err) {
+		//
+		// Lstat rather than Stat, because a name taken by a link whose target is
+		// gone is taken. Stat follows the link, finds nothing where it points,
+		// and reports the name as free -- so the write would replace the link,
+		// which is the shape the check at the start of Write exists to refuse.
+		if _, err := os.Lstat(target); os.IsNotExist(err) {
 			return nil
-		}
-		if err != nil {
+		} else if err != nil {
 			return classifyPathError(opts.display, err)
 		}
 		return fmt.Errorf("%w: %s was created while it was being written", ErrConflict, opts.display)
 	}
+	current, err := os.Stat(target)
 	if err != nil {
 		return classifyPathError(opts.display, err)
 	}
