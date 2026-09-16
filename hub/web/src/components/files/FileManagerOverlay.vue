@@ -346,7 +346,9 @@ async function openFile(entry: Entry, path: string) {
     let size = entry.size
     if (kind === 'info') {
       const probed = await probeFile(path)
-      size = probed.size
+      // The listing's size stands in when the hub did not report one: it is only
+      // ever displayed for a file that is not read as text.
+      size = probed.size ?? entry.size
       if (probed.binary) {
         openWithoutReading(path, startedAt, entry, size, true)
         return

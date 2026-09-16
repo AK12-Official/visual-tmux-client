@@ -18,7 +18,7 @@ import '../../../test/dom.mjs'
 import { mount } from '@vue/test-utils'
 import type { VueWrapper } from '@vue/test-utils'
 
-import { instances, reset as resetEditors } from '../../../test/mocks/codemirror.mjs'
+import { EditorView, instances, reset as resetEditors } from '../../../test/mocks/codemirror.mjs'
 import { setToken } from '../../api'
 import FileManagerOverlay from './FileManagerOverlay.vue'
 
@@ -54,7 +54,9 @@ interface Call {
  * about, and a handler that returns a promise the test resolves is how that
  * order is chosen.
  */
-function hubFetch(overrides: Partial<Record<'write' | 'rename' | 'probe', Responder>> = {}): Call[] {
+function hubFetch(
+  overrides: Partial<Record<'write' | 'rename' | 'probe' | 'read', Responder>> = {},
+): Call[] {
   const calls: Call[] = []
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
@@ -71,6 +73,7 @@ function hubFetch(overrides: Partial<Record<'write' | 'rename' | 'probe', Respon
           { name: 'a.txt', is_dir: false, size: 5, mtime: 1000 },
           { name: 'b.txt', is_dir: false, size: 5, mtime: 1000 },
           { name: 'notes.dat', is_dir: false, size: 5, mtime: 1000 },
+          { name: 'photo.png', is_dir: false, size: 5, mtime: 1000 },
         ],
         truncated: false,
       })
@@ -79,6 +82,7 @@ function hubFetch(overrides: Partial<Record<'write' | 'rename' | 'probe', Respon
       // The probe is the same route asked with HEAD, which is how the manager
       // asks what a file is without transferring it.
       if (method === 'HEAD' && overrides.probe) return overrides.probe()
+      if (overrides.read) return overrides.read()
       return text('hello')
     }
     if (url.includes('/files/write')) {
@@ -333,4 +337,60 @@ test('closing a tab releases its editor, and switching between them does not', a
   )
   assert.equal(wrapper.findAll('.fm__editor').length, 1)
   wrapper.unmount()
+})
+
+test('an image that turns out to be over the bound is presented as information', async () => {
+  // The listing said this was a small image; the bytes say otherwise. The bound
+  // is applied to what the hub reports when the file is read, and the size the
+  // tab then carries is what makes it present as information with a download
+  // action rather than as a frame nothing can render.
+  hubFetch({
+    read: () => new Response(null, { status: 200, headers: { 'X-File-Size': '9000000' } }),
+  })
+  const wrapper = await mountManager()
+
+  await openFile(wrapper, 'photo.png')
+  await flush()
+
+  assert.equal(wrapper.find('.image-preview').exists(), false, 'the image was rendered anyway')
+  assert.equal(wrapper.find('.fm__info').exists(), true, 'no information panel was offered')
+  const notices = (wrapper.emitted('notice') ?? []).flat()
+  assert.ok(
+    notices.some((text) => String(text).includes('larger than this view renders')),
+    `expected a notice explaining the bound, got ${JSON.stringify(notices)}`,
+  )
+  wrapper.unmount()
+})
+
+// The editor stand-in has to model the editor's change set rather than a
+// plausible-looking one: a test written against a stand-in that composes
+// positions the wrong way is a green test over a document no user could produce.
+test('the editor stand-in applies a transaction the way the editor does', () => {
+  const view = new EditorView({ doc: 'abcdef', extensions: [] })
+
+  // Every position is read against the document as it was before the
+  // transaction, not against the document as it stands part-way through it.
+  view.dispatch({
+    changes: [
+      { from: 1, to: 2, insert: 'XY' },
+      { from: 3, to: 4, insert: 'Z' },
+    ],
+  })
+  assert.equal(view.doc, 'aXYcZef')
+  assert.equal(view.state.doc.toString(), 'aXYcZef')
+
+  // A replacement that happens to reproduce the same text is still a change: the
+  // document is identical, but a listener runs.
+  let reported = 0
+  const watched = new EditorView({
+    doc: 'abc',
+    extensions: [() => (reported += 1)],
+  })
+  watched.dispatch({ changes: { from: 2, to: 3, insert: 'c' } })
+  assert.equal(reported, 1, 'an identical replacement was reported as no change')
+  assert.equal(watched.doc, 'abc')
+
+  // And a transaction that really changes nothing reports nothing.
+  watched.dispatch({ changes: { from: 2, to: 2, insert: '' } })
+  assert.equal(reported, 1, 'a transaction with no change in it fired a listener')
 })

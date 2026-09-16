@@ -100,18 +100,24 @@ func escapedWithin(err error) error {
 		return err
 	}
 	// os.Root wraps its refusal in whatever error the operation uses -- a
-	// PathError for stat and open, a LinkError for a rename -- so the wrapper is
-	// what has to be rebuilt, and the message is what decides. Missing the
-	// LinkError case would leave a refused rename reported as a server fault,
-	// which is the worst place for it: a rename is exactly what a component
-	// replaced at the wrong moment turns into.
+	// PathError for stat and open, a LinkError for a rename -- so what is
+	// rebuilt is the same wrapper with the cause replaced. Missing the LinkError
+	// case would leave a refused rename reported as a server fault, which is the
+	// worst place for it: a rename is exactly what a component replaced at the
+	// wrong moment turns into.
+	//
+	// The wrapper is kept rather than converted to the simpler one. A rename
+	// carries two paths, and a refusal does not say which of them left the tree
+	// -- so collapsing it to a single Path means choosing, and choosing wrong for
+	// the operations whose source is the escaping side. Both are also what a
+	// message should be able to name.
 	var pathErr *fs.PathError
 	if errors.As(err, &pathErr) && refusesToLeave(pathErr.Err) {
 		return &fs.PathError{Op: pathErr.Op, Path: pathErr.Path, Err: fs.ErrNotExist}
 	}
 	var linkErr *os.LinkError
 	if errors.As(err, &linkErr) && refusesToLeave(linkErr.Err) {
-		return &fs.PathError{Op: linkErr.Op, Path: linkErr.New, Err: fs.ErrNotExist}
+		return &os.LinkError{Op: linkErr.Op, Old: linkErr.Old, New: linkErr.New, Err: fs.ErrNotExist}
 	}
 	return err
 }

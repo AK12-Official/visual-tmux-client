@@ -206,12 +206,38 @@ func TestARefusedRenameIsReportedAsARefusal(t *testing.T) {
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected the refusal to read as not-found rather than as a fault, got: %#v", err)
 	}
-	var pathErr *fs.PathError
-	if !errors.As(err, &pathErr) {
-		t.Errorf("expected a path error so a message can name the path, got: %#v", err)
+	// Both ends are kept. A refusal does not say which side left the tree, so
+	// collapsing the two into one path would mean guessing -- and the guess is
+	// wrong for the operations whose source is the escaping side, which is the
+	// case below.
+	var linkErr *os.LinkError
+	if !errors.As(err, &linkErr) {
+		t.Fatalf("expected the rename's own error shape, got: %#v", err)
+	}
+	if !strings.Contains(linkErr.New, "escape") {
+		t.Errorf("expected the escaping end to be named, got old=%q new=%q", linkErr.Old, linkErr.New)
+	}
+
+	// The source can be the escaping side, and the error has to say so: the end
+	// that left the tree is the one a message is about.
+	mustMkdir(t, filepath.Join(root, "sub"))
+	mustSymlink(t, outside, filepath.Join(root, "sub", "out"))
+	mustWrite(t, filepath.Join(outside, "secret.txt"), "s")
+	source := set.Confine(filepath.Join(root, "sub", "out", "secret.txt"))
+	destination := set.Confine(filepath.Join(root, "sub", "moved.txt"))
+	err = renameAt(source, destination)
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("expected a source that leaves the root to be refused, got: %#v", err)
+	}
+	linkErr = nil
+	if errors.As(err, &linkErr) && !strings.Contains(linkErr.Old, "out") {
+		t.Errorf("expected the source to be named, got old=%q new=%q", linkErr.Old, linkErr.New)
 	}
 	if _, statErr := os.Stat(filepath.Join(root, "a.txt")); statErr != nil {
 		t.Errorf("the source was moved by a refused rename: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "secret.txt")); statErr != nil {
+		t.Errorf("a refused rename touched the file outside the root: %v", statErr)
 	}
 }
 

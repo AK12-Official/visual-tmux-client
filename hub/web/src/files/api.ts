@@ -271,11 +271,15 @@ export async function readFileBytes(path: string, limit: number): Promise<ImageB
     await releaseBody(res)
     return { tooLarge: reported }
   }
-  // A hub that did not say how long the body is leaves nothing to check before
-  // reading it, so the answer is measured instead -- and the length handed back
-  // is the one that was really received rather than a guess about what it might
-  // have been. It is also the second chance at the bound: a file that grew
-  // between the header and the body is caught here.
+  // A response that did not say how long its body is -- no header, or one this
+  // client cannot read as a length -- leaves nothing to check before reading it,
+  // so the answer is measured instead: the length handed back is the one that
+  // really arrived rather than a guess about what it might have been. The cost is
+  // that such a response is read in full, which is the one case where this
+  // function's "nothing enormous crosses the wire" does not hold; refusing
+  // instead would break a hub that omits the header entirely. It is also the
+  // second chance at the bound: a body that grew between the header and the read
+  // is caught here.
   const blob = await res.blob()
   if (blob.size > limit) return { tooLarge: blob.size }
   return { blob }
@@ -285,8 +289,13 @@ export async function readFileBytes(path: string, limit: number): Promise<ImageB
 export interface FileProbe {
   /** binary is the hub's classification of the whole contents. */
   binary: boolean
-  /** size is the length the hub would serve. */
-  size: number
+  /**
+   * size is the length the hub would serve, or null when it did not say. Null is
+   * not zero: a tab opened from this probe has a size it can display, and the one
+   * a directory listing gave earlier is a better answer than a number nobody
+   * reported.
+   */
+  size: number | null
 }
 
 /**
@@ -308,10 +317,7 @@ export async function probeFile(path: string): Promise<FileProbe> {
   await releaseBody(res)
   return {
     binary: res.headers.get('X-File-Binary') === '1',
-    // Zero when the hub did not say. A tab opened from this probe is one whose
-    // size is only ever displayed, and the listing's size stands in for it until
-    // the file is read for real.
-    size: headerSize(res) ?? 0,
+    size: headerSize(res),
   }
 }
 

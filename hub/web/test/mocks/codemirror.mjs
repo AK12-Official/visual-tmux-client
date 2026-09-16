@@ -33,24 +33,32 @@ export class EditorView {
    * which is what the real editor does for an external value written back in and
    * what a test calls to type.
    *
-   * A transaction may carry one change or several, and the several are applied
-   * one after another to the document as it evolves -- reading only the first
-   * shape would silently build a doubled document for the other, which is a
-   * green test over nonsense. And a transaction that changes nothing reports
-   * nothing: a component driven by a change it never made would be reacting to
-   * something no user could produce.
+   * Two details are the editor's and not an invention, because a stand-in that
+   * is merely plausible is a green test over something no user could produce:
+   *
+   *   - Every position in a transaction is read against the document as it was
+   *     *before* it, not as it stands after an earlier change in the same list.
+   *     Applying them from the last to the first is what keeps the earlier
+   *     positions valid; applying them in order would compose positions that were
+   *     never meant to compose.
+   *   - A transaction is a change unless every part of it is empty. Comparing the
+   *     text instead would call an identical replacement no change at all, where
+   *     the editor reports one: the document is the same, but the change set is
+   *     not empty and a listener still runs.
    */
   dispatch(update) {
-    const before = this.doc
     const changes = Array.isArray(update?.changes) ? update.changes : [update?.changes]
-    for (const change of changes) {
-      if (!change) continue
+    const applied = changes.filter(Boolean)
+    for (const change of [...applied].sort((a, b) => b.from - a.from)) {
       const insert = String(change.insert ?? '')
       this.doc = this.doc.slice(0, change.from) + insert + this.doc.slice(change.to)
     }
-    if (this.doc === before) return
-    const applied = { docChanged: true, state: { doc: { toString: () => this.doc } } }
-    for (const listener of this.listeners) listener(applied)
+    const changed = applied.some(
+      (change) => change.from !== change.to || String(change.insert ?? '') !== '',
+    )
+    if (!changed) return
+    const state = { docChanged: true, state: { doc: { toString: () => this.doc } } }
+    for (const listener of this.listeners) listener(state)
   }
 
   requestMeasure() {}

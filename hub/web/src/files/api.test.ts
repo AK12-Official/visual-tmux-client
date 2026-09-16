@@ -473,3 +473,46 @@ test('readFileBytes hands back the bytes of a file within the bound', async () =
     assert.equal(await fetched.blob.text(), 'pixels')
   })
 })
+
+// The bound rests on the length the response reports, and the case it exists for
+// is a file that grew past the listing's idea of its size. A response that
+// reports nothing is the other half of the same guard: `Number(null)` is 0, so a
+// missing header read as "nothing to worry about" unless absence is checked as
+// absence.
+test('readFileBytes measures a response that reports no usable length', async () => {
+  await withoutStorage(async () => {
+    // No header at all: the body is read, and the size reported back is the one
+    // that really arrived.
+    mockFetch(new Response('pixels', { status: 200 }))
+    const measured = await readFileBytes('/home/user/photo.png', 8 * 1024 * 1024)
+    assert.ok('blob' in measured)
+    assert.equal(await measured.blob.text(), 'pixels')
+
+    // A body over the bound is refused once it has been measured, rather than
+    // rendered and frozen.
+    mockFetch(new Response('x'.repeat(64), { status: 200 }))
+    const over = await readFileBytes('/home/user/photo.png', 16)
+    assert.ok('tooLarge' in over)
+    assert.equal(over.tooLarge, 64)
+
+    // And a header that is not a length is treated the same way as no header.
+    for (const header of ['', 'abc', '-1', '1.5']) {
+      mockFetch(new Response('pixels', { status: 200, headers: { 'X-File-Size': header } }))
+      const fetched = await readFileBytes('/home/user/photo.png', 8 * 1024 * 1024)
+      assert.ok('blob' in fetched, `a header of ${JSON.stringify(header)} should be measured`)
+    }
+  })
+})
+
+// The probe's size is displayed, so an unreported one must be null rather than
+// zero: "0 B" is a claim about the file, and the listing's answer is a better one.
+test('probeFile reports no size rather than a zero when the hub did not say', async () => {
+  await withoutStorage(async () => {
+    mockFetch(new Response(null, { status: 200 }))
+
+    const probe = await probeFile('/home/user/notes.dat')
+
+    assert.equal(probe.size, null)
+    assert.equal(probe.binary, false)
+  })
+})
