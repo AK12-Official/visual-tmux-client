@@ -92,6 +92,21 @@ export function disposeTerminalSession(name: string): void {
   }
 }
 
+/** insertIntoTerminal writes text into the session's live attachment, exactly as
+ * if it had been typed, and reports whether there was one to write to. The caller
+ * is expected to say so when this returns false rather than let an insertion look
+ * like it worked.
+ *
+ * The text is inserted verbatim. It is the caller's job to make sure it carries
+ * no line terminator -- an insertion must never be able to run a command on its
+ * own -- and the file manager quotes a path a shell would otherwise interpret. */
+export function insertIntoTerminal(name: string, text: string): boolean {
+  for (const s of liveSessions) {
+    if (s.name === name) return s.insertText(text)
+  }
+  return false
+}
+
 export class TerminalSession {
   private term: Terminal
   private fit: FitAddon
@@ -430,6 +445,20 @@ export class TerminalSession {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(new TextEncoder().encode(data))
     }
+  }
+
+  /** isAttached reports whether there is an open socket to write to. */
+  private isAttached(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN
+  }
+
+  /** insertText forwards text to the session as input. It returns false when
+   * there is no live attachment, so the caller can report that instead of
+   * appearing to have inserted something. */
+  insertText(text: string): boolean {
+    if (!this.isAttached()) return false
+    this.sendBinary(text)
+    return true
   }
 
   // Byte-per-char payloads (onBinary) must not be re-encoded as UTF-8.

@@ -33,7 +33,7 @@
 - [x] 5.2 Add `hub/web/src/files/pathUtils.ts` (basename/dirname/join over POSIX paths) and unit tests. Verify: `npm test` passes covering trailing slashes, root, and nested paths.
 - [x] 5.3 Add `hub/web/src/files/binaryExtensions.ts` classifying extensions as image / markdown / binary, treating unknown extensions as text. Verify: `npm test` passes.
 - [x] 5.4 Add `hub/web/src/files/preview.ts` with DOM-free dispatch logic (extension + size → preview kind) and the sanitizing Markdown render. Verify: `npm test` covers dispatch for image, markdown, source, over-limit, and binary; the sanitizing render is asserted via a source-contract test stating `DOMPurify.sanitize` is called on `marked` output.
-- [~] 5.5 Add the editor and sanitizer dependencies to `hub/web/package.json` (`codemirror`, which pulls in `@codemirror/*`, and `dompurify`), add a manual chunk for the editor in `vite.config.ts`, and register both in the `hub/web/test/loader.mjs` mock map. `npm test` passes; the build half -- that `npm run build` produces a **populated** editor chunk -- is verified with 6.4, which is what imports it.
+- [x] 5.5 Add the editor and sanitizer dependencies to `hub/web/package.json` (`codemirror`, which pulls in `@codemirror/*`, and `dompurify`), add a manual chunk for the editor in `vite.config.ts`, and register both in the `hub/web/test/loader.mjs` mock map. Verify: `npm test` passes and `npm run build` emits a populated editor chunk (`editor-*.js`, 385 kB).
 - [x] 5.6 Add a shell-quoting helper to `hub/web/src/files/pathUtils.ts` that returns the path unchanged when it is safe and a quoted form when a shell would otherwise interpret it, and that never emits a line terminator. Verify: `npm test` covers paths with spaces, quotes, `$`, backticks, `;`, `&`, and a plain path.
 
 ## 6. Frontend file manager
@@ -47,10 +47,18 @@
 - [ ] 6.7 Surface unsaved changes outside the editor so closing the manager or the terminal warns before discarding them. Verify: manual check that closing with a modified tab prompts.
 - [ ] 6.8 Wire path insertion through the existing terminal attachment held by `TerminalSession`, quoting when needed and appending no line terminator, and report when no attachment is live. Verify: manual check that the path appears in the input line without executing, that a path with spaces is quoted, and that the case with no terminal attached reports rather than failing silently.
 
+### Section 6 status
+
+Every item below is implemented and its shared logic is unit-tested (see
+`hub/web/src/files/*.test.ts`). What is **not** done is the manual browser check
+each one names, so they stay unticked: opening the manager against a real
+session, previewing an image, a Markdown file and a binary file, the edit-save
+conflict round trip, and inserting a path into a live terminal input line.
+
 ## 7. Documentation
 
-- [ ] 7.1 Document the file manager in `README.md` and `README.zh-CN.md`, including the `$HOME` default and how to restrict or disable it. Verify: both files describe `files.roots` and `files.enabled` consistently with the example YAML.
-- [ ] 7.2 Update `hub/web/public/tmux-guide.zh-CN.md` to describe opening the file manager from the terminal. Verify: the embedded guide renders the new section.
+- [x] 7.1 Document the file manager in `README.md` and `README.zh-CN.md`, including the default boundary -- no directory containment, bounded by the hub user's own operating-system access -- and how to restrict or disable it. Verify: both files describe `files.roots` and `files.enabled` consistently with the example YAML.
+- [x] 7.2 Update `hub/web/public/tmux-guide.zh-CN.md` to describe opening the file manager from the terminal. Verify: the embedded guide renders the new section.
 
 ## 8. Verification
 

@@ -53,6 +53,32 @@ export interface RenderedMarkdown {
 }
 
 /**
+ * FORBIDDEN_TAGS are omitted from rendered output outright. An embedded document
+ * is the one thing that turns a preview into a fetch the user never asked for,
+ * and the specification requires it to be absent rather than neutralised.
+ */
+const FORBIDDEN_TAGS = ['iframe', 'frame', 'frameset', 'object', 'embed', 'portal', 'base']
+
+/** SELF_LOADING_ATTRS are the attributes that make a browser fetch something. */
+const SELF_LOADING_ATTRS = new Set(['src', 'srcset', 'poster'])
+
+/** INLINE_SRC_RE matches a source the document already carries. */
+const INLINE_SRC_RE = /^(?:data:image\/|blob:|#)/i
+
+// A rendered file must not reach a third party merely because it named one, so
+// anything that loads on its own is limited to content carried inline. Links are
+// left alone: an href is only followed when the user asks for it.
+//
+// Registered on the module-level instance, which nothing else in the application
+// uses. A second consumer of DOMPurify would inherit this restriction, which is
+// harmless but worth knowing.
+DOMPurify.addHook('uponSanitizeAttribute', (_node, data) => {
+  if (!SELF_LOADING_ATTRS.has(data.attrName.toLowerCase())) return
+  if (INLINE_SRC_RE.test(data.attrValue.trim())) return
+  data.keepAttr = false
+})
+
+/**
  * renderMarkdown turns Markdown source into HTML safe to insert into the
  * document.
  *
@@ -70,7 +96,10 @@ export function renderMarkdown(source: string): RenderedMarkdown {
   const slice = truncated ? source.slice(0, MAX_MARKDOWN_RENDER_CHARS) : source
   const parsed = marked.parse(slice, { async: false })
   return {
-    html: DOMPurify.sanitize(parsed, { USE_PROFILES: { html: true } }),
+    html: DOMPurify.sanitize(parsed, {
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: FORBIDDEN_TAGS,
+    }),
     truncated,
   }
 }

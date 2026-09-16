@@ -69,6 +69,30 @@ test('renderMarkdown truncates an oversized document and says so', () => {
   assert.equal(rendered.truncated, true)
 })
 
+// Rendering a file must not fetch anything the file names, so the module limits
+// self-loading attributes to content carried inline. The mock cannot run the
+// hook, but it can show that one was installed at all -- which is the part a
+// future edit is most likely to drop.
+test('renderMarkdown restricts attributes that load on their own', () => {
+  const hook = DOMPurify.registeredHooks().find(
+    (entry: { name: string }) => entry.name === 'uponSanitizeAttribute',
+  )
+  assert.ok(hook, 'expected an attribute hook to be registered')
+
+  const data = { attrName: 'src', attrValue: 'https://example.com/track.png', keepAttr: true }
+  hook.handler(undefined, data)
+  assert.equal(data.keepAttr, false)
+
+  const inline = { attrName: 'src', attrValue: 'data:image/png;base64,AAAA', keepAttr: true }
+  hook.handler(undefined, inline)
+  assert.equal(inline.keepAttr, true)
+
+  // A link is only followed when the user asks for it, so href is left alone.
+  const link = { attrName: 'href', attrValue: 'https://example.com', keepAttr: true }
+  hook.handler(undefined, link)
+  assert.equal(link.keepAttr, true)
+})
+
 // The result is the sanitizer's answer rather than the source placed into the
 // document unchecked. Only that much is assertable here: the test environment has
 // no DOM, so the sanitizer is a stand-in that returns what it was given, and what

@@ -28,6 +28,8 @@ Tests use isolated sockets and target only their own server during cleanup.
 - Terminal header with font-size controls, fullscreen, and panel close.
 - Manual session ordering with drag reorder and pin-to-top, plus a collapsible session sidebar.
 - Leveled, auto-expiring toast notifications for action results and terminal events.
+- Browse, preview, edit, and organize files on the host from the terminal: directory tree, multi-tab editor, Markdown and image preview, and a context menu for create/rename/delete/download.
+- Insert a file's path into the terminal input line without leaving the manager.
 - Built-in Chinese tmux guide available from the in-app help button.
 - Session names accept non-ASCII text such as Chinese (up to 64 characters); `:`, `.`, `/`, `\`, `;`, full-width lookalikes (`：`, `．`, `；`), edge whitespace, and control characters are reserved/disallowed.
 - Preserve terminal state across browser disconnects by leaving tmux sessions running.
@@ -159,7 +161,36 @@ web:
     error_lifetime: "8s"
     warning_lifetime: "5s"
     info_lifetime: "3s"
+
+files:
+  enabled: true
+  # Omit to leave file operations bounded only by the hub user's own OS access.
+  # roots:
+  #   - "/srv/projects"
+  max_file_size: 104857600 # 100 MiB
+  max_dir_entries: 1000
 ```
+
+### File access
+
+`files.enabled: false` turns the whole capability off: every file operation is refused without touching the filesystem, and terminal and session operations are unaffected.
+
+By default there is **no directory containment**. File operations are bounded only by what the hub process's own operating-system user can already reach. That is deliberate, and it grants nothing new: the same bearer token also authorizes a full interactive terminal as that same user, so anyone holding the token can `cat` any file the account can read whether or not a root is configured. A `$HOME`-only default would break work on projects under `/srv`, `/data`, or `/var/log` while withholding nothing from the token holder.
+
+Set `files.roots` to confine every operation to a list of directories:
+
+```yaml
+files:
+  roots:
+    - "/srv/projects"
+    - "/var/log"
+```
+
+Each root must be an absolute path to an existing directory. Roots are resolved through symlinks at startup, and authorization is decided against the resolved path, so a symlink cannot be used to step outside a root. A root that does not exist, is not a directory, or cannot be resolved is a startup error. `/proc`, `/sys`, and `/dev` are refused in both modes, whatever the configuration says.
+
+`max_file_size` bounds a single read, write, or download. `max_dir_entries` bounds one directory listing, which is reported as truncated beyond that.
+
+The file manager opens at the working directory of the session's active pane. That directory is a starting point only: if it cannot be opened, the manager says so rather than showing a blank tree.
 
 The default loopback binding is intentional. If you expose the service to another machine, put it behind HTTPS, use a strong stable token, and set `origin` to the exact public origin. See [SECURITY.md](SECURITY.md) before exposing it to a network.
 
