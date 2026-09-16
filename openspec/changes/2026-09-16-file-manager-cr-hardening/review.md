@@ -218,3 +218,29 @@ agree is correct. Each round of prose written to explain the loop has been able 
 new error, so the honest stopping point is the code being verified sound and the explanations being
 reduced to what can be checked, rather than continuing to add commentary that the next round can
 falsify.
+
+## Round 5
+
+One subagent, asked only whether anything in the round-4 diff is false. **Verdict: nothing clearly
+false remains, and another round over this material is not worth running.**
+
+Two wordings were flagged as ambiguous rather than wrong, and both were tightened anyway because the
+fix is one clause. `A value that fails either bound is reported as no time at all` is true of the
+write path and not of the read path, which refuses the file outright; it now says the value is
+refused rather than adopted, which holds on both. And a `tasks.md` clause claiming only the first
+bound is about unreadability was overstated, since `1.5` fails the safe-integer bound and is a string
+`ParseInt` rejects.
+
+Every other statement in the diff was verified clause by clause, including all five links of the
+round-4 causal chain (`ErrConflict` → only `conflict` prompts → `save(true)` sends `expected: null`
+→ the hub skips the comparison → the overwrite lands) and the corrected Trajectory arithmetic
+(23 raised, 22 distinct, 21 closed).
+
+### The loop, concluded
+
+Five rounds: 23 findings, then 2, then 1, then 1, then 0. The last three changed no behaviour — they
+were false or overreaching statements about behaviour that had already been verified, twice by
+reverting the fix and watching the test fail, once by a differential probe of the guard against the
+Go parser. The code stopped moving at round 2; the explanations took three more rounds to stop
+moving, which is the shape to expect from a loop that treats every claim — including its own
+record — as something to be checked.

@@ -110,7 +110,8 @@ function requireMtime(raw: unknown): number {
   // trip in both directions. It goes on the wire as its decimal form, which the
   // hub reads with a 64-bit integer parse; and what comes back is parsed here
   // into a double, which returns every integer unchanged only up to 2^53. A value
-  // that fails either bound is reported as no time at all rather than sent.
+  // that fails either bound is refused rather than adopted as an observation, and
+  // never reaches the wire.
   if (!Number.isSafeInteger(value)) {
     throw new FileApiError('mtime_unavailable')
   }
