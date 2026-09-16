@@ -33,7 +33,17 @@ export interface OpenFile {
    * hub's own answer is what makes a save look like a conflict that is not one.
    */
   stamp: Stamp
-  /** size is the byte size the directory listing reported. */
+  /**
+   * size is what the file's size is currently believed to be, and it is not a
+   * display field: it is an argument to `presentation`, so it decides which size
+   * bound applies to the file.
+   *
+   * It comes from whichever observation is most recent, which is why the doc says
+   * "believed": the directory listing's report when the tab was opened, the hub's
+   * report at read time when a name-suggesting-binary file was probed, the size an
+   * image preview refused to render, and zero for a file that was just created.
+   * Only the last of those is a guess, and a created file is empty.
+   */
   size: number
   /**
    * binary is the hub's classification of the contents: true for binary, false
@@ -130,7 +140,8 @@ export interface SaveSettlement {
    *               clean at the text that was sent.
    *   `closed` -- the tab is gone, so there is nothing to fold the answer into.
    *   `moved`  -- the tab is open under a different path than the write named.
-   *   `raced`  -- a rename of that path was outstanding when the answer arrived.
+   *   `raced`  -- a rename of that path, or of a directory above it, was outstanding
+   *               when the answer arrived.
    */
   outcome: 'saved' | 'closed' | 'moved' | 'raced'
 }
@@ -164,8 +175,9 @@ export function settleSave(
   const tab = files.find((candidate) => candidate.id === request.id)
   if (!tab) return { files, outcome: 'closed' }
   if (tab.path !== request.path) return { files, outcome: 'moved' }
-  // A rename of this path is outstanding, so this answer and that rename crossed
-  // on the wire and the browser cannot tell which reached the hub first. The
+  // A rename of this path, or of a directory above it, is outstanding, so this
+  // answer and that rename crossed on the wire and the browser cannot tell which
+  // reached the hub first. The
   // write may have landed before the rename carried the entry to its new name --
   // in which case the tab is saved and this is only a nag -- or the rename may
   // have landed first, in which case the write recreated the old name and the

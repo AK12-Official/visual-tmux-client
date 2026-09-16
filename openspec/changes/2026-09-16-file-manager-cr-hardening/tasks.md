@@ -147,4 +147,15 @@ boundary defect -- and with one operation whose cost the change had left unbound
 
 - [x] 18.1 *(review round 6)* The module boundary the previous commit established was pinned by nothing, and it had already been broken silently once -- the second review read `tabs.ts`, saw an `import type` naming the renderer, and recorded the boundary closed. `tabs.test.ts` now reads its own module's source and fails if any import names it. Verify: the test, and `review.md`'s sixth review for why a reading is not evidence. **The limit is stated:** it checks the specifier, not the resolved graph, so a module that re-exported the renderer under another name would pass.
 - [x] 18.2 *(review round 6)* The new emptiness check's rooted-and-empty path was unexercised: no test deleted an empty directory through a configured root, so a check that answered "not empty" for a rooted one would have left empty directories undeletable there with nothing failing. `TestRootedCreateAndDeleteActInsideTheRoot` now deletes one. Verify: mutating the check to always answer "not empty" fails exactly that assertion (verified by reverting).
-- [x] 18.3 *(review round 6)* Two blank lines the removed `Classification` block left behind. Verify: `preview.ts`.
+- [x] 18.3 *(review round 6)* The blank-line gap the removed `Classification` block left. Verify: `preview.ts`. *(The item first said "two blank lines"; the block left two and the fix removed one, which the next round counted.)*
+
+## 19. The last round
+
+Two reviewers, given the newest commit and asked to say plainly if there was nothing. One answered
+"nothing I can defend" for the Go; the other found three claims the previous round had left stale on
+the browser side.
+
+- [x] 19.1 *(review round 7)* The boundary test's stated limit was one of five. It searched for the *statement* shape, so a multi-line import -- which this repository writes sixteen times -- a side-effect `import './preview'`, a dynamic `import(...)`, and an `export ... from` all slipped past it. It now searches for the specifier, every way of naming a module names it as a string; the barrel-file limit stands and is stated. Verify: mutating `tabs.ts` to a single-line type import, a multi-line type import, and a side-effect import each fails it, and `./previewPrefs` does not (all four run).
+- [x] 19.2 *(review round 7)* Three places still described the `raced` check as path-exact -- `SaveSettlement`'s doc, the comment above the check, and a test comment -- while the caller passes a query that covers the path or a directory above it, and the user-facing notice had already been reworded for the ancestor case. Verify: the three sites now match `pending.ts`'s documented direction.
+- [x] 19.3 *(review round 7)* `OpenFile.size`'s doc named one of its four sources, and it is load-bearing rather than a display field: it is an argument to `presentation`, so it decides which size bound applies. Verify: the doc names all four.
+- [x] 19.4 A false sentence in 9c95c63's commit message, which cannot be amended without rewriting it: it says every rooted delete "either refused or removed a symlink", where one rooted *recursive* delete in the tests succeeds -- through `removeAll`, which never reaches the emptiness check. The conclusion the sentence supports holds, and 18.2 states it precisely. Verify: `review.md`'s ninth review.

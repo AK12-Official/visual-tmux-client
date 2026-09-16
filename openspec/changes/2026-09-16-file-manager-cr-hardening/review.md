@@ -649,3 +649,37 @@ emptiness check classifies identically to what it replaced across every shape as
 a regular file, an empty directory, a one-entry directory, a mode-0000 directory, a readable-but-not-
 executable one, and a symlink -- and that the `io.EOF` swallow is load-bearing rather than dead,
 since an empty directory returns exactly that.
+
+## The ninth review of the change
+
+Two reviewers, both new to the code, given the newest commit and the whole state it leaves, and asked
+for a plain answer if there was nothing. It is the first round on this branch where one of them
+could write that sentence and mean it.
+
+**The Go reviewer: "nothing I can defend."** It said that after trying three mutations against the
+round's new assertion — including `if c.root != nil { return true, nil }`, which breaks only the
+rooted-and-empty cell and which *this assertion is the only thing that catches* — and after walking
+every helper in `confine.go`, both `ReadDir(1)` shapes, the whole `Delete` chain, and the window
+between the emptiness read and `remove` (closed from the other side, because an entry added in it
+makes `remove` fail `ENOTEMPTY`, which the classifier already maps). A negative result from a reviewer
+who looked is worth recording as such; that is why this paragraph exists.
+
+**The browser reviewer found three claims the previous round had left stale**, and they are the same
+species the branch has been chasing for five rounds — the user-facing notice was corrected for the
+ancestor case and the module's own documentation was not, so `SaveSettlement`'s doc, the comment above
+the check, and a test comment all still described `raced` as path-exact. `OpenFile.size`'s doc named
+one of its four sources, and it is not a display field but an argument that decides which size bound
+applies. Both are fixed.
+
+**And it walked the boundary test through five shapes**, showing that the test searched for the
+*statement* rather than the specifier — so a multi-line import, which this repository writes sixteen
+times, plus side-effect and dynamic imports and re-exports, all slipped past a test whose whole
+purpose was to catch a silent break. That is the third time on this branch that a check written to
+close a gap was itself too narrow, and it is the reason the last rounds have been worth running: the
+code has been right for three rounds, and what kept being wrong was the confidence in it.
+
+One false sentence stays in a commit message — 9c95c63 says every rooted delete in the tests "either
+refused or removed a symlink", where one rooted recursive delete succeeds through `removeAll`, which
+never reaches the emptiness check. The claim it supports holds and `tasks.md` 18.2 states it
+precisely; a commit message cannot be amended without rewriting what was reviewed, so it is recorded
+here instead.

@@ -479,6 +479,11 @@ reads (rejected: a build step and a generated artifact for eleven strings).
   the descriptors, so nothing leaks in the shipped binary. It is named because `RootSet.Close` is
   justified by an embedder that outlives the process, and an embedder reusing `run` would inherit
   exactly these paths.*
+- **[Accepted] A truncated Markdown preview can end on half a character.** → *`renderMarkdown` cuts
+  the source at a UTF-16 code-unit bound, so a cut between a surrogate pair leaves a lone surrogate in
+  the parsed output and the browser renders one replacement character where the preview was cut.
+  Cosmetic -- the preview is already saying it was truncated -- and pre-existing, so it is named
+  rather than given a code-point-aware cut.*
 - **[Pre-existing, named not fixed] The in-app help renders Markdown without sanitizing it.** → *`HelpModal.vue` runs `marked.parse` straight into `v-html`, where `MarkdownPreview` runs the same parse through `renderMarkdown` and DOMPurify. The file-manager specification's "Preview rendering safety" requirement governs previewed *file* content and is not violated -- the guide is not file content -- and the in-app-help specification is silent. The injection surface is the build, not the user: the guide is compiled into the binary and fetched from the hub's own origin. Left alone because it is untouched by this change (two components doing one operation differently is a pre-existing inconsistency, not one this change created), and named here because a reader comparing the two would otherwise conclude the difference was considered.*
 - **[Pre-existing, named not fixed] Two message paths the error table does not cover.** → *`report`
   in the manager maps a `FileApiError` to its code and everything else through `String(err)`, so a

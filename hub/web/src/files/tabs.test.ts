@@ -265,7 +265,7 @@ test('a retargeted tab is still the same session', () => {
   assert.equal(isDirty(settled.files[0]), false)
 })
 
-// A save answer that arrives while a rename of its path is outstanding describes
+// A save answer that arrives while a rename of its path or of a directory above it is outstanding describes
 // a write whose fate the browser cannot know: the write may have landed before
 // the rename carried the entry away -- in which case the tab is saved -- or the
 // rename may have landed first and the write recreated the old name, in which
@@ -310,19 +310,33 @@ test('an answer is recorded normally once no rename is outstanding', () => {
 // time, so nothing was broken at runtime and nothing failed either. A reading is
 // not evidence; this is.
 //
-// It checks the specifier rather than the resolved graph. That is enough for the
-// break that happened, and a graph walk would need a module resolver in a test
-// that has no bundler; what it does not catch is a future module that re-exports
-// the renderer under another name.
+// The specifier is what is searched for, not the statement, because every way of
+// naming a module names it as a string: a single-line import, a multi-line one
+// (which this repository writes often), `import './preview'` for its side effect,
+// `import('./preview')`, and `export ... from './preview'`. Searching for the
+// statement shape catches only the first of those -- which is how this test was
+// written first, and what a reviewer walked through five shapes to show.
+//
+// What it still does not catch, and the reason it is not a graph walk: a module
+// that reaches the renderer through a barrel file under another name. A module
+// resolver would be needed for that, and this test has no bundler.
 test('tabs.ts does not name the renderer', () => {
   const source = readFileSync(fileURLToPath(new URL('./tabs.ts', import.meta.url)), 'utf8')
-  const specifiers = [...source.matchAll(/^import\s[^\n]*from\s+'([^']+)'/gm)].map((m) => m[1])
+  const specifiers = [
+    // import ... from '<specifier>'  |  export ... from '<specifier>'
+    ...[...source.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)].map((m) => m[1]),
+    // import '<specifier>'  |  import('<specifier>')
+    ...[...source.matchAll(/\bimport\s*\(?\s*['"]([^'"]+)['"]/g)].map((m) => m[1]),
+  ]
 
-  assert.ok(specifiers.length > 0, 'no imports were read, so this proves nothing')
+  assert.ok(specifiers.length > 0, 'no specifiers were read, so this proves nothing')
   for (const specifier of specifiers) {
+    // The module itself, not merely a name containing it: ./previewPrefs.ts is
+    // not the renderer.
+    const named = specifier.replace(/\.(ts|js)$/, '')
     assert.ok(
-      !specifier.includes('preview'),
-      `tabs.ts imports ${specifier}; the renderer imports the Markdown sanitizer`,
+      !/(^|\/)preview$/.test(named),
+      `tabs.ts reaches ${specifier}; the renderer runs the Markdown sanitizer at module scope`,
     )
   }
 })
