@@ -62,7 +62,8 @@ export function isHeaderSafeToken(token: string): boolean {
   return HEADER_SAFE_RE.test(token)
 }
 
-async function authFetch(path: string, init?: RequestInit): Promise<Response> {
+/** authFetch attaches the stored bearer token and normalises 401 into AuthError. */
+export async function authFetch(path: string, init?: RequestInit): Promise<Response> {
   const token = getToken()
   if (token !== null && !isHeaderSafeToken(token)) {
     // A stored token that cannot be sent in a header can never authenticate

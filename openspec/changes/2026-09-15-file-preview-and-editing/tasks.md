@@ -29,12 +29,12 @@
 
 ## 5. Frontend foundations
 
-- [ ] 5.1 Add `hub/web/src/files/api.ts` reusing `authFetch`/`errorText` from `api.ts`, returning typed shapes and surfacing the server error code as a matchable value. Verify: `npm test` with a new unit test covering a successful call and a `conflict` response.
-- [ ] 5.2 Add `hub/web/src/files/pathUtils.ts` (basename/dirname/join over POSIX paths) and unit tests. Verify: `npm test` passes covering trailing slashes, root, and nested paths.
-- [ ] 5.3 Add `hub/web/src/files/binaryExtensions.ts` classifying extensions as image / markdown / binary, treating unknown extensions as text. Verify: `npm test` passes.
-- [ ] 5.4 Add `hub/web/src/files/preview.ts` with DOM-free dispatch logic (extension + size → preview kind) and the sanitizing Markdown render. Verify: `npm test` covers dispatch for image, markdown, source, over-limit, and binary; the sanitizing render is asserted via a source-contract test stating `DOMPurify.sanitize` is called on `marked` output.
-- [ ] 5.5 Add `@codemirror/*` and `dompurify` to `hub/web/package.json`, add a manual chunk for the editor in `vite.config.ts`, and register both in the `hub/web/test/loader.mjs` mock map. Verify: `npm test` passes and `npm run build` produces a separate editor chunk.
-- [ ] 5.6 Add a shell-quoting helper to `hub/web/src/files/pathUtils.ts` that returns the path unchanged when it is safe and a quoted form when a shell would otherwise interpret it, and that never emits a line terminator. Verify: `npm test` covers paths with spaces, quotes, `$`, backticks, `;`, `&`, and a plain path.
+- [x] 5.1 Add `hub/web/src/files/api.ts` reusing `authFetch`/`errorText` from `api.ts`, returning typed shapes and surfacing the server error code as a matchable value. Verify: `npm test` with a new unit test covering a successful call and a `conflict` response.
+- [x] 5.2 Add `hub/web/src/files/pathUtils.ts` (basename/dirname/join over POSIX paths) and unit tests. Verify: `npm test` passes covering trailing slashes, root, and nested paths.
+- [x] 5.3 Add `hub/web/src/files/binaryExtensions.ts` classifying extensions as image / markdown / binary, treating unknown extensions as text. Verify: `npm test` passes.
+- [x] 5.4 Add `hub/web/src/files/preview.ts` with DOM-free dispatch logic (extension + size → preview kind) and the sanitizing Markdown render. Verify: `npm test` covers dispatch for image, markdown, source, over-limit, and binary; the sanitizing render is asserted via a source-contract test stating `DOMPurify.sanitize` is called on `marked` output.
+- [~] 5.5 Add the editor and sanitizer dependencies to `hub/web/package.json` (`codemirror`, which pulls in `@codemirror/*`, and `dompurify`), add a manual chunk for the editor in `vite.config.ts`, and register both in the `hub/web/test/loader.mjs` mock map. `npm test` passes; the build half -- that `npm run build` produces a **populated** editor chunk -- is verified with 6.4, which is what imports it.
+- [x] 5.6 Add a shell-quoting helper to `hub/web/src/files/pathUtils.ts` that returns the path unchanged when it is safe and a quoted form when a shell would otherwise interpret it, and that never emits a line terminator. Verify: `npm test` covers paths with spaces, quotes, `$`, backticks, `;`, `&`, and a plain path.
 
 ## 6. Frontend file manager
 

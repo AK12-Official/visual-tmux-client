@@ -16,6 +16,9 @@ export default defineConfig({
         manualChunks: {
           xterm: ['@xterm/xterm', '@xterm/addon-fit', '@xterm/addon-unicode11'],
           vue: ['vue'],
+          // The editor is by far the largest dependency and only the file
+          // manager needs it, so it stays out of the entry chunk.
+          editor: ['codemirror'],
         },
       },
     },
