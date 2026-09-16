@@ -9,11 +9,11 @@ import (
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/session"
 )
 
-// paneFieldSep is ASCII Unit Separator. A pane record carries free-form text
-// (window name, pane title, current command), so the right-split trick used by
-// ParseSessions cannot be generalised to it, and a printable separator would
-// collide with titles that legitimately contain it.
-const paneFieldSep = "\x1f"
+// paneFieldSep stays printable because some tmux versions escape control bytes
+// in command output (a Unit Separator becomes the literal text \037). A full
+// delimiter inside a field makes the record ambiguous and is rejected below;
+// ordinary pipes and backslash sequences remain untouched.
+const paneFieldSep = "|vtc-pane|"
 
 // paneFieldCount is the number of fields PaneFormat emits.
 const paneFieldCount = 9
@@ -47,11 +47,9 @@ var PaneFormat = strings.Join([]string{
 // fragment of another pane's. Field-order is therefore not guaranteed against a
 // value containing a raw newline.
 //
-// Nothing reachable produces one: tmux rejects a newline in a window name and
-// strips one from a pane title, leaving a process whose executable name contains
-// one, which its own argv cannot carry. The guarantee comes from tmux's
-// sanitising, not from this parser, which is what the spec's "a separator inside
-// a value can never shift one pane's title onto another pane" rests on.
+// This line-based format assumes fields do not contain the record terminator.
+// Do not treat field-count validation as escaping or as a security boundary:
+// executable names and argv can contain newlines.
 func ParsePanes(stdout string) []session.Pane {
 	out := make([]session.Pane, 0)
 	for _, line := range strings.Split(stdout, "\n") {

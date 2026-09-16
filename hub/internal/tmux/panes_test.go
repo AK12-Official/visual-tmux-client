@@ -119,6 +119,23 @@ func TestPaneFormatFieldCountMatchesParser(t *testing.T) {
 	}
 }
 
+// tmux versions used by Ubuntu CI escape control bytes in command output.
+// Pin the wire format to printable bytes, independently of record(), so a
+// regression to a control-character separator fails even on newer local tmux.
+func TestPaneFormatUsesPrintableDelimiter(t *testing.T) {
+	for _, r := range PaneFormat {
+		if r < ' ' || r > '~' {
+			t.Fatalf("PaneFormat contains non-printable ASCII: %q", PaneFormat)
+		}
+	}
+	const line = `panes|vtc-pane|0|vtc-pane|1|vtc-pane|1|vtc-pane|1|vtc-pane|0|vtc-pane|bash` +
+		`|vtc-pane|编辑器 | literal \037|vtc-pane|bash`
+	panes := ParsePanes(line)
+	if len(panes) != 1 || panes[0].Title != `编辑器 | literal \037` || panes[0].PaneIndex != 1 {
+		t.Fatalf("printable wire record parsed incorrectly: %+v", panes)
+	}
+}
+
 // The count above is not enough on its own: ParsePanes reads fields by position,
 // so a permuted format string would still parse, and would report one field's
 // value as another's -- a pane title shown as the window name, say -- with the
@@ -192,25 +209,14 @@ func TestListPanesReportsEveryPane(t *testing.T) {
 		t.Fatalf("split-window failed: code=%d err=%v stderr=%s", code, err, stderr)
 	}
 
-	// The same call ListPanes makes, run first, so a failure names its cause
-	// instead of only the count: "0 panes" is otherwise the same message for an
-	// empty listing, a query error and a server that has gone away.
-	raw, rawStderr, rawCode, rawErr := c.Exec(ctx, "list-panes", "-a", "-F", PaneFormat)
-	if rawErr != nil || rawCode != 0 {
-		t.Fatalf("list-panes just before ListPanes: code=%d err=%v stderr=%q", rawCode, rawErr, rawStderr)
-	}
-
 	panes, err := c.ListPanes(ctx)
 	if err != nil {
 		t.Fatalf("ListPanes failed: %v", err)
 	}
 	if len(panes) != 2 {
-		again, againErr := c.ListPanes(ctx)
-		after, afterStderr, afterCode, afterErr := c.Exec(ctx, "list-panes", "-a", "-F", PaneFormat)
-		t.Fatalf("got %d panes, want 2\nfirst ListPanes: %d (err=%v)\nsecond ListPanes: %d (err=%v)\n"+
-			"raw before: %q\nraw after: code=%d err=%v stderr=%q out=%q",
-			len(panes), len(panes), err, len(again), againErr,
-			raw, afterCode, afterErr, afterStderr, after)
+		raw, stderr, code, err := c.Exec(ctx, "list-panes", "-a", "-F", PaneFormat)
+		t.Fatalf("got %d panes, want 2; diagnostic list-panes: code=%d err=%v stderr=%q out=%q",
+			len(panes), code, err, stderr, raw)
 	}
 	for _, p := range panes {
 		if p.Session != "panes" {

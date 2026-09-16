@@ -1,7 +1,7 @@
 ## 1. tmux pane listing
 
-- [x] 1.1 Add a pane list format and parser to `hub/internal/tmux` (`panes.go` or alongside `parse.go`): the `-F` string for `list-panes -a` carrying session name, window index, pane index, window-active, pane-active, pane-dead, window name, pane title, and current command, separated by `\x1f`. Verify: unit test parses a fixture including a CJK title, a title containing spaces, and a title containing `|`.
-- [x] 1.2 Make the parser **drop** any record that does not split into exactly the expected field count. Verify: unit test with a record containing an embedded `\x1f` asserts the record is dropped rather than mis-attributed, and that the remaining records still parse.
+- [x] 1.1 Add a pane list format and parser to `hub/internal/tmux` (`panes.go` or alongside `parse.go`): the `-F` string for `list-panes -a` carrying session name, window index, pane index, window-active, pane-active, pane-dead, window name, pane title, and current command, separated by the printable multi-character sentinel `|vtc-pane|`. Verify: unit test parses a fixture including a CJK title, a title containing spaces, and a title containing `|`.
+- [x] 1.2 Make the parser **drop** any record that does not split into exactly the expected field count. Verify: unit test with a record containing an embedded `|vtc-pane|` asserts the record is dropped rather than mis-attributed, and that the remaining records still parse.
 - [x] 1.3 Add a `ListPanes(ctx)` method to the tmux client using the existing `Exec` idiom. Verify: `TestListPanesReportsEveryPane` drives a real tmux server, asserts one record per pane across a split window and that the panes reduce to a summary; `TestListPanesReportsWhenTmuxIsUnavailable` asserts a resolution failure is surfaced as an error rather than an empty list. (The package has no fake-exec seam — `Exec` is not injectable and every existing test drives real tmux — so the argument vector is verified end-to-end through tmux's own parsing rather than by asserting argv.)
 
 ## 2. Pane summary in the session service
@@ -14,12 +14,12 @@
 
 - [x] 3.1 Extend the session `Service.List` path to merge pane summaries into the returned sessions, leaving the summary absent where no representative pane exists. Verify: unit test asserts a session with no live pane is still returned with an absent summary.
 - [x] 3.2 Ensure a failing pane query does **not** fail the session listing: the list is returned with summaries absent. Verify: unit test with a pane lister returning an error asserts a successful listing with absent summaries.
-- [x] 3.3 Add the optional summary field to the session list DTO in `hub/internal/transport/http/dto.go` following existing conventions, keeping all existing fields and shapes unchanged. Verify: an httptest asserts a session without a summary serialises without the field and one with a summary serialises all three components; the existing session-list tests still pass unmodified.
+- [x] 3.3 Add the optional summary field to the session model in `hub/internal/session/model.go`; the existing JSON serialization exposes it in the session-list response while keeping all existing fields and shapes unchanged. Verify: an httptest asserts a session without a summary serialises without the field and one with a summary serialises all four components; the existing session-list tests still pass unmodified.
 
 ## 4. Frontend subtitle
 
 - [x] 4.1 Add the summary field to the session type in `hub/web/src/api.ts` as optional. Verify: `npm test` passes and an existing api test still passes unmodified.
-- [x] 4.2 Add a DOM-free `formatPaneSubtitle` module implementing the precedence `windowName[*]: title` → `windowName` → `command` → nothing, marking the window name when the window is active. Verify: `npm test` covers all four branches, the active-window asterisk, an all-empty summary, and absent summary.
+- [x] 4.2 Add a DOM-free `formatPaneSubtitle` module implementing the precedence `windowName[*]: title` → `windowName[*]` → `command` → nothing, marking the window name when the window is active. Verify: `npm test` covers all four branches, the active-window asterisk, an all-empty summary, and absent summary.
 - [x] 4.3 Render the subtitle in `SessionList.vue` under the session name, omitting the element entirely when there is no subtitle. The pre-existing `row-meta` line (window count and attached state) was removed during review. Verify: manual check that a row with no summary collapses to the session name alone with no empty line, that no row shows a window count or attached state, and that a row's name and action buttons are unchanged.
 
 ## 5. Styling and accessibility
@@ -31,7 +31,7 @@
 
 - [x] 6.1 Run `make lint` and confirm zero issues on the new Go files, including `lll`, `funlen`, `gocyclo`, and `mnd`. Verify: command exits 0.
 - [x] 6.2 Run `make test` and confirm all Go and frontend tests pass. Verify: command exits 0.
-- [x] 6.3 Confirm tmux test isolation is intact: any test touching tmux goes through `testTmuxEnv` + `t.TempDir()`, and `TestTerminalTestsPreserveParentTmux` passes. Verify: `go test ./...` exits 0 with the parent tmux server unaffected.
+- [x] 6.3 Confirm tmux test isolation is intact: tests use `testTmuxEnv` with `testutil.SocketDir(t)` for the short socket path, while non-socket temporary files use `t.TempDir()`, and `TestTerminalTestsPreserveParentTmux` passes. Verify: `go test ./...` exits 0 with the parent tmux server unaffected.
 - [x] 6.4 Verify end to end in a browser against real sessions: a session running a plain shell, one running a full-screen program that sets its pane title, one with a split where a non-first pane is active, and one whose panes have all exited. Verify: each shows the expected subtitle per the precedence, the exited one shows no subtitle, and the session list still renders when the pane query is unavailable.
 
 ## Status notes (2026-09-15)
@@ -50,6 +50,16 @@ Confirmed by the operator in a browser (2026-09-15), using the environment and s
 - 6.4 — `split-demo` reports the **active** pane (`tail*: …`), not the inactive `sleep` pane, and `ended` shows no subtitle at all.
 
 All 18 tasks are complete.
+
+### Post-archive CI follow-up (2026-09-16)
+
+Linux CI failed in the real tmux pane listing test:
+the `\x1f` control separator in the format was returned by that tmux/platform
+combination as the literal escape `\037`, so the parser found no nine-field
+records. The wire separator is now the printable sentinel `|vtc-pane|`; strict
+field-count validation remains in place, and a value containing that complete
+sentinel is still dropped. This preserves the missing-subtitle degradation while
+making the wire format stable across tmux versions and platforms.
 
 ### Changes from the first review round
 
@@ -70,4 +80,4 @@ Deliberately left alone. tmux centres it so it does not read as the program's ow
 
 Every tmux-backed test failed on macOS with `File name too long`: `t.TempDir()` nests under `/var/folders/...`, so `TMUX_TMPDIR/tmux-<uid>/<socket>` overflowed the ~104-byte `sun_path` limit and tmux could not bind at all. Predated this change; passed on Linux CI.
 
-Fixed by adding `hub/internal/testutil.SocketDir(t)`, which returns a short directory under `/tmp`, and using it everywhere a socket directory is needed: `newTestClient` in `hub/internal/tmux`, `testTmuxEnv` callers in `hub/cmd/visual-tmux-client` (`tmux_isolation_test.go`, `smoke_test.go`, `e2e_test.go`). Non-socket temp dirs (process working directory, config files) still use `t.TempDir()`. Socket names were shortened too, since the limit counts the whole path. Documented in `CONTRIBUTING.md`.
+Fixed by adding `hub/internal/testutil.SocketDir(t)`, which returns a short directory under `/tmp`, and using it everywhere a socket directory is needed: `newTestClient` in `hub/internal/tmux`, `testTmuxEnv` callers in `hub/cmd/visual-tmux-client` (`tmux_isolation_test.go`, `smoke_test.go`, `e2e_test.go`). Non-socket temp dirs (process working directory, config files) still use `t.TempDir()`. Socket names were shortened too, since the limit counts the whole path.

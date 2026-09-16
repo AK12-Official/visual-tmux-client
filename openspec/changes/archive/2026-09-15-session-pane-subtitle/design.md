@@ -2,7 +2,7 @@
 
 See `proposal.md` — Why. Constraints that shape this approach:
 
-- The hub already polls with one `list-sessions` invocation per `web.session_poll_interval` (default 2s). `hub/internal/tmux/parse.go` splits session records from the **right** because session names may themselves contain the separator — an existing acknowledgement that tmux fields are free-form.
+- The hub already polls with one `list-sessions` invocation per `web.session_poll_interval` (default 5s). `hub/internal/tmux/parse.go` splits session records from the **right** because session names may themselves contain the separator — an existing acknowledgement that tmux fields are free-form.
 - `session.Session` (`hub/internal/session/model.go:4`) is `{Name, Windows, Attached, Created}`; there is no pane data anywhere in the hub.
 - `session.Backend` is deliberately minimal (`List`/`Create`/`Rename`/`Kill`). `session/service.go:50-56` establishes an **optional-capability idiom**: unexported interfaces (`fastGetter`, `fastChecker`) are type-asserted against the backend so an implementation can add capability without widening the contract.
 - `SessionList.vue` already renders a meta line under the name (`row-meta`, "N windows · attached/detached"), so the row is already two-line.
@@ -18,7 +18,7 @@ See `proposal.md` — Why. Constraints that shape this approach:
 **Non-Goals:**
 - Changing the terminal header, which keeps showing the session name and connection state. (An earlier framing described this as "moving" a process name from the header to the list; the header has no process name and the name it does show is load-bearing when the sidebar is collapsed.)
 - Per-pane subtitles or a pane list in the sidebar. The reference does this in its pane toolbar; not here.
-- Pushing subtitle updates over the WebSocket instead of the existing poll. Not worth a protocol change for a 2-second-stale string.
+- Pushing subtitle updates over the WebSocket instead of the existing poll. The subtitle follows the configured polling interval (5 seconds by default).
 - Detecting *which agent* is running (the reference has a whole `agent-nexus` layer that identifies `claude`/`codex`/`cursor` from the command and title). Out of scope.
 
 ## Decisions
@@ -29,11 +29,11 @@ See `proposal.md` — Why. Constraints that shape this approach:
 
 *Alternatives considered:* one `list-panes -t =<name>` per session — N processes per poll, and it scales with exactly the dimension (many sessions) that makes the subtitle most valuable. Reading `/proc` or `ps` instead of asking tmux — rejected: it would reimplement tmux's own notion of the active pane and would not see the pane title at all.
 
-### 2. `\x1f` as the field separator, with a strict field-count check
+### 2. `|vtc-pane|` as the field separator, with a strict field-count check
 
-The pane format carries three free-form fields (window name, pane title, current command), so the existing right-split trick does not generalise to them. The hub uses ASCII Unit Separator (`\x1f`) as the field separator and then **verifies the field count**; a record that does not split into exactly the expected number of fields is **dropped**, not guessed at.
+The pane format carries three free-form fields (window name, pane title, current command), so the existing right-split trick does not generalise to them. The hub uses the printable multi-character sentinel `|vtc-pane|` as the wire field separator and then **verifies the field count**; a record that does not split into exactly the expected number of fields is **dropped**, not guessed at. A normal `|` remains valid pane text. If a value contains the complete sentinel, that record is intentionally omitted because the wire format cannot distinguish it from a field boundary.
 
-*Alternatives considered:* `strings.SplitN` so the last field absorbs extra separators — only protects one of the three free-form fields. A printable separator like `|` — session names, window names, and OSC titles routinely contain it. Dropping malformed records is the key choice: it converts an unparseable pane into a missing subtitle, and the spec explicitly permits a missing subtitle.
+*Alternatives considered:* `strings.SplitN` so the last field absorbs extra separators — only protects one of the three free-form fields. ASCII Unit Separator (`\x1f`) — tmux versions/platforms can render the control character as the literal escape `\037`, so the parser may see zero records even though tmux returned panes. A single printable separator like `|` — session names, window names, and OSC titles routinely contain it. Dropping malformed records is the key choice: it converts an unparseable pane into a missing subtitle, and the spec explicitly permits a missing subtitle.
 
 ### 3. Best-pane selection mirrors the reference
 
@@ -49,19 +49,19 @@ Pane summaries are obtained through an optional interface that `session.Service`
 
 ### 5. Subtitle composition is a pure function on the client
 
-The precedence — `windowName[*]: title` → `windowName` → `command` → nothing — lives in a DOM-free module with unit tests. The test environment has no DOM, so anything worth testing has to be pure; this is the same split the file-manager change uses for its preview dispatch.
+The precedence — `windowName[*]: title` → `windowName[*]` → `command` → nothing — lives in a DOM-free module with unit tests. The test environment has no DOM, so anything worth testing has to be pure; this is the same split the file-manager change uses for its preview dispatch.
 
 *Alternatives considered:* composing the string on the hub. Rejected: it is presentation, it would need the asterisk/formatting rules on the server, and the client already receives all three fields and can render them differently later without a server change.
 
-### 6. The subtitle is an additional line, not a replacement
+### 6. The subtitle replaces the old metadata line
 
-`row-meta` ("N windows · attached/detached") was intended to stay as it is, with the subtitle a new line above it. A review follow-up removed it instead: the window count and attached state duplicated what the terminal header shows, and dropping the line leaves the row carrying only its name and subtitle. The subtitle carries no state and no punctuation of its own beyond the active-window asterisk, so it reads as annotation rather than as another control.
+`row-meta` ("N windows · attached/detached") was removed in review so the row can focus on the session identity and the new running-process context. Keeping it would leave two metadata lines competing for the row's limited height. The row now carries only its name and subtitle. The subtitle carries no state and no punctuation of its own beyond the active-window asterisk, so it reads as annotation rather than as another control.
 
 *Alternatives considered:* folding the command into the existing meta line — that line already packs two facts, and appending a free-form command of arbitrary length risks wrapping the row and crowding the rename control.
 
 ## Risks / Trade-offs
 
-- **[Risk] A pane whose title contains `\x1f` produces a malformed record.** → *Mitigation:* the field-count check drops it, yielding no subtitle. The failure mode is a missing subtitle, never a wrong string.
+- **[Risk] A pane field contains `|vtc-pane|` and produces a malformed record.** → *Mitigation:* the field-count check drops it, yielding no subtitle. The failure mode is a missing subtitle, never a wrong string.
 - **[Risk] The extra tmux invocation per poll is visible on a machine with a very large pane count.** → *Mitigation:* it is one process, not one per session. If profiling shows cost, the query can be reduced to sessions that are actually listed (currently every session) or moved behind the existing optional-capability seam without touching the specs.
 - **[Risk] A subtitle that changes every poll causes visual churn** for sessions running a command that rewrites its title constantly (some prompts do). → *Mitigation:* the subtitle is text-only with no transition or animation, so changes are as calm as the poll interval; shortening the poll is deliberately not part of this change.
 - **[Trade-off] Subtitle content is only as fresh as the poll.** → *Accepted;* it is ambient context, not a live indicator, and the activity dot already covers "is this session producing output".
@@ -73,4 +73,4 @@ Additive and compatible. The new session field is optional on the wire, so an ol
 
 ## Open Questions
 
-- Whether the subtitle should be truncated with an ellipsis or allowed to wrap when a pane title is very long. Leaning toward a single-line ellipsis so row height stays uniform; it does not affect the specs or the task breakdown, only the CSS.
+- The subtitle uses a single-line ellipsis in the shipped CSS so row height stays uniform; this is no longer open.

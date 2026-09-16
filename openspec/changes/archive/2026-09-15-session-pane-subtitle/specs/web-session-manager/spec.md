@@ -4,7 +4,7 @@
 
 The client SHALL present the available tmux sessions, showing for each its name. The list SHALL also show a subtitle beneath each session's name derived from that session's representative pane, so a user can tell what a session is running without attaching to it. The list SHALL reflect server-side changes without the user having to trigger a refresh.
 
-A row SHALL show only its name and, when one is available, its subtitle. Window count and attached state SHALL NOT be shown on the row.
+A row SHALL show only its name and, when one is available, its subtitle. Window count and attached state SHALL NOT be shown on the row or announced as part of its accessible name.
 
 The subtitle SHALL be taken from the first of these that is non-empty: the window name, suffixed with an asterisk when the window is active, followed by `: ` and the pane title when a title is present; otherwise the window name alone; otherwise the command currently running in the pane. When none is available the client SHALL omit the subtitle entirely rather than showing an empty or placeholder line. A subtitle SHALL NOT be shown for a session whose summary is absent, and its absence SHALL NOT be presented as an error.
 
@@ -28,7 +28,7 @@ The subtitle is supplementary: the session name and the actions available on the
 #### Scenario: Subtitle falls back to the window name
 
 - **WHEN** a session's representative pane has a window name but no title
-- **THEN** the client shows the window name as the subtitle
+- **THEN** the client shows the window name as the subtitle, marked when that window is active
 
 #### Scenario: Subtitle falls back to the running command
 
@@ -44,6 +44,16 @@ The subtitle is supplementary: the session name and the actions available on the
 
 - **WHEN** a session has a subtitle
 - **THEN** its name and the row's actions remain available as before
+
+#### Scenario: A session is named like a runtime object member
+
+- **WHEN** a session's name is `constructor`, `toString`, `valueOf`, or `__proto__`
+- **THEN** its row shows that session's own subtitle or none at all, and never a value inherited from the language runtime
+
+#### Scenario: Accessible row label
+
+- **WHEN** a session row has a subtitle
+- **THEN** its accessible name includes the session name and subtitle, without announcing window count or attached state
 
 #### Scenario: Subtitle updates without a manual refresh
 
