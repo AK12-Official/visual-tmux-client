@@ -4,9 +4,10 @@
 // the user never sees -- it is one they see as itself: `Could not rename x:
 // cross_root_move`. That is why this table lives in a module of its own rather
 // than beside the code that uses it, and why reasons.test.ts reads the hub's
-// error mapper and holds the two against each other. Nothing else can: the two
-// sides are different languages, and a list on this side would only be a second
-// thing to forget.
+// error mapper and holds the two against each other: a list on this side would
+// only be a second thing to forget, and the two sides are different languages.
+// A generated artifact would hold them together as well, at the cost of a build
+// step and a checked-in file for eleven strings.
 //
 // `mtime_unavailable` is the exception, and the reason the table is not simply
 // derived from the hub's: it is raised by this client (files/api.ts,

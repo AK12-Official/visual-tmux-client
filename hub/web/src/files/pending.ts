@@ -53,10 +53,13 @@ export interface Pending {
    * idle resolves once nothing is outstanding for `path` or anything beneath it.
    *
    * The direction is *downwards*, deliberately the opposite of isPending, and
-   * likewise what its caller asks. A delete names a directory or a file, and the
-   * writes it has to wait for are the ones naming that entry or what is inside
-   * it. Waiting upwards as well would have a delete of a file wait on a delete of
-   * its directory, which is unrelated work.
+   * likewise what its caller asks. A delete names an entry, and the writes it has
+   * to wait for are the ones naming that entry or something inside it.
+   *
+   * Waiting upwards as well would be dead here rather than wrong -- what is
+   * outstanding is a save, and a save names a file, so nothing outstanding can
+   * ever name a directory above the path being waited for -- but a caller that
+   * wanted it would be asking a different question, and should ask isPending.
    */
   idle(path: string): Promise<void>
 }

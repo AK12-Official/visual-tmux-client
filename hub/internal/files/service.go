@@ -70,8 +70,9 @@ type Service struct {
 // A missing root set becomes an empty one rather than staying nil, because every
 // method here goes through it: a nil one would be a service that panics on the
 // first call rather than a service with no boundary, and that is not a state this
-// type offers. The composition root builds the unrestricted set the same way,
-// from a configuration that names no roots.
+// type offers. The composition root never takes this branch -- it always builds a
+// set, empty when the configuration names no roots -- so this is for a caller
+// that constructs a Service directly.
 func NewService(opts Options) *Service {
 	roots := opts.Roots
 	if roots == nil {

@@ -358,7 +358,8 @@ The report's own finding about the error-code table was "the user impact is nil,
 nothing enumerates codes". Both halves were right: the new code was missing, *and* nothing would have
 caught the next one. `reasons.test.ts` now reads the hub's error mapper out of the Go source and
 asserts every code it can answer with has words in the browser's table — the one place a test here
-reads across the language boundary, and the only way to hold the two halves against each other.
+reads across the language boundary. A generated artifact would hold them together as well; a list on
+either side would only be a second thing to forget.
 
 ### Residuals after this round
 
@@ -440,3 +441,64 @@ The pattern this change keeps producing, and this round produced four more:
 - The commit message for the previous round filed the substitution under "claims corrected" when it
   also changed behaviour. The record has it in `tasks.md` 13.6 and `design.md` 6; noted here because
   the message alone reads as though nothing changed.
+
+## The fifth review of the change
+
+Three subagents again, read-only and disjoint, over the fixes the fourth round produced. This round
+found one real gap in those fixes, two wrong statements about mechanisms, four more prose defects,
+and — for the first time in five rounds — nothing wrong with the *behaviour* of the synchronization,
+the predicate directions, the ordering, or the classification.
+
+### The decode guard was half a guard
+
+The fourth round's ticket stopped a stale decode event from being read against the next file while
+that file was *loading*. The reviewer showed the other half: once the next file has rendered,
+`shownAt` matches the live load, the ticket passes, and a stale event from the element the previous
+file left behind is still attributed to it. That element is reachable — the template tears the branch
+down on a switch, so Vue builds a fresh node and the old one keeps its listener — and the ordering
+that produces it (a slow decode whose revocation is noticed only after a fast next load) is ordinary.
+
+Fixed by keying the image on its own URL and checking that the event's target is the live element:
+identity answers what the ticket cannot, because a superseded URL is now a different node rather than
+the same node re-pointed. Both halves are pinned by the one test, which was confirmed to fail with
+the element check removed.
+
+### A test that pins the helper and not the routes it serves
+
+The fourth round's classification fix made one cause answer the same way on every route, and its test
+calls the three helpers directly. The reviewer showed that reverting any one *call site* to the old
+inline wrap leaves the test green, because nothing drives `Write`, `Rename` or `Delete` against a
+handle that closes mid-operation — a closed set refuses earlier and a closed handle fails the
+preceding `stat`. So the property is pinned where it can be and the gap is named (`tasks.md` 15.9)
+rather than papered over with a test that would not have failed.
+
+### Two statements about mechanisms
+
+- `RootSet.Close`'s comment said a handle obtained just before the close is "left with a closed
+  descriptor, which makes its operation fail rather than act". Wrong: `os.Root` refcounts, so an
+  operation already inside its syscall completes against a descriptor the close keeps alive. Only one
+  that *begins* after the close is refused. The conclusion held; the reason given for it did not.
+- `NewService`'s comment implied the composition root takes its nil-substituting branch. It cannot:
+  it always passes a set. The substitution is for a caller constructing a service directly.
+
+### Four prose defects, including one that contradicted its own document
+
+The recurring class, and this round it produced the clearest instance yet: `design.md` decision 1b
+states the current design as a bullet list, and the first bullet still gave the *replaced* premise —
+a delete asking about the tabs it is about to close "and nothing more" — which the paragraphs twenty
+lines below record as the defect that was fixed. A reader who takes the bullet list as the design
+gets the design that was removed.
+
+The other three: `tasks.md` 12.1 still carried the claim 13.6 said it had corrected (fourth round);
+"The only way to hold the two halves against each other" was corrected in `reasons.test.ts` and left
+standing in `reasons.ts` and `review.md` (fourth round); and `idle`'s justification named a caller it
+does not have (found independently by two reviewers this round).
+
+### Accepted, and named
+
+- A create is not ordered against an outstanding delete. Either ordering leaves the user with the
+  empty file they asked for or with no file at all, and nothing of theirs is lost — which is exactly
+  what distinguishes it from the save case, where the ordering exists to stop an edit being undone.
+- The image decode-failure path rests on a browser raising `error` for a revoked blob URL. No test
+  here can check that, because they dispatch the event themselves, and the fallback's test asserts a
+  premise about the platform rather than about this code.

@@ -482,7 +482,7 @@ test('a save is refused while the delete of that file is in flight', async () =>
   )
   const notices = (wrapper.emitted('notice') ?? []).flat()
   assert.ok(
-    notices.some((text) => String(text).includes('A delete of a.txt is in flight')),
+    notices.some((text) => String(text).includes('A delete of a.txt or of a directory above it')),
     `expected a notice that a delete is in flight, got ${JSON.stringify(notices)}`,
   )
 
@@ -758,7 +758,7 @@ test('a save inside a directory being deleted is refused', async () => {
   )
   const notices = (wrapper.emitted('notice') ?? []).flat()
   assert.ok(
-    notices.some((text) => String(text).includes('A delete of f.txt is in flight')),
+    notices.some((text) => String(text).includes('A delete of f.txt or of a directory above it')),
     `expected a notice that a delete is in flight, got ${JSON.stringify(notices)}`,
   )
 
@@ -816,10 +816,26 @@ test('a decode failure for a file that is gone is not read against the next one'
     `a stale decode failure was reported to the user: ${JSON.stringify(notices)}`,
   )
 
-  // And the second file's own arrival is unaffected.
+  // And the second half of the same race: the stale event arriving *after* the
+  // next file has rendered. By then the ticket cannot tell the two apart -- the
+  // live load is the one it names -- so what distinguishes them is which element
+  // raised it, which is why the image is keyed on its own URL.
   second.release(text('hello'))
   await flush()
   assert.ok(wrapper.find('.image-preview__img').exists(), 'the second image never rendered')
+
+  stale.dispatchEvent(new Event('error'))
+  await flush()
+
+  assert.equal(
+    wrapper.find('.image-preview__failed').exists(),
+    false,
+    'a stale decode failure replaced the file that is on screen',
+  )
+  assert.ok(
+    wrapper.find('.image-preview__img').exists(),
+    'the image that rendered was replaced by a failure panel',
+  )
   wrapper.unmount()
 })
 

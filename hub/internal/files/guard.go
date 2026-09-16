@@ -110,9 +110,14 @@ func NewRootSet(roots []string) (*RootSet, error) {
 // per run -- and a descriptor held on a mount point also keeps the mount from
 // being released.
 //
-// Safe to call more than once, and safe to call while operations are in flight: a
-// Confine that loses that race refuses, and one that got a handle just before is
-// left with a closed descriptor, which makes its operation fail rather than act.
+// Safe to call more than once, and safe to call while operations are in flight.
+// A Confine that loses that race refuses. One that got a handle just before hands
+// it to an operation which either begins its syscall before the close -- and
+// completes against a descriptor os.Root keeps alive for it, since a close is
+// refcounted -- or begins it after, and is refused with fs.ErrClosed. Neither of
+// them acts outside the boundary, and neither is why the lock is here: the lock
+// is for the two fields themselves, which an unsynchronized reader could read
+// half-updated and index a slice that has been emptied. See mu.
 func (s *RootSet) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

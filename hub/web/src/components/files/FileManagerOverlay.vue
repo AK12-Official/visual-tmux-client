@@ -425,11 +425,15 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
   // The path being deleted covers what is under it, so this refuses a save of a
   // file inside a directory that is being deleted as well as the entry itself.
   if (deleting.isPending(tab.path)) {
-    // What is known, and no more: a delete of this file has been sent. Whether it
-    // will succeed is not known here, and saying the file "is being deleted" and
-    // then failing to delete it would be the refusal explaining itself with
-    // something that did not happen.
-    emit('notice', `A delete of ${tab.name} is in flight, so it was not saved.`, 'warning')
+    // What is known, and no more: a delete of this file, or of a directory above
+    // it, has been sent. Whether it will succeed is not known here, and saying
+    // the file "is being deleted" and then failing to delete it would be the
+    // refusal explaining itself with something that did not happen.
+    emit(
+      'notice',
+      `A delete of ${tab.name} or of a directory above it is in flight, so it was not saved.`,
+      'warning',
+    )
     return
   }
 
@@ -623,6 +627,11 @@ async function createHere(isDir: boolean) {
   // buttons are disabled in that state; this is the same rule at the point that
   // matters, because joinPath('', name) would name a path at the filesystem root.
   if (current.value === '') return
+  // A create is deliberately not ordered against an outstanding delete, unlike a
+  // save: one that lands before the unlink has its empty file removed, and one
+  // that lands after leaves exactly what the user asked for. Nothing of theirs is
+  // lost either way, and the refresh that follows both requests shows which
+  // happened, so there is nothing here for the ordering to protect.
   const name = window.prompt(isDir ? 'New directory name' : 'New file name')
   if (!name) return
   const path = joinPath(current.value, name)

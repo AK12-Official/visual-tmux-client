@@ -135,8 +135,8 @@ it can only be *detected*, never prevented. What the browser can do is refuse to
 requests that way, and that is what it now does:
 
 - A delete waits for the writes already travelling that name the entry or anything beneath it before
-  it is sent. The tabs it is about to close are exactly the paths a save of that subtree can be
-  in flight for, so it asks about those and nothing more.
+  it is sent. It asks by *path*, not by the tabs it is about to close -- a write outlives its tab,
+  which is the defect the two paragraphs after this list record.
 - A save whose path has a delete in flight is refused with a notice rather than sent. The await above
   only covers writes that existed when the delete looked; one started afterwards would be a new
   request reaching the hub in an order neither side can see.
@@ -455,6 +455,17 @@ reads (rejected: a build step and a generated artifact for eleven strings).
   file manager" for a delete: the answer is not recorded in the first case, and in the second the
   browser does not let its own two requests race at all. What remains outside both is a write from
   another process, which no ordering the browser chooses can reach.*
+- **[Assumption, not verified here] A browser raises `error` for a `<img>` whose blob URL has been
+  revoked.** → *The image preview's decode-failure fallback and the test that pins it both rest on it,
+  and neither can check it: the test dispatches the event itself. If a browser does not do this, the
+  fallback is simply unreachable rather than wrong, and the visible behaviour is what it was before --
+  an empty frame.*
+- **[Accepted] A create is not ordered against a delete.** → *`createHere` neither waits for an
+  outstanding delete of its path nor is refused by one, so a create sent while that delete is in
+  flight can land before or after the unlink. Either way the name ends up in a state the user asked
+  for -- an empty file -- or without a file at all, and the tree refresh that follows both requests
+  shows which. It is not the save case: nothing of the user's is lost, which is why the ordering is
+  worth having for a save and not here.*
 - **[Residual] A file's classification and the bytes served are two reads of a mutable file.** →
   *A file rewritten in between can be served with a classification taken before the change. The harm
   is bounded by the same optimistic write: the modification time the client recorded is no longer

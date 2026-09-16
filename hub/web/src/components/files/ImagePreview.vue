@@ -25,7 +25,12 @@ const url = ref('')
 // from a large-file store, something encrypted. The fetch cannot fail on that
 // account, because the fetch succeeded; only rendering can, and nothing else in
 // this component would notice.
+//
+// That a browser raises `error` at all for a blob URL that has been revoked is a
+// claim about the platform, not something these tests can check -- they dispatch
+// the event themselves. See design.md's residuals.
 const undecodable = ref(false)
+const image = ref<HTMLImageElement | null>(null)
 let objectUrl: string | null = null
 // loadAt is the ticket of the most recent load. A read that resolves after a
 // newer one started -- or after the component is gone -- must not adopt its blob,
@@ -34,10 +39,7 @@ let loadAt = 0
 // shownAt is the load the URL on screen came from, and the decode handler needs
 // it for the same reason the fetch has a ticket: revoking a blob to make room for
 // the next file aborts that file's decode, and the browser then raises `error`
-// for a URL this component has already let go of. Without this, that stale event
-// -- which the revoke queues ahead of the next fetch, so it usually arrives first
-// -- would mark the *next* file undecodable, name it in a warning, and hide the
-// image that would have rendered.
+// for a URL this component has already let go of.
 let shownAt = -1
 
 function release() {
@@ -50,10 +52,15 @@ function release() {
   shownAt = -1
 }
 
-function onDecodeFailed() {
-  // An event for a URL this component is no longer showing says nothing about
-  // what it is showing now.
+function onDecodeFailed(event: Event) {
+  // Two guards, because that stale event can arrive at either moment. Before the
+  // next file's bytes land, the ticket is what says so; after, `shownAt` matches
+  // the live load and only the element does. The element is keyed on its URL, so
+  // a superseded one is a different node rather than the same node re-pointed --
+  // which is what makes identity a faithful answer to "is this event about what
+  // is on screen now".
   if (shownAt !== loadAt) return
+  if (event.target !== image.value) return
   undecodable.value = true
   emit(
     'notice',
@@ -117,6 +124,8 @@ onBeforeUnmount(() => {
     </div>
     <img
       v-else-if="url"
+      :key="url"
+      ref="image"
       class="image-preview__img"
       :src="url"
       :alt="path"
