@@ -10,10 +10,10 @@ Four subagents, run concurrently:
 
 | reviewer | scope | outcome |
 | --- | --- | --- |
-| Go service | `hub/internal/files/{service,model,guard,errors}.go` | 4 findings, 3 CONFIRMED (G1–G4 below) |
+| Go service | `hub/internal/files/{service,model,guard,errors}.go` | 4 findings, 4 CONFIRMED (G1–G4) |
 | Go transport and tmux | `hub/internal/transport/http/{files,dto}.go`, `hub/internal/tmux/panes.go` | 2 findings, 1 CONFIRMED |
 | Frontend | `hub/web/src/**` | 6 findings, 6 CONFIRMED |
-| Claims and tests | spec, change docs, READMEs, every test in the diff | 11 findings, 10 CONFIRMED |
+| Claims and tests | spec, change docs, READMEs, every test in the diff | 11 findings, 9 CONFIRMED, 1 PLAUSIBLE, 1 informational |
 
 Every finding was reproduced before it was acted on. Three are worth recording in detail, because
 two of them are defects *introduced* by this change.
@@ -77,8 +77,10 @@ Three subagents: closure verification of every round-1 finding, and an adversari
 round-1 fixes split across Go and frontend. The fixes are where a review is most likely to find the
 next defect, which round 1 had already demonstrated.
 
-**Closure verification: 20 of 22 findings closed**, and each closure verified by reverting the fix in
-a throwaway copy and confirming the named test fails:
+**Closure verification: 21 of 22 findings closed.** Where a finding had a test to revert, the
+closure was verified by reverting the fix in a throwaway copy and watching that test fail (G1, G2,
+T1, D6, D7, D10). The rest are documentation, comment, or acceptance changes with no test to
+revert, and their evidence is the line named in the table:
 
 | finding | verdict | settling evidence |
 | --- | --- | --- |
@@ -135,3 +137,49 @@ cannot avoid, and which the client detects as a failed transfer rather than as w
   write path (`design.md`, risks).
 - `ReadResult.MtimeNanos` has no "unknown": a zero is the epoch. Stated as a contract on the field
   rather than left as a trap.
+
+## Round 3
+
+Two subagents, over the round-2 diff only: one adversarial re-review of the frontend change, one
+checking whether the round-2 documents say what the code does.
+
+**The frontend fix is sound.** A differential probe ran the client's real guard against
+`strconv.ParseInt(value, 10, 64)` over 27 candidates — signs, leading zeros, both int64 bounds and
+each side of them, hex, exponents, underscores, whitespace, decimals, a 1,000-digit value, a
+100,000-digit value and a 1,000,001-character one. **No input is accepted by the client and rejected
+by the hub**, which is the defect round 2 fixed, and `BigInt` cannot throw on anything the regex
+passes. The only disagreement runs the safe way: `ParseInt` accepts a leading `+` and the regex does
+not, so the client falls back to the millisecond comparison.
+
+**Round 3 found one new defect, and it was in a comment the round-2 fix added.** The bound on the
+millisecond value was justified by "the hub cannot read a value past what a double holds exactly".
+It can — the hub reads those fine. What actually happens is worse and different in kind: the client
+cannot *carry* the value unchanged, so it echoes a **different** time, and every save is refused as
+a **conflict**. Accepting the overwrite the prompt then offers produces the same refusal, so there
+is no way out through the interface. The check is right; the reason given for it named a hazard that
+does not exist and a discriminator that does not do the work. Rewritten to state the real one.
+
+**Four bookkeeping errors in this file**, all raised by the claims reviewer and all corrected: the
+closure count said 20 where the table's own rows say 21; the round-1 Go row undercounted its
+confirmed findings as 3 where the round-1 report marked 4; the round-1 claims row counted 10
+confirmed where the report marked 9 plus one PLAUSIBLE and one informational; and the closing
+sentence claimed every closure was verified by reverting a test, which is true of the six findings
+that have a test and meaningless for the fifteen that are documentation or acceptance changes. Two
+of those four were introduced by *correcting* the same numbers in the previous commit, in the wrong
+direction — a reminder that the record of a review is a claim like any other.
+
+**One spec sentence overstated**, found by the same reviewer: "Reading SHALL be bounded by the same
+configured maximum" did not survive round 1's fix to the staging/bound interaction, because the
+bound now counts kept entries while the hub also reads the staging files of writes in flight. The
+design document already stated the true bound; the spec now does too.
+
+### Trajectory
+
+| round | over | findings that changed code or a claim |
+| --- | --- | --- |
+| 1 | the whole CR fix set | 21, including two defects introduced by the fix set itself |
+| 2 | the round-1 fixes | 2 — one real (a value bound that checked shape rather than parseability), one partial |
+| 3 | the round-2 fixes | 1 — a comment justifying the right check with the wrong reason — plus 4 bookkeeping errors and 1 spec overstatement |
+
+Each round has been over a smaller surface than the last, and the last one found no defect in the
+code — only a false statement about it.

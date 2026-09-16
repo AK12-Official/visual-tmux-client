@@ -105,13 +105,16 @@ function requireMtime(raw: unknown): number {
       : typeof raw === 'string' && raw.trim() !== ''
         ? Number(raw)
         : Number.NaN
-  // A safe integer, because this value's decimal form is what goes on the wire
-  // and the hub reads it back with a 64-bit integer parse. A fraction, or a value
-  // past what a double holds exactly, would be sent as something the hub cannot
-  // read: every later save would be refused as a malformed request, which is not
-  // a conflict the user can answer and leaves no way out through the interface.
-  // Safe integers also have the property this relies on -- that their decimal
-  // form is a plain run of digits rather than an exponent.
+  // A safe integer, because this value has to survive the round trip unchanged.
+  // The hub reads it back with a 64-bit integer parse, so a fraction or an
+  // exponent would be a request it cannot read -- but the worse case is a plain
+  // integer it reads perfectly and the client cannot carry: a double holds only
+  // every value up to 2^53, so a larger millisecond time is read back carrying
+  // the client's rounding. That is not a malformed request, it is a *different
+  // observation*: the next save would be compared against a time that matches no
+  // file and refused as a conflict, and accepting the overwrite the prompt offers
+  // would produce the same refusal, so there would be no way out through the
+  // interface. A time this client cannot carry is reported as no time at all.
   if (!Number.isSafeInteger(value)) {
     throw new FileApiError('mtime_unavailable')
   }

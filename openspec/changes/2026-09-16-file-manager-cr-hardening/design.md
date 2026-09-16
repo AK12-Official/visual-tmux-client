@@ -243,8 +243,9 @@ side-effect of a bug-fix branch. It is listed as a follow-up.
   unclassified I/O error on a read is answered with the same code. Renaming it
   would change a published code and the browser's message table, and the browser
   prefixes every refusal with the action it was attempting ("Could not open X"),
-  which is where the operation is legible today. Two reviewers raised it as an
-  out-of-scope observation; recorded here rather than left as an oversight.
+  which is where the operation is legible today. One reviewer raised it as a
+  finding and one as an out-of-scope observation; recorded here rather than left
+  as an oversight.
 - **[Trade-off] The TOCTOU stays open**, with its scope now written down. → *Recorded in the
   spec as a limit, in both READMEs, and as the follow-up in decision 1.*
 
