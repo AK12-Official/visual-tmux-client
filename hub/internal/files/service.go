@@ -66,9 +66,18 @@ type Service struct {
 }
 
 // NewService constructs a Service.
+//
+// A missing root set becomes an empty one rather than staying nil, because every
+// method here goes through it: a nil one would be a service that panics on the
+// first call rather than a service with no boundary, and that is not a state this
+// type offers. The transport builds the unrestricted set the same way.
 func NewService(opts Options) *Service {
+	roots := opts.Roots
+	if roots == nil {
+		roots, _ = NewRootSet(nil) //nolint:errcheck // a set with no roots has nothing to resolve
+	}
 	return &Service{
-		roots:         opts.Roots,
+		roots:         roots,
 		maxFileSize:   opts.MaxFileSize,
 		maxDirEntries: opts.MaxDirEntries,
 		enabled:       opts.Enabled,
@@ -146,12 +155,9 @@ func (s *Service) Enabled() bool {
 // one per root per run, and a leaked descriptor on a mount point is also what
 // keeps the mount from being released.
 //
-// Safe to call more than once, and safe on a service built without roots, which
-// has nothing to give back.
+// Safe to call more than once, including while requests are in flight. See
+// RootSet.Close.
 func (s *Service) Close() {
-	if s.roots == nil {
-		return
-	}
 	s.roots.Close()
 }
 

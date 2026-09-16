@@ -70,17 +70,26 @@ Two more properties of the design, both consequences of the same rules:
   escape from, so those hubs go on acting on plain paths. The default configuration's behaviour is
   therefore byte-identical, which is what makes this migration safe to land in the same change as
   nine other fixes.
-- **A move between two roots is refused**, and a third review round is what settled that. Round 2
-  performed it on the two absolute paths and wrote the exception into the spec; the round after
-  pointed out that an exception written down is still a hole -- the API goes on offering an
-  operation a component replaced in between can redirect, out of the boundary in one direction or
-  into it in the other -- and that the reasoning offered for keeping it was wrong: it does not
-  "remove a working feature", because nothing reaches it. A rename from the context menu always
-  names a sibling of its source, so both ends are in one root by construction; only a hand-written
-  API call can name two. It is now refused with an error of its own (`ErrCrossRoot`,
-  `cross_root_move` on the wire), because neither path is outside the boundary and saying so would
-  be false. `renameAt` is consequently the last call in the package on a plain path -- and it makes
-  one only when no roots are configured.
+- **A move between two roots is refused**, and the third review report is what settled that. Round 2
+  performed it on the two absolute paths and wrote the exception into the spec; the report pointed
+  out that an exception written down is still a hole -- the API goes on offering an operation a
+  component replaced in between can redirect, out of the boundary in one direction or into it in
+  the other -- and that the reasoning offered for keeping it was wrong. It is now refused with an
+  error of its own (`ErrCrossRoot`, `cross_root_move` on the wire), because neither path is outside
+  the boundary and saying so would be false.
+- **The reason first written down for that was still wrong**, which cost this change a review round
+  of its own. "Nothing reaches it: a rename names a sibling of its source" is false -- the
+  destination is built from the source's directory, but the name comes from a prompt and may
+  descend, and a component of that descent may be a link into another configured root. The refusal
+  is therefore reachable from the browser and needs a message there; the accurate reason is that a
+  crossing move is one the operator's boundary exists to refuse, not that nobody asks for one. The
+  lesson generalises: "no caller can do this" is a claim about a program, and the program has to be
+  read rather than recalled.
+- **With roots configured, no operation reaches a syscall on a plain path**, and `renameAt` is the
+  one that would have: every helper in `confine.go` has a `c.root == nil` branch, and what makes
+  them safe is not that the branch is absent but that `Confine` never yields a handle-less
+  `Confined` for a path a set with roots admits. The plain paths are what a hub with *no* roots
+  configured runs on, byte-identical to before the migration.
 
 *Alternatives considered:* leaving the docs to carry the limit (rejected by review twice); a
 component-wise `O_NOFOLLOW` walk by hand (rejected: `os.Root` is that walk, maintained); keeping the
@@ -144,9 +153,23 @@ no wait (rejected: it stops new writes but leaves the write already in flight to
 which is the case the finding is about); bounding the wait with a timeout (rejected: a magic number
 in a path whose correctness is the point, and the save's own request is the thing that ends it).
 
-The cost of that last one is named rather than hidden: the wait ends when the write's request does,
-and this client puts no timeout on those, so a write that never answers leaves the delete unsent --
-the entry still listed, which is true, rather than a delete sent into a race it cannot see.
+**The first version of this waited on the wrong thing, and a review round found it.** It waited for
+the tabs under the deleted path -- `doomed`, which is what the delete is about to close -- on the
+reasoning that the writes which can cross it are the ones those tabs are making. They are not: a
+write outlives its tab. Save a file, close the tab (answering the prompt about unsaved changes), and
+the write is still travelling with no tab left for the delete to find it by, so the wait was empty
+and the delete went out into exactly the window it was meant to avoid. Both the wait and the refusal
+now ask by *path* and cover the subtree, which is what the record was always keyed by
+(`files/pending.ts`). The mistake had a shape worth remembering: the reasoning was written down and
+sounded sound, and the test that would have caught it -- a delete of a *directory* -- was the one
+case not exercised, because both delete tests used a file.
+
+The cost of the wait is named rather than hidden: it ends when the write's request does, and this
+client puts no timeout on those, so a write that never answers leaves the delete unsent and the
+marker up -- the entry still listed, saves of it refused from then on, and each retry of the delete
+adding another waiter. That is not transient, and calling it so was the first version's other
+mistake. It is the better failure of the two available: the tree still shows the file, which is the
+truth, where a delete sent into the race reports that a file is gone that may not be.
 
 ### 1c. A listing's metadata phase is cancellable too
 
@@ -320,6 +343,15 @@ lets the name decide the image. The rest of the dispatch is unchanged, and `edit
 `presentation`, so an image stays out of the editor -- which is the reason the classification is
 asked for in the first place.
 
+That introduced one thing worth its own note, which the review round found: a name is a guess, and
+this is the guess being wrong. A file called `photo.png` whose bytes are not an image -- a truncated
+download, a pointer file from a large-file store, something encrypted -- now reaches the image
+preview, and the preview's error handling only wrapped the *fetch*, which succeeds. The user was left
+with an empty frame, no notice, and no download action, where the information panel had offered one.
+`ImagePreview` now reports a decode failure and offers the file, so the dead end is closed in the
+component that creates it -- and it was a dead end for a misnamed image under the bound before this
+change, too.
+
 ### 6. The hub gives its root handles back when it stops
 
 Each configured root is an open descriptor, held for the hub's lifetime and used by every operation
@@ -329,10 +361,44 @@ inside one, leaked one per root per run -- and a descriptor held on a mount poin
 the mount from being released. `App` now keeps the service and `Shutdown` closes it, last, after the
 HTTP server has stopped so no request is still using a handle.
 
+**That turned a test-only helper into a production path, and the review round after it found what
+that cost.** `RootSet.Close` wrote `handles` and `closed` with no synchronization, and `Confine`
+read both: a reader that got past the closed check could index a slice the closer had already
+emptied, which is a panic rather than a refusal. It had never mattered, because only tests closed a
+set and a test does not close one under a running request. `Close` is now guarded by a read-write
+mutex, and `TestClosingARootSetRacesItsReadersWithoutPanicking` is the test that holds it -- removing
+the lock is a `WARNING: DATA RACE` and a failure under `-race`, verified by reverting it.
+
+Shutdown's HTTP phase is what makes the race reachable: it is bounded by a context, so it returns
+when the budget expires, and the force-close that follows closes connections without stopping
+handlers. A request still running then asks `Confine` for a handle. With the lock it gets a refusal
+(`ErrPathNotAllowed`, the same answer the closed-set check gives) or a handle that works until the
+close reaches it; a handle closed underneath an operation yields `fs.ErrClosed`, which now maps to
+the same refusal rather than reaching the transport's fallback as a server fault.
+
 *Alternatives considered:* closing in `New` on the error path only (rejected: the leak is over the
 whole lifetime, not just startup); a finalizer (rejected: nondeterministic, and the point is to
 release them at a known moment); an `App.Stop` distinct from `Shutdown` (rejected: nothing else in
-this composition root has two teardown paths).
+this composition root has two teardown paths); closing only once the router is provably idle
+(rejected: the standard library offers no way to wait for handler goroutines after `Close`, which is
+why the set guards itself).
+
+### 6a. The browser's error-code table is checked against the hub's
+
+A wire code with no entry in the browser's table is not a missing error -- it is one the user reads
+as an identifier: `Could not rename x: cross_root_move`. Adding the round's new code turned up the
+larger version of the same thing: nothing on either side enumerated the vocabulary, so the next code
+added would have gone the same way, silently and by design (the table falls through to the code by
+contract, which is right and is exactly why nothing catches it).
+
+`files/reasons.ts` now holds the table, and `reasons.test.ts` reads `mapFileError` out of
+`hub/internal/transport/http/files.go` and asserts every code it can answer with has words. This is
+the one place a test in this repository reads a source file of the other language, and it is
+worth it: a list on the frontend side would be a second thing to forget, and the two halves cannot
+be type-checked against each other any other way.
+
+*Alternative considered:* a Go side test that prints the codes to a generated file the frontend
+reads (rejected: a build step and a generated artifact for eleven strings).
 
 ## Risks / Trade-offs
 

@@ -111,3 +111,58 @@ test('two trackers do not see one another', () => {
   assert.equal(renaming.isPending('/d/a.txt'), true)
   assert.equal(saving.isPending('/d/a.txt'), false)
 })
+
+// A path covers what is beneath it, because that is the relationship the manager
+// has to reason about: a delete or a rename names an entry, and the writes that
+// cross it name what is inside. Answering only for the exact path is what let a
+// delete of a directory go out while a write inside it was still travelling.
+test('a path covers everything beneath it', () => {
+  const pending = createPending()
+  pending.begin('/d/dir/f.txt')
+
+  assert.equal(pending.isPending('/d/dir/f.txt'), true)
+  assert.equal(pending.isPending('/d/dir'), true, 'the directory holding the write is not covered by it')
+  assert.equal(pending.isPending('/d'), true, 'an ancestor of the directory is not covered either')
+  assert.equal(pending.isPending('/d/other'), false, 'a sibling was covered')
+  assert.equal(pending.isPending('/d/dir/g.txt'), false, 'another entry in the directory was covered')
+})
+
+// Which is the whole of the reason a delete can still find a write whose tab has
+// been closed: the record is keyed by the path the write named, and the entry
+// being deleted is found by walking up from it rather than by remembering it.
+test('an idle wait on a directory is resolved only by what is under it', async () => {
+  const pending = createPending()
+  pending.begin('/d/dir/f.txt')
+
+  let settled = false
+  const idle = pending.idle('/d/dir').then(() => {
+    settled = true
+  })
+
+  await Promise.resolve()
+  assert.equal(settled, false, 'the wait resolved with a write inside the directory outstanding')
+
+  pending.end('/d/dir/f.txt')
+  await idle
+  assert.equal(settled, true)
+})
+
+// A prefix is a path element, not a string -- the same rule renames.ts states for
+// the same reason.
+test('a path does not cover a sibling whose name starts the same way', () => {
+  const pending = createPending()
+  pending.begin('/d/abc/f.txt')
+
+  assert.equal(pending.isPending('/d/abc'), true)
+  assert.equal(pending.isPending('/d/ab'), false, '/d/ab is not the directory holding /d/abc/f.txt')
+  assert.equal(pending.isPending('/d/abcd'), false)
+})
+
+// The filesystem root is a path like any other, and the separator must not be
+// appended twice when it already ends in one.
+test('the filesystem root covers everything under it', () => {
+  const pending = createPending()
+  pending.begin('/d/a.txt')
+
+  assert.equal(pending.isPending('/'), true)
+})

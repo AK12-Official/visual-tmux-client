@@ -245,11 +245,18 @@ func removeAll(c Confined) error {
 // again at syscall time, which is the one thing this function exists to avoid: a
 // component of either path replaced by a symbolic link in between carries the
 // entry out of the boundary, or brings one in, in whichever direction the link
-// was planted. There is no safe spelling of it available here -- the primitive
-// it needs is a rename taking two directory descriptors, which this hub has no
-// dependency for -- and nothing the hub serves asks for one: a rename from the
-// browser's context menu always names a sibling of its source. A user who wants
-// the move has the terminal, where it is a `mv`.
+// was planted. The primitive that would close it is a rename taking two
+// directory descriptors, which this hub has no dependency for.
+//
+// Refusing costs the interface nothing, and the reason is worth stating
+// precisely, because the obvious version of it is wrong. A rename from the
+// browser is not necessarily a rename of a sibling: the destination is built
+// from the source's own directory, but the name is free text and may descend,
+// and a component of that descent may be a symbolic link into another configured
+// root -- which is a path the boundary allows. Only then do the two ends sit in
+// different roots, and only then does this refuse. The browser reports it, and
+// the move the user asked for is one that crosses the operator's boundary
+// anyway.
 func renameAt(from, to Confined) error {
 	if from.err != nil {
 		return from.err
@@ -303,11 +310,17 @@ func openRoots(resolved []string) ([]*os.Root, error) {
 // A path outside every configured root yields one carrying an error instead --
 // see the err field for why that must not be the same representation.
 func (s *RootSet) Confine(path string) Confined {
+	// Read under the lock, because Close may be running: the hub closes the set
+	// when it shuts down, and a handler can still be in flight at that point. See
+	// RootSet.mu.
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.closed {
-		// Closing is a test's business, and a test that closes a set while a
-		// service still holds it has made a mistake. Refusing says so; acting
-		// without the handle would be the boundary quietly disappearing, and
-		// indexing past the handles would take the test binary down with it.
+		// Closing is the end of the hub's lifetime, and an operation that reaches
+		// here has outlived it -- a handler still running after the shutdown budget
+		// expired. Refusing says so; acting without the handle would be the
+		// boundary quietly disappearing, and indexing past the handles it no longer
+		// has would take the process down instead of answering.
 		return Confined{
 			path: path,
 			abs:  path,

@@ -108,10 +108,22 @@ func TestServiceDisabledIsReportedWithoutTouchingTheFilesystem(t *testing.T) {
 	}
 }
 
-// A service built without a root set has nothing to give back, and saying so is
-// what keeps the shutdown path from having to know which kind it holds.
-func TestClosingAServiceWithNoRootSetIsHarmless(t *testing.T) {
+// A service built without a root set is a service with no boundary rather than a
+// broken one: the set is substituted at construction, so every method has
+// something to go through and closing it has something to give back. Left nil,
+// the first call would dereference it.
+func TestAServiceBuiltWithoutRootsIsUnrestrictedRatherThanNil(t *testing.T) {
+	dir := sandbox(t)
+	mustWrite(t, filepath.Join(dir, "a.txt"), testBody)
+
 	svc := NewService(Options{MaxFileSize: 1024, MaxDirEntries: 10, Enabled: true})
+	result, err := svc.List(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("a service with no roots should list an ordinary directory: %v", err)
+	}
+	if len(result.Entries) != 1 || result.Entries[0].Name != "a.txt" {
+		t.Errorf("expected the directory's own entry, got %v", result.Entries)
+	}
 	svc.Close()
 	svc.Close()
 }

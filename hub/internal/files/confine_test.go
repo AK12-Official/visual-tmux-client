@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -349,6 +350,53 @@ func TestAMoveBetweenTwoRootsIsRefused(t *testing.T) {
 	if got := readFile(t, source); got != "contents" {
 		t.Errorf("a refused cross-root move moved the source: %q", got)
 	}
+}
+
+// Close is the end of the hub's lifetime, and the hub calls it while a request
+// may still be running: Shutdown's HTTP phase is bounded by a context, so it can
+// return -- and the force-close that follows can close connections -- with a
+// handler still going. Confine reads the two fields Close writes, so without the
+// lock this is a data race whose loser indexes a slice that has already been
+// emptied, which is a panic rather than a refusal.
+//
+// Either answer is correct here and the test asserts only that one of them was
+// given: a handle handed out before the close is usable until the close reaches
+// it, and afterwards the set refuses. What is not acceptable is acting with no
+// boundary, or taking the process down.
+func TestClosingARootSetRacesItsReadersWithoutPanicking(t *testing.T) {
+	root := sandbox(t)
+	mustWrite(t, filepath.Join(root, "a.txt"), "contents")
+
+	set, err := NewRootSet([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxEntries, maxSize := 10, int64(1024)
+	svc := NewService(Options{Roots: set, MaxFileSize: maxSize, MaxDirEntries: maxEntries, Enabled: true})
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := svc.List(context.Background(), root); err != nil &&
+				!errors.Is(err, ErrPathNotAllowed) {
+				t.Errorf("a listing that raced the close reported: %v", err)
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		set.Close()
+	}()
+
+	close(start)
+	wg.Wait()
 }
 
 // The rooted branch of every operation is a different code path from the

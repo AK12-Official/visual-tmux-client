@@ -55,9 +55,16 @@ interface Call {
  * order is chosen.
  */
 function hubFetch(
-  overrides: Partial<
-    Record<'write' | 'rename' | 'delete' | 'probe' | 'read' | 'list', Responder>
-  > = {},
+  overrides: Partial<{
+    write: Responder
+    rename: Responder
+    delete: Responder
+    probe: Responder
+    read: Responder
+    // The listing is asked about different directories, so its override is given
+    // the path it was asked for rather than being a fixed answer.
+    list: (path: string) => Response | Promise<Response>
+  }> = {},
 ): Call[] {
   const calls: Call[] = []
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -69,7 +76,9 @@ function hubFetch(
       return json({ path: '/srv/work', substituted: false })
     }
     if (url.includes('/files/list')) {
-      if (overrides.list) return overrides.list()
+      if (overrides.list) {
+        return overrides.list(new URL(url, 'http://hub').searchParams.get('path') ?? '')
+      }
       return json({
         path: '/srv/work',
         entries: [
@@ -174,6 +183,26 @@ async function deleteViaMenu(wrapper: VueWrapper, name: string) {
   } finally {
     window.confirm = original
   }
+}
+
+/** closeTab closes the open tab, answering the unsaved-changes prompt. */
+async function closeTab(wrapper: VueWrapper, index = 0) {
+  const original = window.confirm
+  window.confirm = () => true
+  try {
+    await wrapper.findAll('.tabs__close')[index].trigger('click')
+    await flush(2)
+  } finally {
+    window.confirm = original
+  }
+}
+
+/** goUp navigates to the parent directory through the header button. */
+async function goUp(wrapper: VueWrapper) {
+  const button = wrapper.findAll('.fm__btn').find((candidate) => candidate.text() === '↑')
+  assert.ok(button, 'no parent-directory button')
+  await button.trigger('click')
+  await flush()
 }
 
 /** type makes the file in the only open editor differ from what was read, which
@@ -541,6 +570,147 @@ test('an image that has shrunk below the bound is previewed as an image', async 
     'a previewable image was presented as information instead',
   )
   assert.equal(wrapper.find('.image-preview').exists(), true, 'the image was never rendered')
+  wrapper.unmount()
+})
+
+// The wait is by *path*, and this is what that buys. A write outlives the tab it
+// came from: saving a file and then closing that tab leaves the write travelling
+// with no tab to be found by, so a delete that looked for the tabs it is about to
+// close would find none and go out immediately -- into the very window the wait
+// exists to close. The record is keyed by the path the write named, which is why
+// the path is what asks.
+test('a delete waits for a write whose tab has already been closed', async () => {
+  const write = deferred()
+  const calls = hubFetch({ write: write.respond })
+  const wrapper = await mountManager()
+  await openFile(wrapper, 'a.txt')
+  await type()
+  await (await saveButton(wrapper)).trigger('click')
+  await flush(2)
+
+  // The user gives up on the file and closes the tab, answering the prompt about
+  // unsaved changes. The tab is gone; the write is not.
+  await closeTab(wrapper)
+  assert.equal(wrapper.findAll('.tabs__tab').length, 0)
+
+  await deleteViaMenu(wrapper, 'a.txt')
+  await flush(2)
+
+  assert.equal(
+    calls.some((call) => call.url.includes('/files/delete')),
+    false,
+    'the delete overtook a write with no tab left to find it by',
+  )
+
+  write.release(json({ mtime: 2000, mtime_nanos: '2000000000' }))
+  await flush()
+
+  assert.equal(
+    calls.some((call) => call.url.includes('/files/delete')),
+    true,
+    'the delete never went out once the write had answered',
+  )
+  wrapper.unmount()
+})
+
+// The same rule across a directory: a delete names the directory, and the write
+// it has to wait for names something inside it. The paths do not match, which is
+// the second half of why the record covers a subtree rather than one path.
+test('a delete of a directory waits for a write inside it', async () => {
+  const write = deferred()
+  const calls = hubFetch({
+    list: (path) =>
+      path === '/srv/work/dir'
+        ? json({
+            path,
+            entries: [{ name: 'f.txt', is_dir: false, size: 5, mtime: 1000 }],
+            truncated: false,
+          })
+        : json({
+            path,
+            entries: [{ name: 'dir', is_dir: true, size: 0, mtime: 1000 }],
+            truncated: false,
+          }),
+    write: write.respond,
+  })
+  const wrapper = await mountManager()
+
+  // Into the directory, open the file in it, and start a save.
+  await row(wrapper, 'dir').find('.tree__label').trigger('click')
+  await flush()
+  await openFile(wrapper, 'f.txt')
+  await type()
+  await (await saveButton(wrapper)).trigger('click')
+  await flush(2)
+
+  // Back up to where the directory can be right-clicked, and lose the tab on the
+  // way -- which is the point: with no tab naming the file, the only thing left
+  // that can find the write is the directory's own path.
+  await closeTab(wrapper)
+  await goUp(wrapper)
+  await deleteViaMenu(wrapper, 'dir')
+  await flush(2)
+
+  assert.equal(
+    calls.some((call) => call.url.includes('/files/delete')),
+    false,
+    'the delete of the directory overtook a write inside it',
+  )
+
+  write.release(json({ mtime: 2000, mtime_nanos: '2000000000' }))
+  await flush()
+
+  assert.equal(
+    calls.some((call) => call.url.includes('/files/delete')),
+    true,
+    'the delete of the directory never went out',
+  )
+  wrapper.unmount()
+})
+
+// A name is a guess about contents, and this is the guess being wrong: a file
+// named like an image whose bytes are not one this browser can decode -- a
+// truncated download, a pointer file from a large-file store, something
+// encrypted. The fetch succeeds, so nothing in the preview's own error handling
+// fires; only rendering fails, and without this the user is left looking at an
+// empty frame with no way to get the file.
+test('an image that cannot be decoded offers the file instead of an empty frame', async () => {
+  const calls = hubFetch()
+  const wrapper = await mountManager()
+
+  await openFile(wrapper, 'photo.png')
+  await flush()
+
+  // The response is not a decodable image, and jsdom raises the same event a
+  // browser would when the blob cannot be read as one.
+  const image = wrapper.find('.image-preview__img')
+  assert.ok(image.exists(), 'the image element was never rendered, so nothing could fail')
+  await image.trigger('error')
+  await flush()
+
+  assert.equal(
+    wrapper.find('.image-preview__failed').exists(),
+    true,
+    'a decode failure left the empty frame in place',
+  )
+  const notices = (wrapper.emitted('notice') ?? []).flat()
+  assert.ok(
+    notices.some((text) => String(text).includes('could not be rendered as an image')),
+    `expected a notice explaining the failure, got ${JSON.stringify(notices)}`,
+  )
+
+  // And the download action is the way out, which is what the information panel
+  // would have offered had the file not been presented as an image.
+  const download = wrapper
+    .findAll('.image-preview__download')
+    .find((candidate) => candidate.text() === 'Download')
+  assert.ok(download, 'no download action was offered')
+  await download.trigger('click')
+  await flush()
+  assert.ok(
+    calls.some((call) => call.url.includes('/files/download')),
+    'the download action did not ask the hub for the file',
+  )
   wrapper.unmount()
 })
 

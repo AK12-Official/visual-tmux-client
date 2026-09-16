@@ -4,6 +4,7 @@
 // a document.
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { readFileBytes } from '../../files/api'
+import { basename } from '../../files/pathUtils'
 import { MAX_IMAGE_PREVIEW_BYTES } from '../../files/preview'
 
 const props = defineProps<{ path: string }>()
@@ -12,9 +13,19 @@ const emit = defineEmits<{
   // too-large says the bytes on disk are past the bound this component renders
   // within, whatever the listing said about the size when the tab was opened.
   (e: 'too-large', path: string, size: number): void
+  // download asks the manager for the file, which is the only way out of a
+  // preview that cannot render what it was given.
+  (e: 'download'): void
 }>()
 
 const url = ref('')
+// undecodable records that the bytes arrived and the image decoder refused them.
+// A name is a guess about contents, and this is the guess being wrong: the file
+// is named like an image and is not one -- a truncated download, a pointer file
+// from a large-file store, something encrypted. The fetch cannot fail on that
+// account, because the fetch succeeded; only rendering can, and nothing else in
+// this component would notice.
+const undecodable = ref(false)
 let objectUrl: string | null = null
 // loadAt is the ticket of the most recent load. A read that resolves after a
 // newer one started -- or after the component is gone -- must not adopt its blob,
@@ -27,6 +38,16 @@ function release() {
     objectUrl = null
   }
   url.value = ''
+  undecodable.value = false
+}
+
+function onDecodeFailed() {
+  undecodable.value = true
+  emit(
+    'notice',
+    `${basename(props.path)} could not be rendered as an image; it is not one this browser can decode.`,
+    'warning',
+  )
 }
 
 watch(
@@ -65,7 +86,29 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="image-preview">
-    <img v-if="url" class="image-preview__img" :src="url" :alt="path" />
+    <!--
+      The bytes were fetched and the decoder refused them. Saying so and offering
+      the download is the whole of the recovery: the alternative is an empty
+      frame whose only text is the alt attribute, and no way to get the file.
+    -->
+    <div v-if="undecodable" class="image-preview__failed">
+      <p class="image-preview__state">
+        {{ basename(path) }} is named like an image, but its contents are not one
+        this browser can decode.
+      </p>
+      <button
+        class="image-preview__download"
+        type="button"
+        @click="emit('download')"
+      >Download</button>
+    </div>
+    <img
+      v-else-if="url"
+      class="image-preview__img"
+      :src="url"
+      :alt="path"
+      @error="onDecodeFailed"
+    />
   </div>
 </template>
 
@@ -83,5 +126,29 @@ onBeforeUnmount(() => {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
+}
+
+.image-preview__failed {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+}
+
+.image-preview__state {
+  margin: 0;
+  color: var(--th-warning);
+  font-size: 12px;
+  text-align: center;
+}
+
+.image-preview__download {
+  padding: 3px 8px;
+  color: var(--th-text-hi);
+  font-size: 12px;
+  background: var(--th-raised);
+  border: 1px solid var(--th-border);
+  border-radius: 4px;
+  cursor: pointer;
 }
 </style>

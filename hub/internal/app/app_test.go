@@ -151,11 +151,14 @@ func TestShutdownReleasesTheConfiguredRoots(t *testing.T) {
 	}
 
 	_, err = app.files.List(ctx, root)
+	// Not-allowed and nothing else: the path is a configured root and it was
+	// listable a moment ago, so the only thing that can have changed is the set
+	// having been closed. The refusal's wording is not asserted -- that would pin
+	// a message rather than the behaviour, and the behaviour is already pinned
+	// here by the error and in the files package by
+	// TestClosingAServiceReleasesItsRootHandles, which asks the descriptor.
 	if !errors.Is(err, files.ErrPathNotAllowed) {
 		t.Fatalf("expected a released root set to refuse, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "closed") {
-		t.Errorf("expected the refusal to be the closed set's, got: %v", err)
 	}
 }
 

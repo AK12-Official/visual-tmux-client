@@ -19,6 +19,7 @@ import {
 } from '../../files/api'
 import { basename, dirname, joinPath, quoteForShell } from '../../files/pathUtils'
 import { createPending } from '../../files/pending'
+import { reasonFor as reasonForCode } from '../../files/reasons'
 import { createRenames } from '../../files/renames'
 import { getConfig } from '../../config'
 import { choosePreview, editable, presentation, type Classification } from '../../files/preview'
@@ -77,14 +78,16 @@ const opening = new Set<string>()
 // answer from an older one cannot be folded back in.
 const saveTickets = new Map<number, number>()
 // saving, renaming and deleting are the requests this manager has sent and not
-// yet been answered about, by path. What each one is asked is different, which
-// is why there are three: a rename outstanding when a save is answered means
-// that answer describes a path the rename may have vacated, so it is not
-// recorded (see settleSave), and a delete outstanding when a save is sent means
-// the file is on its way out, so the save is not sent at all (see save).
+// yet been answered about, by the path each one named. What each one is asked is
+// different, which is why there are three: a rename outstanding when a save is
+// answered means that answer describes a path the rename may have vacated, so it
+// is not recorded (see settleSave), and a delete outstanding when a save is sent
+// means the file is on its way out, so the save is not sent at all (see save).
 //
 // A count per path rather than a flag, because two of a kind can be in flight on
-// one path at once: see files/pending.ts.
+// one path at once, and a path covers what is beneath it, because a delete or a
+// rename of a directory is crossed by the writes naming its contents. Both rules
+// are in files/pending.ts, with what they are for.
 const saving = createPending()
 const renaming = createPending()
 const deleting = createPending()
@@ -117,21 +120,12 @@ const editorVisible = computed(
 
 watch(dirty, (value) => emit('dirty-change', value), { immediate: true })
 
-/** REASONS turn the hub's wire codes into something a person can act on. The
- * code is what the client matches on, not what the user should have to read. A
- * code with no entry falls through to the code itself, so a hub that adds one
- * still says something rather than nothing. */
-const REASONS: Record<string, string> = {
-  path_not_allowed: 'that path is outside the directories this hub may open',
-  not_found: 'it is no longer there',
-  permission_denied: 'the hub is not allowed to read or write it',
-  file_too_large: 'it is larger than the size limit for one file',
-  conflict: 'it changed on disk since it was read',
-  invalid_path: 'the hub cannot use that as a path',
-  invalid_body: 'the request did not match the file it described',
-  dir_not_empty: 'the directory still contains something',
-  write_failed: 'the hub could not complete the write',
-  mtime_unavailable: 'the hub did not say when the file last changed',
+/** REASONS and reasonFor live in files/reasons.ts, where a test can hold them
+ * against the codes the hub's file routes actually answer with. A code with no
+ * entry does not fail anything -- it shows the user the identifier itself -- so
+ * the two sides have to be checked against each other somewhere. */
+function reasonFor(code: string): string {
+  return reasonForCode(code, fileSizeLimit(), formatSize)
 }
 
 /** fileSizeLimit reads the hub's per-file limit, or zero when it did not say. */
@@ -142,16 +136,6 @@ function fileSizeLimit(): number {
     // A refusal must still be reportable before the configuration has loaded.
     return 0
   }
-}
-
-/** reasonFor explains a refusal. A file over the limit names the limit, which is
- * what the specification asks the browser to report rather than the refusal. */
-function reasonFor(code: string): string {
-  if (code === 'file_too_large') {
-    const limit = fileSizeLimit()
-    if (limit > 0) return `it is larger than this hub's ${formatSize(limit)} limit for one file`
-  }
-  return REASONS[code] ?? code
 }
 
 function report(err: unknown, action: string) {
@@ -435,9 +419,11 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
 
   // A file on its way out is not one to write to. The delete below waits for the
   // saves it found travelling, and this is the other direction: a save started
-  // while a delete of the same path is in flight would reach the hub in an order
-  // neither request can see, and could put the file back after the user was told
-  // it was gone.
+  // while a delete is in flight would reach the hub in an order neither request
+  // can see, and could put the file back after the user was told it was gone.
+  //
+  // The path being deleted covers what is under it, so this refuses a save of a
+  // file inside a directory that is being deleted as well as the entry itself.
   if (deleting.isPending(tab.path)) {
     emit('notice', `${tab.name} is being deleted, so it was not saved.`, 'warning')
     return
@@ -735,20 +721,31 @@ async function deleteTarget(entry: Entry, path: string) {
   // is gone. Nothing can order another process's write against this delete; the
   // manager can at least refuse to order its own that way.
   //
+  // Waiting by *path* rather than by the tabs this is about to close is the
+  // whole of it. The writes that can cross this delete are the ones naming the
+  // entry or anything under it, and a tab is not a reliable way to find them: a
+  // write outlives the tab it came from, so a file saved and then closed before
+  // the delete was confirmed has no tab left to be found by, and the write is
+  // still travelling. The record is keyed by the path the write named, so the
+  // path is what asks.
+  //
   // The marker goes up before the wait rather than after it, so a save started
   // while the wait is on is refused by save() instead of joining the queue: the
   // wait is for what was already travelling, and a later write is a separate
   // question the marker answers directly.
   //
-  // The wait is bounded by the write it is waiting for and by nothing else --
+  // The wait is bounded by the writes it is waiting for and by nothing else --
   // there is no timeout on these requests anywhere in this client. A write that
   // never answers therefore leaves the delete unsent, with the entry still
   // listed, which is the truth; the alternative is a delete sent into a race it
-  // cannot see. Both are worse than the ordinary case, and only one of them
-  // lies.
+  // cannot see. It is worth being plain about the cost rather than calling that
+  // transient: while the wait is outstanding the marker stays up, so saves of
+  // that path are refused from then on and each retry of the delete adds another
+  // waiter. A client where a write never answers is one where that write's tab
+  // never stops being unsaved either; the way out of both is a reload.
   deleting.begin(path)
   try {
-    await Promise.all(doomed.map((tab) => saving.idle(tab.path)))
+    await saving.idle(path)
 
     await deleteEntry(path, entry.is_dir)
 
@@ -939,6 +936,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
                 :path="active.path"
                 @notice="(text, level) => emit('notice', text, level)"
                 @too-large="onImageTooLarge"
+                @download="download(active.path, active.name)"
               />
               <MarkdownPreview
                 v-else-if="preview === 'markdown' && !activeIsMarkdownSource"

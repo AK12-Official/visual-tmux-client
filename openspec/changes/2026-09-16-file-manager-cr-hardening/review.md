@@ -283,8 +283,8 @@ Four reviewers over disjoint file sets, then three, then one.
 
 ### Residuals, all named rather than implied
 
-- A move between two configured roots acts on path strings, because a handle moves within its own
-  tree only.
+- ~~A move between two configured roots acts on path strings~~ — **closed in the third review of the
+  change**, below. It is refused now, with an error of its own.
 - The write's check and its replacement are two adjacent system calls; no primitive makes them one.
   The browser's side of that is specified.
 - A root of `/` contains everything, so there is nothing for the handle to refuse, and `os.Root` does
@@ -293,3 +293,82 @@ Four reviewers over disjoint file sets, then three, then one.
   classification; the client's next save is refused as a conflict.
 - A response that does not report its length is measured rather than refused, which reads a body this
   function would otherwise have kept off the wire.
+
+## The third review of the change
+
+Four subagents again, run concurrently and read-only, scoped so they could not overlap: Go
+confinement; Go transport and composition root; the browser; and claims, tests and docs. This round
+reviewed six findings from the third report, so every finding below is one *the fixes* introduced or
+left standing — the pattern the previous rounds also showed, and the reason the loop is worth
+running even when the fix looks obvious.
+
+Three of the four found something in my own work, and one of those was serious.
+
+### The shutdown close was a data race — a defect the fix introduced
+
+`Close` had only ever been called by tests, and a test does not close a set under a running request.
+Making `Shutdown` call it put an unsynchronized writer (`handles`, `closed`) in front of a reader
+(`Confine`) with nothing between them, and the reader's losing branch indexes a slice that has been
+emptied. The reviewer named the lines and the interleaving; two goroutines and `-race` reproduced it
+in ten lines, which is how it was confirmed rather than argued about. Fixed with a read-write mutex,
+and closed properly at the other end too: a handle closed *underneath* an operation yields
+`fs.ErrClosed`, which now maps to the same not-allowed refusal instead of reaching the transport's
+fallback as a server fault.
+
+The reachability argument is what makes it more than theoretical: `http.Server.Shutdown` is bounded
+by a context, so it returns when the budget expires, and the force-close that follows closes
+connections without stopping handlers.
+
+### The delete waited on the wrong thing, and the reason was written down
+
+Both the browser reviewer and the claims reviewer independently found it, from different directions,
+which is the strongest signal this loop produces. The wait was on `doomed` — the tabs the delete is
+about to close — on the stated reasoning that those are the paths a save of that subtree can be
+travelling for. They are not: a write outlives its tab. Save a file, close the tab, delete the file,
+and the wait is empty while the write is still in flight.
+
+The second reviewer's version was sharper: even leaving tabs aside, the *refusal* was exact-path, so
+a save of `/d/dir/f.txt` was neither waited for nor refused while `/d/dir` was being deleted. Two
+statements I had written — in `pending.ts` and in the specification — said otherwise.
+
+Both are now the same fix: the record covers the subtree, and both the wait and the refusal ask by
+path. The lesson is in the shape of the mistake rather than the code: the reasoning that justified
+the narrow version was written down, sounded sound, and was never checked against the case that
+breaks it, and the tests both deleted a *file*. There is a directory test now.
+
+### Claims that were false, of the kind this round was fixing
+
+- "Nothing reaches it: a rename names a sibling of its source." A destination typed into the prompt
+  may descend, and a link on the way may lead into another configured root — so the refusal is
+  reachable from the browser and needed a client message, which the same round's other reviewer had
+  separately reported missing. Corrected in four places.
+- "`renameAt` is the last call in the package on a plain path." Every helper has a plain-path
+  branch; what is true is that with roots configured none of those branches is reachable.
+- "The write that never answers leaves the delete unsent" — true, and incomplete: the marker stays
+  up, so saves of that path are refused from then on. The behaviour is the better of the two
+  available; the description was not.
+- `Close`'s "safe on a service built without roots" — such a service panicked on every other method.
+  `NewService` substitutes an empty set now, so the type has one story.
+
+### Closed from the report, and the gap it left
+
+The report's own finding about the error-code table was "the user impact is nil, the gap is that
+nothing enumerates codes". Both halves were right: the new code was missing, *and* nothing would have
+caught the next one. `reasons.test.ts` now reads the hub's error mapper out of the Go source and
+asserts every code it can answer with has words in the browser's table — the one place a test here
+reads across the language boundary, and the only way to hold the two halves against each other.
+
+### Residuals after this round
+
+- The write's check and its replacement are two adjacent system calls. The browser does not let its
+  own two requests race across it; a write from another process is not ordered by anything the
+  browser can do.
+- A root of `/` contains everything, so there is nothing for the handle to refuse.
+- A file modified between its classification and its body can be served with the earlier
+  classification. A post-scan re-check was considered and rejected: it cannot tell an append from an
+  in-place rewrite, and refusing on either would break reading a log that is being written to, which
+  the specification allows.
+- A response that does not report its length is measured rather than refused.
+- A delete waiting on a write that never answers waits forever, and the marker stays up with it.
+  Named in `design.md` 1b rather than described as transient; the tree still shows the file, which is
+  the truth.

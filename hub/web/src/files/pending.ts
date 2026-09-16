@@ -4,12 +4,23 @@
 // is an interleaving, and an interleaving is only observable if the state it
 // turns on can be driven directly.
 //
-// A count, not a flag, and that is the whole of the first rule. Two operations
-// of one kind can be in flight on one path at once -- two saves of a tab, two
-// renames of an entry -- and the first to be answered must not clear the record
-// of the second, which is still outstanding: a save that crossed the second
-// would then be recorded as saved, which is the wrong answer the record exists
-// to prevent.
+// Two rules, and both are the whole of it.
+//
+// A count, not a flag. Two operations of one kind can be in flight on one path
+// at once -- two saves of a tab, two renames of an entry -- and the first to be
+// answered must not clear the record of the second, which is still outstanding:
+// a save that crossed the second would then be recorded as saved, which is the
+// wrong answer the record exists to prevent.
+//
+// A path and everything beneath it, not the path alone. A delete or a rename
+// names an entry, and the writes that cross it name what is inside: a save of
+// /d/dir/f.txt is one a delete of /d/dir has to wait for, and a save of that
+// file is one a delete of /d/dir must not start. Reading this as exact-path was
+// the first version's mistake, and it survived because the obvious caller -- the
+// delete waiting for the tabs it is about to close -- happens to name the same
+// paths. It stops being obvious the moment a tab is closed while its write is
+// still travelling: the record is keyed by the path the write named, and the tab
+// it came from is gone.
 //
 // What the record is for, in all three of its uses: an operation the browser has
 // sent can be interleaved with another, on the hub, in an order the browser
@@ -23,27 +34,25 @@
 
 /** Pending is the set of in-flight operations of one kind, by path. */
 export interface Pending {
-  /** begin records that an operation on `path` has been sent. */
+  /** begin records that an operation naming `path` has been sent. */
   begin(path: string): void
-  /** end records that the operation on `path` has been answered. */
+  /** end records that the operation naming `path` has been answered. */
   end(path: string): void
-  /** isPending reports whether an operation on exactly `path` is in flight. */
+  /**
+   * isPending reports whether an operation naming `path`, or anything beneath
+   * it, is in flight.
+   */
   isPending(path: string): boolean
   /**
-   * idle resolves once nothing is outstanding for exactly `path`.
+   * idle resolves once nothing is outstanding for `path` or anything beneath it.
    *
-   * Exactly, not for anything under it: only the caller knows which paths it
-   * cares about, and a delete of a directory knows the files beneath it because
-   * they are the ones it has open. A caller with a subtree to wait for asks
-   * about each path in it, which is what deleteTarget does.
-   *
-   * What it waits for is a path that is clear at the moment it looks, not one
-   * that can never be busy again: the count is asked again after every answer,
-   * so an operation begun while the path is still busy extends the wait, and an
-   * operation begun after the path has been reported clear is simply a later
+   * What it waits for is a subtree that is clear at the moment it looks, not one
+   * that can never be busy again: the predicate is asked again after every
+   * answer, so an operation begun while the subtree is still busy extends the
+   * wait, and one begun after it has been reported clear is simply a later
    * operation. That last case is not covered here and does not need to be: the
    * caller that waits is a delete, which records itself as outstanding before it
-   * waits, and a save refuses to start against an outstanding delete.
+   * waits, and a save declines to start against an outstanding delete.
    */
   idle(path: string): Promise<void>
 }
@@ -55,16 +64,36 @@ export function createPending(): Pending {
   // with the counts.
   let waiters: { path: string; settle: () => void }[] = []
 
+  /**
+   * covers reports whether an operation naming `candidate` is one that `path`
+   * has to account for.
+   *
+   * A prefix is a path element, not a string: /d/a does not cover /d/ab. The
+   * trailing separator is checked rather than appended blindly, because the
+   * filesystem root is a path like any other and "/" + "/" names nothing.
+   */
+  function covers(candidate: string, path: string): boolean {
+    if (candidate === path) return true
+    return path.endsWith('/') ? candidate.startsWith(path) : candidate.startsWith(`${path}/`)
+  }
+
+  function busy(path: string): boolean {
+    for (const candidate of counts.keys()) {
+      if (covers(candidate, path)) return true
+    }
+    return false
+  }
+
   function settleIdleWaiters() {
     if (waiters.length === 0) return
     const stillWaiting: typeof waiters = []
     for (const waiter of waiters) {
-      // The count is read here rather than the waiter being resolved when the
-      // operation it waits for began, so an operation begun while the path is
-      // still busy keeps the wait open instead of slipping past it: nothing
-      // resolves except from this scan, and this scan sees a count that a later
-      // `begin` has already raised.
-      if ((counts.get(waiter.path) ?? 0) > 0) stillWaiting.push(waiter)
+      // The predicate is read here rather than the waiter being resolved when
+      // the operation it waits for began, so an operation begun while the
+      // subtree is still busy keeps the wait open instead of slipping past it:
+      // nothing resolves except from this scan, and this scan sees a count that
+      // a later `begin` has already raised.
+      if (busy(waiter.path)) stillWaiting.push(waiter)
       else waiter.settle()
     }
     waiters = stillWaiting
@@ -81,10 +110,10 @@ export function createPending(): Pending {
       settleIdleWaiters()
     },
     isPending(path) {
-      return (counts.get(path) ?? 0) > 0
+      return busy(path)
     },
     idle(path) {
-      if ((counts.get(path) ?? 0) === 0) return Promise.resolve()
+      if (!busy(path)) return Promise.resolve()
       return new Promise((settle) => {
         waiters.push({ path, settle })
       })

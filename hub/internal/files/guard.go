@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -48,6 +49,19 @@ const tooManyLinksMessage = "EvalSymlinks: too many links"
 // operators who want containment anyway, and not as the thing that keeps a
 // token holder out.
 type RootSet struct {
+	// mu guards handles and closed, which Close writes while operations may still
+	// be reading them through Confine.
+	//
+	// Close is not a test's business any more: the hub calls it from Shutdown, and
+	// Shutdown's HTTP phase can return with a handler still running -- a read
+	// streaming a large body, or a listing that has not finished describing its
+	// entries -- because that phase is bounded by a context and the force-close
+	// that follows it closes connections without stopping handlers. Unsynchronized,
+	// a reader that got past the closed check could index a slice the closer had
+	// already emptied, which is a panic rather than a refusal. The test that races
+	// them is what holds this.
+	mu sync.RWMutex
+	// roots are the canonical roots, written only by NewRootSet.
 	roots []string
 	// handles are the open descriptors the roots are acted through, parallel to
 	// roots. Acting through a handle is what closes the window between
@@ -90,10 +104,18 @@ func NewRootSet(roots []string) (*RootSet, error) {
 	return set, nil
 }
 
-// Close releases the handles the roots are acted through. A hub holds them for
-// its lifetime; tests hold one set per case and have to give them back, because
-// each is a file descriptor.
+// Close releases the handles the roots are acted through, which is what the hub
+// does at the end of its lifetime: each handle is a file descriptor, and a hub
+// stopped and started again inside one process would otherwise leak one per root
+// per run -- and a descriptor held on a mount point also keeps the mount from
+// being released.
+//
+// Safe to call more than once, and safe to call while operations are in flight: a
+// Confine that loses that race refuses, and one that got a handle just before is
+// left with a closed descriptor, which makes its operation fail rather than act.
 func (s *RootSet) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, handle := range s.handles {
 		_ = handle.Close() //nolint:errcheck // nothing can be done about a descriptor that will not close
 	}
@@ -306,6 +328,12 @@ func classifyPathError(path string, err error) error {
 	// way: an ordinary race, not a server fault.
 	case errors.Is(err, syscall.ENOTEMPTY):
 		return fmt.Errorf("%w: %s", ErrDirNotEmpty, path)
+	// A handle that was closed while the operation was in flight: the hub is
+	// shutting down and this request outlived it, which is the answer the closed
+	// set gives and the reason it gives it. Without this arm the shutdown race is
+	// reported as a server fault, which says nothing true about what happened.
+	case errors.Is(err, os.ErrClosed):
+		return fmt.Errorf("%w: %s: the root set is closed", ErrPathNotAllowed, path)
 	default:
 		return err
 	}
