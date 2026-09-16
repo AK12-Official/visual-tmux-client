@@ -38,22 +38,28 @@
 
 ## 6. Frontend file manager
 
-- [ ] 6.1 Add the file entry button to the terminal header in `App.vue` (alongside `A−`/font size/`A+`/`⛶`/`✕`), and render `FileManagerOverlay` **within the terminal region** so it does not cover the sidebar. Verify: `npm test` passes and a manual check confirms toasts and the sidebar are unaffected.
-- [ ] 6.2 Implement `FileManagerOverlay.vue` opening at the working directory fetched once via the new endpoint, then navigating freely (parent/child) without following later pane changes, and falling back to a permitted directory with a notice when the pane directory is not permitted -- that fallback comes from the hub's `substituted` flag (4.5), with a walk up to the nearest listable ancestor for the non-boundary case. Verify: manual check that changing the active pane while open does not move the manager, and that navigating to a parent directory works.
-- [ ] 6.3 Implement `FileTree.vue`/`FileTreeNode.vue` with on-demand loading per directory and a truncated indicator. Verify: manual check that expanding a large directory is bounded and shows the indicator.
-- [ ] 6.4 Implement `EditorTabs.vue`/`CodeEditor.vue`: multiple open files, dirty marking, save sending `expected_mtime` and adopting the mtime the hub returns, conflict prompt offering overwrite, and confirmation before closing a modified tab. Verify: manual check of the edit→save→edit-externally→save conflict flow, and that saving twice in a row does not produce a false conflict.
-- [ ] 6.5 Implement `ImagePreview.vue` and `MarkdownPreview.vue` with an Edit/Preview toggle for Markdown (source as the default view), truncation notice for oversized Markdown, and the file-information panel for binary files and oversized images. Verify: manual check that a Markdown file containing a `<script>` element renders without executing it, and that an oversized Markdown file renders a truncated prefix with a notice.
-- [ ] 6.6 Implement `FileContextMenu.vue` (new file, new directory, rename, delete, download, copy path, insert path into terminal) with a confirmation prompt before delete. Verify: manual check that declining the prompt performs no deletion.
-- [ ] 6.7 Surface unsaved changes outside the editor so closing the manager or the terminal warns before discarding them. Verify: manual check that closing with a modified tab prompts.
-- [ ] 6.8 Wire path insertion through the existing terminal attachment held by `TerminalSession`, quoting when needed and appending no line terminator, and report when no attachment is live. Verify: manual check that the path appears in the input line without executing, that a path with spaces is quoted, and that the case with no terminal attached reports rather than failing silently.
+- [x] 6.1 Add the file entry button to the terminal header in `App.vue` (alongside `A−`/font size/`A+`/`⛶`/`✕`), and render `FileManagerOverlay` **within the terminal region** so it does not cover the sidebar. Verify: `npm test` passes and a manual check confirms toasts and the sidebar are unaffected.
+- [x] 6.2 Implement `FileManagerOverlay.vue` opening at the working directory fetched once via the new endpoint, then navigating freely (parent/child) without following later pane changes, and falling back to a permitted directory with a notice when the pane directory is not permitted -- that fallback comes from the hub's `substituted` flag (4.5), with a walk up to the nearest listable ancestor for the non-boundary case. Verify: manual check that changing the active pane while open does not move the manager, and that navigating to a parent directory works.
+- [x] 6.3 Implement `FileTree.vue`/`FileTreeNode.vue` with on-demand loading per directory and a truncated indicator. Verify: manual check that expanding a large directory is bounded and shows the indicator.
+- [x] 6.4 Implement `EditorTabs.vue`/`CodeEditor.vue`: multiple open files, dirty marking, save sending `expected_mtime` and adopting the mtime the hub returns, conflict prompt offering overwrite, and confirmation before closing a modified tab. Verify: manual check of the edit→save→edit-externally→save conflict flow, and that saving twice in a row does not produce a false conflict.
+- [x] 6.5 Implement `ImagePreview.vue` and `MarkdownPreview.vue` with an Edit/Preview toggle for Markdown (source as the default view), truncation notice for oversized Markdown, and the file-information panel for binary files and oversized images. Verify: manual check that a Markdown file containing a `<script>` element renders without executing it, and that an oversized Markdown file renders a truncated prefix with a notice.
+- [x] 6.6 Implement `FileContextMenu.vue` (new file, new directory, rename, delete, download, copy path, insert path into terminal) with a confirmation prompt before delete. Verify: manual check that declining the prompt performs no deletion.
+- [x] 6.7 Surface unsaved changes outside the editor so closing the manager or the terminal warns before discarding them. Verify: manual check that closing with a modified tab prompts.
+- [x] 6.8 Wire path insertion through the existing terminal attachment held by `TerminalSession`, quoting when needed and appending no line terminator, and report when no attachment is live. Verify: manual check that the path appears in the input line without executing, that a path with spaces is quoted, and that the case with no terminal attached reports rather than failing silently.
 
 ### Section 6 status
 
-Every item below is implemented and its shared logic is unit-tested (see
-`hub/web/src/files/*.test.ts`). What is **not** done is the manual browser check
-each one names, so they stay unticked: opening the manager against a real
-session, previewing an image, a Markdown file and a binary file, the edit-save
-conflict round trip, and inserting a path into a live terminal input line.
+Implemented, and the manual browser pass each item names was carried out by the
+operator against a real session -- on a hub confined to a throwaway directory, so
+nothing under the operator's own files was at risk.
+
+That pass earned its keep: it found three defects nothing automated had caught,
+all of them in the component layer this repository's DOM-less test setup cannot
+reach. The tree rendered nothing at all (a component referenced in a template but
+never imported), a directory click could only expand and never become the current
+directory, and stepping up out of the boundary replaced the listing with the
+error instead of reporting it alongside. All three are fixed; the first is what
+the flat `visibleRows` list replaced the recursive component with.
 
 ## 7. Documentation
 
@@ -62,8 +68,8 @@ conflict round trip, and inserting a path into a live terminal input line.
 
 ## 8. Verification
 
-- [ ] 8.1 Run `make lint` and confirm zero issues, including `lll`, `funlen`, `gocyclo`, and `mnd` on the new Go files. Verify: command exits 0.
-- [ ] 8.2 Run `make test` and confirm all Go and frontend tests pass. Verify: command exits 0.
-- [ ] 8.3 Confirm test isolation is intact: any test touching tmux goes through the existing helpers (`testTmuxEnv` in `hub/cmd/visual-tmux-client`, `newTestClient` in `hub/internal/tmux`), drops `TMUX`/`TMUX_PANE`, points `TMUX_TMPDIR` at a private directory, and targets an explicit socket. Any directory that will hold a tmux socket must come from `testutil.SocketDir(t)` rather than `t.TempDir()`, whose macOS path overflows `sun_path`. Verify: `go test ./...` exits 0 with the parent tmux server unaffected; the package-level `ParentGuard` gate fails the run if a test reaches a watched server.
-- [ ] 8.4 Verify end to end against a real session in a browser: open the manager from the terminal, confirm it opens at the session's pane directory, navigate to a parent, preview an image, a Markdown file, and a binary file, edit and save a source file, trigger and resolve a save conflict, insert a path into the terminal input, then create, rename, delete, and download a file. Verify: each step behaves as specified and the terminal remains usable throughout.
-- [ ] 8.5 Verify the boundary in both modes: with no `roots` configured, confirm a path outside the home directory is permitted; with `roots` configured, confirm a path outside them is refused, a symlink pointing outside a root is refused, and `/proc` is refused in both modes, with the browser showing the reason rather than a blank state. Verify: each attempt reports as specified.
+- [x] 8.1 Run `make lint` and confirm zero issues, including `lll`, `funlen`, `gocyclo`, and `mnd` on the new Go files. Verify: command exits 0.
+- [x] 8.2 Run `make test` and confirm all Go and frontend tests pass. Verify: command exits 0.
+- [x] 8.3 Confirm test isolation is intact: any test touching tmux goes through the existing helpers (`testTmuxEnv` in `hub/cmd/visual-tmux-client`, `newTestClient` in `hub/internal/tmux`), drops `TMUX`/`TMUX_PANE`, points `TMUX_TMPDIR` at a private directory, and targets an explicit socket. Any directory that will hold a tmux socket must come from `testutil.SocketDir(t)` rather than `t.TempDir()`, whose macOS path overflows `sun_path`. Verify: `go test ./...` exits 0 with the parent tmux server unaffected; the package-level `ParentGuard` gate fails the run if a test reaches a watched server.
+- [x] 8.4 (operator, browser) Verify end to end against a real session in a browser: open the manager from the terminal, confirm it opens at the session's pane directory, navigate to a parent, preview an image, a Markdown file, and a binary file, edit and save a source file, trigger and resolve a save conflict, insert a path into the terminal input, then create, rename, delete, and download a file. Verify: each step behaves as specified and the terminal remains usable throughout.
+- [x] 8.5 (operator, browser; `/proc` also checked over the API, since the UI has no path entry) Verify the boundary in both modes: with no `roots` configured, confirm a path outside the home directory is permitted; with `roots` configured, confirm a path outside them is refused, a symlink pointing outside a root is refused, and `/proc` is refused in both modes, with the browser showing the reason rather than a blank state. Verify: each attempt reports as specified.
