@@ -24,6 +24,9 @@ func fakeTmux(t *testing.T, body string) *Client {
 	return NewClient(bin, "")
 }
 
+// The target has to be a pane target: a bare `=work` is only a session target,
+// which tmux accepts while resolving nothing, printing an empty line and exiting
+// zero. That reads as "no directory" instead of as the targeting mistake it is.
 func TestPaneWorkingDirectoryTargetsTheExactSession(t *testing.T) {
 	recorded := filepath.Join(t.TempDir(), "args")
 	c := fakeTmux(t, fmt.Sprintf(
@@ -41,10 +44,32 @@ func TestPaneWorkingDirectoryTargetsTheExactSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"display-message", "-p", "-t", "=work", "#{pane_current_path}"}
+	want := []string{"display-message", "-p", "-t", "=work:", "#{pane_current_path}"}
 	got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 	if !slices.Equal(got, want) {
 		t.Errorf("expected the arguments %v, got %v", want, got)
+	}
+}
+
+// The fake above pins the argument vector; this one pins that the command
+// actually works against a real server, which is the part a wrong target or a
+// wrong format would break.
+func TestPaneWorkingDirectoryAgainstARealServer(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+	if _, err := c.Create(ctx, "work"); err != nil {
+		t.Fatalf("create a session to ask about: %v", err)
+	}
+
+	dir, err := c.PaneWorkingDirectory(ctx, "work")
+	if err != nil {
+		t.Fatalf("PaneWorkingDirectory: %v", err)
+	}
+	if !filepath.IsAbs(dir) {
+		t.Errorf("expected an absolute directory, got %q", dir)
+	}
+	if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
+		t.Errorf("expected %q to be a directory that exists: %v", dir, statErr)
 	}
 }
 
