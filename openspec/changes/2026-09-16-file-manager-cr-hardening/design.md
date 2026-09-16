@@ -236,6 +236,15 @@ side-effect of a bug-fix branch. It is listed as a follow-up.
   → *It is produced by `UnixNano()` on the same inode within the same read, and adopted
   verbatim by the client, so a mismatch means the file changed. A filesystem with coarser
   granularity reports a stable value and compares equal to itself.*
+- **[Known wart, accepted] A cancelled or unclassified read reports the catch-all
+  wire code**, which is named `write_failed` because the write path was the first
+  thing to need a fallback. A request whose client has gone away is answered to
+  nobody, so what is lost is a log line that names the wrong operation; an
+  unclassified I/O error on a read is answered with the same code. Renaming it
+  would change a published code and the browser's message table, and the browser
+  prefixes every refusal with the action it was attempting ("Could not open X"),
+  which is where the operation is legible today. Two reviewers raised it as an
+  out-of-scope observation; recorded here rather than left as an oversight.
 - **[Trade-off] The TOCTOU stays open**, with its scope now written down. → *Recorded in the
   spec as a limit, in both READMEs, and as the follow-up in decision 1.*
 

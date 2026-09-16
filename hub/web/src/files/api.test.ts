@@ -263,6 +263,14 @@ test('an exact modification time is adopted only when it can be carried back', a
       ['1e9', null],
       ['12 34', null],
       ['1760000000123456789.5', null],
+      // All digits, and still more than the hub can parse: this goes back on the
+      // next save, so a shape check that stops at "digits" is not enough.
+      ['9223372036854775808', null],
+      ['111111111111111111111111111111', null],
+      // And the bounds themselves are accepted, since they are exactly what a
+      // signed 64-bit integer holds.
+      ['9223372036854775807', '9223372036854775807'],
+      ['-9223372036854775808', '-9223372036854775808'],
     ]
     for (const [header, want] of cases) {
       mockFetch(
@@ -296,6 +304,29 @@ test('writeFile adopts the exact modification time it is given back', async () =
 
     assert.equal(written?.millis, 1760000000123)
     assert.equal(written?.nanos, '1760000000123456789')
+  })
+})
+
+// The millisecond value's decimal form is what goes on the wire and the hub reads
+// it back with a 64-bit integer parse, so a fraction or a value past what a double
+// holds exactly must not be adopted: it would be sent as something the hub cannot
+// read, and every later save would be refused as a malformed request -- which is
+// not a conflict the user can answer.
+test('readFile adopts only a millisecond time it can send back', async () => {
+  await withoutStorage(async () => {
+    for (const raw of ['1.5', '1e30', '9.007199254740993e15']) {
+      mockFetch(
+        new Response('hello', {
+          status: 200,
+          headers: { 'X-File-Size': '5', 'X-File-Mtime': String(raw) },
+        }),
+      )
+      await assert.rejects(
+        () => readFile('/home/user/a.txt'),
+        /mtime_unavailable/,
+        `an mtime of ${raw} must not be adopted`,
+      )
+    }
   })
 })
 

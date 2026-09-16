@@ -105,7 +105,14 @@ function requireMtime(raw: unknown): number {
       : typeof raw === 'string' && raw.trim() !== ''
         ? Number(raw)
         : Number.NaN
-  if (!Number.isFinite(value)) {
+  // A safe integer, because this value's decimal form is what goes on the wire
+  // and the hub reads it back with a 64-bit integer parse. A fraction, or a value
+  // past what a double holds exactly, would be sent as something the hub cannot
+  // read: every later save would be refused as a malformed request, which is not
+  // a conflict the user can answer and leaves no way out through the interface.
+  // Safe integers also have the property this relies on -- that their decimal
+  // form is a plain run of digits rather than an exponent.
+  if (!Number.isSafeInteger(value)) {
     throw new FileApiError('mtime_unavailable')
   }
   return value
@@ -150,17 +157,25 @@ function optionalStamp(rawMtime: unknown, rawNanos: unknown): Stamp | null {
  * exactly, so it is carried back to the hub as the string it arrived as. */
 const NANOS = /^-?\d+$/
 
+/** INT64_MIN and INT64_MAX are what the hub parses this value into, so they are
+ * what it has to fit in. A run of digits is not enough: one more than a signed
+ * 64-bit integer can hold is still all digits. */
+const INT64_MIN = -(2n ** 63n)
+const INT64_MAX = 2n ** 63n - 1n
+
 /** exactNanos reads an exact modification time, or null when the value is not one
  * this client can carry back.
  *
- * Only a value that is entirely a decimal count is adopted. Absent, empty, and
- * otherwise malformed are all "not reported": this value goes back to the hub on
- * the next save, and echoing something the hub cannot parse would make every
- * later save answer invalid-body, with reopening the file as the only way out.
- * Reporting "no exact time" instead costs the finer comparison and nothing
- * else. */
+ * Only a value the hub will be able to parse is adopted. This goes back on the
+ * next save, and echoing one it cannot read would make every later save answer
+ * invalid-body, with reopening the file as the only way out. Reporting "no exact
+ * time" instead costs the finer comparison and nothing else, so an absent,
+ * empty, malformed, or out-of-range value all mean the same thing here. */
 function exactNanos(raw: unknown): string | null {
-  return typeof raw === 'string' && NANOS.test(raw) ? raw : null
+  if (typeof raw !== 'string' || !NANOS.test(raw)) return null
+  const value = BigInt(raw)
+  if (value < INT64_MIN || value > INT64_MAX) return null
+  return raw
 }
 
 /** stampOf reads the modification time the hub reports alongside the bytes. */
