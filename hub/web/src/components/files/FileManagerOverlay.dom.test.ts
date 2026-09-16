@@ -393,4 +393,25 @@ test('the editor stand-in applies a transaction the way the editor does', () => 
   // And a transaction that really changes nothing reports nothing.
   watched.dispatch({ changes: { from: 2, to: 2, insert: '' } })
   assert.equal(reported, 1, 'a transaction with no change in it fired a listener')
+
+  // What the stand-in cannot model it refuses rather than answering with a
+  // document the editor could never hold: the editor composes overlapping
+  // changes and rejects a range outside the document, and neither is modelled
+  // here. A silent wrong answer is what the last two rounds kept finding.
+  assert.throws(
+    () => view.dispatch({ changes: { from: 4, to: 12, insert: 'Z' } }),
+    RangeError,
+    'a change past the end of the document was applied',
+  )
+  assert.throws(
+    () =>
+      view.dispatch({
+        changes: [
+          { from: 1, to: 3, insert: 'X' },
+          { from: 2, to: 4, insert: 'Y' },
+        ],
+      }),
+    /overlapping/,
+    'overlapping changes were applied as if they did not overlap',
+  )
 })

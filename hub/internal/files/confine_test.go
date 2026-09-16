@@ -229,9 +229,14 @@ func TestARefusedRenameIsReportedAsARefusal(t *testing.T) {
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected a source that leaves the root to be refused, got: %#v", err)
 	}
-	linkErr = nil
-	if errors.As(err, &linkErr) && !strings.Contains(linkErr.Old, "out") {
-		t.Errorf("expected the source to be named, got old=%q new=%q", linkErr.Old, linkErr.New)
+	// Asserted rather than guarded on: an error that came back as a PathError here
+	// would satisfy the not-found check above and slip past a conditional.
+	var sourceErr *os.LinkError
+	if !errors.As(err, &sourceErr) {
+		t.Fatalf("expected the rename's own error shape for an escaping source, got: %#v", err)
+	}
+	if !strings.Contains(sourceErr.Old, "out") {
+		t.Errorf("expected the source to be named, got old=%q new=%q", sourceErr.Old, sourceErr.New)
 	}
 	if _, statErr := os.Stat(filepath.Join(root, "a.txt")); statErr != nil {
 		t.Errorf("the source was moved by a refused rename: %v", statErr)

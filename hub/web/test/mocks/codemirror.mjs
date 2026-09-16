@@ -45,11 +45,36 @@ export class EditorView {
    *     text instead would call an identical replacement no change at all, where
    *     the editor reports one: the document is the same, but the change set is
    *     not empty and a listener still runs.
+   *
+   * What it does *not* model is the rest of the change set: the editor composes
+   * overlapping changes and refuses a range outside the document, and this stand-in
+   * can do neither -- it would silently apply them and hand back a document the
+   * editor could never hold, which is worse than not answering. So it refuses them
+   * instead, loudly, rather than pretending. A test that needs either belongs
+   * against the real library.
    */
   dispatch(update) {
     const changes = Array.isArray(update?.changes) ? update.changes : [update?.changes]
     const applied = changes.filter(Boolean)
-    for (const change of [...applied].sort((a, b) => b.from - a.from)) {
+    const ordered = [...applied].sort((a, b) => a.from - b.from || a.to - b.to)
+    let previous = null
+    for (const change of ordered) {
+      const { from, to } = change
+      if (from < 0 || to < from || to > this.doc.length) {
+        throw new RangeError(
+          `the editor stand-in models no change outside the document: from ${from} to ${to} ` +
+            `in a document of ${this.doc.length}`,
+        )
+      }
+      if (previous !== null && from < previous) {
+        throw new Error(
+          'the editor stand-in models no overlapping changes: the editor composes them, ' +
+            'and applying them as if it did not would produce a document it could never hold',
+        )
+      }
+      previous = to
+    }
+    for (const change of [...ordered].reverse()) {
       const insert = String(change.insert ?? '')
       this.doc = this.doc.slice(0, change.from) + insert + this.doc.slice(change.to)
     }
