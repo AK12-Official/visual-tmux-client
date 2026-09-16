@@ -24,6 +24,7 @@ type rawConfig struct {
 	Terminal  *rawTerminalConfig  `yaml:"terminal"`
 	Shutdown  *rawShutdownConfig  `yaml:"shutdown"`
 	Web       *rawWebConfig       `yaml:"web"`
+	Files     *rawFilesConfig     `yaml:"files"`
 }
 
 type rawServerConfig struct {
@@ -91,6 +92,16 @@ type rawNotificationsConfig struct {
 	ErrorLifetime   *Duration `yaml:"error_lifetime"`
 	WarningLifetime *Duration `yaml:"warning_lifetime"`
 	InfoLifetime    *Duration `yaml:"info_lifetime"`
+}
+
+// rawFilesConfig keeps every field a pointer so that an omitted key can be told
+// apart from one written as the zero value: `max_file_size: 0` must fail
+// validation rather than silently fall back to the default.
+type rawFilesConfig struct {
+	Enabled       *bool     `yaml:"enabled"`
+	Roots         *[]string `yaml:"roots"`
+	MaxFileSize   *int64    `yaml:"max_file_size"`
+	MaxDirEntries *int      `yaml:"max_dir_entries"`
 }
 
 // EnvLookup is an injectable environment lookup function (e.g. os.LookupEnv).
@@ -251,6 +262,7 @@ func applyYAML(cfg *Config, prov *Provenance, data []byte, configDir string) err
 	applyTerminalYAML(cfg, raw.Terminal)
 	applyShutdownYAML(cfg, raw.Shutdown)
 	applyWebYAML(cfg, raw.Web)
+	applyFilesYAML(cfg, raw.Files)
 	return nil
 }
 
@@ -422,6 +434,24 @@ func applyWebNotificationsYAML(cfg *Config, n *rawNotificationsConfig) {
 	}
 	if n.InfoLifetime != nil {
 		cfg.Web.Notifications.InfoLifetime = *n.InfoLifetime
+	}
+}
+
+func applyFilesYAML(cfg *Config, f *rawFilesConfig) {
+	if f == nil {
+		return
+	}
+	if f.Enabled != nil {
+		cfg.Files.Enabled = *f.Enabled
+	}
+	if f.Roots != nil {
+		cfg.Files.Roots = *f.Roots
+	}
+	if f.MaxFileSize != nil {
+		cfg.Files.MaxFileSize = *f.MaxFileSize
+	}
+	if f.MaxDirEntries != nil {
+		cfg.Files.MaxDirEntries = *f.MaxDirEntries
 	}
 }
 

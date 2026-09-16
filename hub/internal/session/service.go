@@ -116,3 +116,22 @@ func (s *Service) HasSession(ctx context.Context, name string) bool {
 	sess, err := s.GetSession(ctx, name)
 	return err == nil && sess != nil
 }
+
+type paneDirectoryReader interface {
+	PaneWorkingDirectory(ctx context.Context, name string) (string, error)
+}
+
+// PaneWorkingDirectory returns the working directory of a session's active pane.
+// It is optional, like the pane summary: a backend that cannot answer reports
+// the directory as unavailable rather than failing, so a capability the file
+// manager wants can never take the surrounding operation down with it.
+func (s *Service) PaneWorkingDirectory(ctx context.Context, name string) (string, error) {
+	if err := ValidateSessionName(name); err != nil {
+		return "", err
+	}
+	reader, ok := s.backend.(paneDirectoryReader)
+	if !ok {
+		return "", ErrNotFound
+	}
+	return reader.PaneWorkingDirectory(ctx, name)
+}

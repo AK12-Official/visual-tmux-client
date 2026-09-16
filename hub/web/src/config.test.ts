@@ -11,6 +11,7 @@ import {
 
 const validPayload: ClientConfig = {
   version: 1,
+  files: { enabled: true, max_file_size: 104857600 },
   web: {
     session_poll_interval: 5000,
     activity_decay: 2000,
@@ -48,6 +49,21 @@ test('validateClientConfig accepts valid payload and freezes result', () => {
   assert.ok(Object.isFrozen(retrieved.web))
   assert.ok(Object.isFrozen(retrieved.web.reconnect))
 })
+
+// The entry point for the file manager is decided by this flag, so it has to be
+// conservative: only an explicit true offers it. A hub that does not publish the
+// section has no file API either, and showing a button that always fails is
+// worse than not showing one.
+test('the file manager is offered only when the hub says so explicitly', () => {
+  assert.equal(getConfigOrValidate({ ...validPayload, files: { enabled: false } }), false)
+  assert.equal(getConfigOrValidate({ files: undefined, version: 1, web: validPayload.web }), false)
+  assert.equal(getConfigOrValidate({ ...validPayload, files: { enabled: 'yes' } }), false)
+  assert.equal(getConfigOrValidate(validPayload), true)
+})
+
+function getConfigOrValidate(payload: unknown): boolean {
+  return validateClientConfig(payload).files.enabled
+}
 
 test('getConfig throws before initialization', () => {
   resetConfigForTest()

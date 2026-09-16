@@ -86,6 +86,47 @@ func atoiOrZero(s string) int {
 	return n
 }
 
+// paneTargetOf turns a session name into a target naming that session's active
+// pane.
+//
+// The trailing colon is load-bearing. `display-message -t` wants a *pane*
+// target, and a bare `=name` is only a session target: tmux accepts it, resolves
+// no pane, and prints an empty line with a zero exit status. That reads as "this
+// session has no directory" rather than as the targeting mistake it is. Adding
+// the colon makes it a session:window target, which resolves to the session's
+// current window and its active pane -- still an exact session match, so the
+// name is never treated as a pattern.
+func paneTargetOf(name string) string {
+	return ExactTarget(name) + ":"
+}
+
+// PaneWorkingDirectory reports the working directory of a session's active pane.
+//
+// It is what the browser opens the file manager at: a navigation seed, not an
+// authorization input. The boundary is decided the same way wherever the user
+// goes afterwards.
+func (c *Client) PaneWorkingDirectory(ctx context.Context, name string) (string, error) {
+	stdout, stderr, code, err := c.Exec(ctx,
+		"display-message", "-p", "-t", paneTargetOf(name), "#{pane_current_path}")
+	if err != nil {
+		return "", fmt.Errorf("exec display-message: %w", err)
+	}
+	if code != 0 {
+		if strings.Contains(stderr, "can't find session") || IsNoServer(stderr) {
+			return "", session.ErrNotFound
+		}
+		return "", fmt.Errorf("tmux display-message: %s", strings.TrimSpace(stderr))
+	}
+
+	// An unknown format expands to nothing, which is not a directory the file
+	// manager could open at.
+	path := strings.TrimSpace(stdout)
+	if path == "" {
+		return "", session.ErrNotFound
+	}
+	return path, nil
+}
+
 // ListPanes returns every pane across all sessions on the tmux server in a
 // single invocation. If no server is running, returns an empty slice.
 func (c *Client) ListPanes(ctx context.Context) ([]session.Pane, error) {

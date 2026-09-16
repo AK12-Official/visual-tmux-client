@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -50,10 +52,13 @@ const (
 	minToasts = 2
 	maxToasts = 100
 
+	maxFilesDirEntries = 10000
+
 	tagYAMLString = "!!str"
 	tagYAMLInt    = "!!int"
 
 	keyTerminalSection = "terminal"
+	keyFilesSection    = "files"
 )
 
 var allowedRootKeys = map[string]bool{
@@ -65,6 +70,7 @@ var allowedRootKeys = map[string]bool{
 	keyTerminalSection: true,
 	"shutdown":         true,
 	"web":              true,
+	keyFilesSection:    true,
 }
 
 var allowedServerKeys = map[string]bool{
@@ -132,6 +138,13 @@ var allowedNotificationsKeys = map[string]bool{
 	"error_lifetime":   true,
 	"warning_lifetime": true,
 	"info_lifetime":    true,
+}
+
+var allowedFilesKeys = map[string]bool{
+	"enabled":         true,
+	"roots":           true,
+	"max_file_size":   true,
+	"max_dir_entries": true,
 }
 
 // ValidateYAMLDocument validates the raw YAML content for structure, nulls, duplicates, and unknown keys.
@@ -220,6 +233,8 @@ func sectionAllowedKeys(section string) map[string]bool {
 		return allowedWebTerminalKeys
 	case "web.notifications":
 		return allowedNotificationsKeys
+	case keyFilesSection:
+		return allowedFilesKeys
 	default:
 		return nil
 	}
@@ -242,11 +257,18 @@ func isIntegerConfigField(field string) bool {
 		"terminal.output_high_water_bytes", "terminal.output_low_water_bytes",
 		"web.terminal.scrollback", "web.terminal.font_size",
 		"web.terminal.min_font_size", "web.terminal.max_font_size",
-		"web.notifications.max_toasts":
+		"web.notifications.max_toasts",
+		"files.max_file_size", "files.max_dir_entries":
 		return true
 	default:
 		return false
 	}
+}
+
+// isStringListConfigField reports whether a field holds a list of strings rather
+// than a scalar, which is the one shape validateScalarType cannot describe.
+func isStringListConfigField(field string) bool {
+	return field == "files.roots"
 }
 
 func isDurationConfigField(field string) bool {
@@ -268,6 +290,10 @@ func isDurationConfigField(field string) bool {
 }
 
 func validateScalarType(valNode *yaml.Node, fullPath string) error {
+	if isStringListConfigField(fullPath) {
+		return validateStringList(valNode, fullPath)
+	}
+
 	if valNode.Kind != yaml.ScalarNode {
 		return fmt.Errorf("field %q must be a scalar value", fullPath)
 	}
@@ -297,6 +323,69 @@ func validateScalarType(valNode *yaml.Node, fullPath string) error {
 	return nil
 }
 
+// validateStringList checks a list-of-strings field. An empty list is a valid
+// list: for roots it means the same thing as omitting the key, which is the
+// default boundary rather than a boundary that encloses nothing.
+func validateStringList(valNode *yaml.Node, fullPath string) error {
+	if valNode.Kind != yaml.SequenceNode {
+		return fmt.Errorf("field %q must be a list of strings", fullPath)
+	}
+	for i, item := range valNode.Content {
+		if item.Tag != tagYAMLString {
+			return fmt.Errorf("field %q entry %d must be a string, got tag %s at line %d",
+				fullPath, i, item.Tag, item.Line)
+		}
+	}
+	return nil
+}
+
+// validateFilesConfig enforces the file manager's limits and resolves its roots.
+// Resolution happens here, while the configuration loads, so that a root which
+// cannot enclose anything is reported at startup rather than surfacing later as
+// every operation being refused.
+func validateFilesConfig(f *FilesConfig) error {
+	if f.MaxFileSize <= 0 {
+		return fmt.Errorf("field \"files.max_file_size\": %d must be greater than 0", f.MaxFileSize)
+	}
+	if f.MaxDirEntries <= 0 || f.MaxDirEntries > maxFilesDirEntries {
+		return fmt.Errorf("field \"files.max_dir_entries\": %d out of range [1, %d]",
+			f.MaxDirEntries, maxFilesDirEntries)
+	}
+
+	for i, root := range f.Roots {
+		resolved, err := canonicalRoot(root)
+		if err != nil {
+			return fmt.Errorf("field \"files.roots\" entry %d (%q): %w", i, root, err)
+		}
+		f.Roots[i] = resolved
+	}
+	return nil
+}
+
+// canonicalRoot resolves a configured root to the path file operations will be
+// authorized against. The path must be absolute: a relative root would resolve
+// against whatever directory the hub happened to start in, so the same
+// configuration would enclose different directories in different contexts.
+func canonicalRoot(root string) (string, error) {
+	if !filepath.IsAbs(root) {
+		return "", errors.New("root must be an absolute path")
+	}
+
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(root))
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve root: %w", err)
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("cannot stat root: %w", err)
+	}
+	if !info.IsDir() {
+		return "", errors.New("root is not a directory")
+	}
+	return resolved, nil
+}
+
 // ValidateConfig enforces ranges, formats, and cross-field relationships on effective Config.
 func ValidateConfig(cfg *Config) error {
 	if cfg.Version != 1 {
@@ -318,7 +407,10 @@ func ValidateConfig(cfg *Config) error {
 	if err := validateShutdownConfig(&cfg.Shutdown); err != nil {
 		return err
 	}
-	return validateWebConfig(&cfg.Web)
+	if err := validateWebConfig(&cfg.Web); err != nil {
+		return err
+	}
+	return validateFilesConfig(&cfg.Files)
 }
 
 func validateServerConfig(s *ServerConfig) error {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import {
   AuthError,
   clearToken,
@@ -13,12 +13,26 @@ import {
   type Session,
 } from './api'
 import { notify } from './toasts'
-import { disposeTerminalSession, renameTerminalSession, type ConnState } from './terminal'
+import {
+  disposeTerminalSession,
+  insertIntoTerminal,
+  renameTerminalSession,
+  type ConnState,
+} from './terminal'
 import { getConfig, resolveFontSize } from './config'
 import SessionList from './components/SessionList.vue'
 import TerminalView from './components/TerminalView.vue'
 import ToastStack from './components/ToastStack.vue'
 import HelpModal from './components/HelpModal.vue'
+
+// The file manager is loaded when it is first opened. It carries the editor,
+// which is by far the largest dependency in the application and is of no use to
+// a page that never opens the manager -- keeping it behind this boundary also
+// keeps the Markdown parser out of the initial bundle, which is what HelpModal's
+// own dynamic import was for.
+const FileManagerOverlay = defineAsyncComponent(
+  () => import('./components/files/FileManagerOverlay.vue'),
+)
 
 const token = ref(getToken() ?? '')
 const tokenInput = ref('')
@@ -137,14 +151,73 @@ function toggleFullscreen(): void {
   }
 }
 
+// --- File manager ---
+// The overlay is rendered inside the terminal region rather than over the whole
+// application, so it cannot cover the sidebar or the toasts -- the notification
+// containment fix (#6) established that rule for this app. Its state lives in
+// the component and is discarded when it closes, which is why closing the panel
+// warns first.
+const fileManagerOpen = ref(false)
+const filesDirty = ref(false)
+
+// The hub publishes whether it offers a file manager at all. A button that
+// always answers "not found" invites a support question, so the entry point is
+// left out rather than offered and refused.
+const filesAvailable = computed(() => getConfig().files.enabled)
+
+/** closeFileManager drops the overlay and the flag it reported.
+ *
+ * The flag is cleared here rather than left to the overlay: the watcher that
+ * reports it stops when the component unmounts, so a manager closed while dirty
+ * would leave `true` behind forever and the next panel close would warn about
+ * unsaved changes that no longer exist. */
+function closeFileManager(): void {
+  fileManagerOpen.value = false
+  filesDirty.value = false
+}
+
+/** toggleFileManager warns before discarding unsaved edits.
+ *
+ * The overlay's own close button asks for the same confirmation, so this is not
+ * the only guard -- but the header button is a second way out, and closing
+ * through it used to unmount the manager without a word. */
+function toggleFileManager(): void {
+  if (!filesAvailable.value) return
+  if (!fileManagerOpen.value) {
+    fileManagerOpen.value = true
+    return
+  }
+  if (
+    filesDirty.value &&
+    !window.confirm('The file manager has unsaved changes. Close it anyway?')
+  ) {
+    return
+  }
+  closeFileManager()
+}
+
+/** insertPathIntoTerminal writes text the file manager prepared. The manager has
+ * already quoted it and made sure it carries no line terminator; all that is left
+ * is to find a live attachment, and to say so when there is none rather than
+ * letting the insertion look like it worked. */
+function insertPathIntoTerminal(text: string): void {
+  if (selected.value === null || !insertIntoTerminal(selected.value, text)) {
+    notify('warning', 'No live terminal to insert into.')
+  }
+}
+
 // Close detaches the view, never the session: the terminal keeps streaming in
 // the KeepAlive cache, so the session stays alive and can still show activity.
 function closePanel(): void {
+  if (filesDirty.value) {
+    if (!window.confirm('The file manager has unsaved changes. Close the panel anyway?')) return
+  }
   if (document.fullscreenElement) {
     document.exitFullscreen().catch(() => {
       /* already exited */
     })
   }
+  closeFileManager()
   selected.value = null
 }
 
@@ -269,6 +342,9 @@ function handleAuthFailure() {
   stopPolling()
   clearToken()
   token.value = ''
+  // The credential is gone, so nothing could be saved anyway; asking about
+  // unsaved edits here would be a question with only one answer.
+  closeFileManager()
   selected.value = null
   sessions.value = []
   cleanupSessionState()
@@ -315,6 +391,8 @@ function logout() {
   stopPolling()
   clearToken()
   token.value = ''
+  // As with an auth failure: the token is gone, so there is nothing to ask.
+  closeFileManager()
   selected.value = null
   sessions.value = []
   cleanupSessionState()
@@ -618,6 +696,15 @@ onBeforeUnmount(() => {
               @click="toggleFullscreen"
             ><span aria-hidden="true">⛶</span></button>
             <button
+              v-if="filesAvailable"
+              class="app__term-btn"
+              type="button"
+              title="browse files in this session"
+              aria-label="Open the file manager"
+              :aria-pressed="fileManagerOpen"
+              @click="toggleFileManager"
+            >Files</button>
+            <button
               class="app__term-btn"
               type="button"
               title="close panel (the session keeps running)"
@@ -638,6 +725,15 @@ onBeforeUnmount(() => {
               @activity="onActivity"
             />
           </KeepAlive>
+          <div v-if="fileManagerOpen" class="app__files">
+            <FileManagerOverlay
+              :session="selected"
+              @close="closeFileManager"
+              @notice="onNotice"
+              @insert-path="insertPathIntoTerminal"
+              @dirty-change="filesDirty = $event"
+            />
+          </div>
           <ToastStack />
         </main>
       </div>
@@ -873,6 +969,13 @@ onBeforeUnmount(() => {
    background instead of showing through to the page. */
 .app__main:fullscreen {
   background: var(--app-bg);
+}
+/* The file manager covers the terminal area only. `.app__main` is already a
+   positioning context, so this cannot escape over the sidebar. */
+.app__files {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
 }
 .app__placeholder {
   padding: 1rem;

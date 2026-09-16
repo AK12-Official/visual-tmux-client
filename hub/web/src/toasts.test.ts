@@ -5,6 +5,7 @@ import { notify, dismiss, useToasts, resetToastsForTest } from './toasts'
 
 const customConfig: ClientConfig = {
   version: 1,
+  files: { enabled: true, max_file_size: 104857600 },
   web: {
     session_poll_interval: 2000,
     activity_decay: 1000,

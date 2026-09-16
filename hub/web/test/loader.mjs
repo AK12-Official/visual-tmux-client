@@ -2,12 +2,17 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 export async function resolve(specifier, context, nextResolve) {
-  if (
-    specifier === '@xterm/xterm' ||
-    specifier === '@xterm/addon-fit' ||
-    specifier === '@xterm/addon-unicode11'
-  ) {
-    return nextResolve(new URL('./mocks/xterm.mjs', import.meta.url).href, context)
+  const browserOnly = {
+    '@xterm/xterm': './mocks/xterm.mjs',
+    '@xterm/addon-fit': './mocks/xterm.mjs',
+    '@xterm/addon-unicode11': './mocks/xterm.mjs',
+    // The editor and the sanitizer both need a document, which this test
+    // environment does not have.
+    codemirror: './mocks/codemirror.mjs',
+    dompurify: './mocks/dompurify.mjs',
+  }
+  if (browserOnly[specifier]) {
+    return nextResolve(new URL(browserOnly[specifier], import.meta.url).href, context)
   }
 
   try {

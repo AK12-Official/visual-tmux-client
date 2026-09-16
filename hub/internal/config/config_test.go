@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -393,6 +394,49 @@ server:
 			errSubstr: "must be an integer",
 		},
 		{
+			name: "unknown key in files section",
+			yaml: `
+files:
+  allow_upload: true
+`,
+			errSubstr: "unknown configuration key \"files.allow_upload\"",
+		},
+		{
+			name: "null value in files section",
+			yaml: `
+files:
+  roots: null
+`,
+			errSubstr: "null values are not allowed",
+		},
+		{
+			name: "files roots as a scalar",
+			yaml: `
+files:
+  roots: "/srv"
+`,
+			errSubstr: "must be a list of strings",
+		},
+		{
+			name: "files roots entry not a string",
+			yaml: `
+files:
+  roots:
+    - "/srv"
+    - 42
+`,
+			errSubstr: "must be a string",
+		},
+		{
+			name: "files root not absolute",
+			yaml: `
+files:
+  roots:
+    - "relative/dir"
+`,
+			errSubstr: "must be an absolute path",
+		},
+		{
 			name: "unsupported version",
 			yaml: `
 version: 2
@@ -717,6 +761,36 @@ func TestConfig_NegativeNumbersAndBounds(t *testing.T) {
 			yaml:      "web:\n  notifications:\n    max_toasts: 1\n",
 			errSubstr: "out of range [2, 100]",
 		},
+		{
+			name:      "zero files max_file_size",
+			yaml:      "files:\n  max_file_size: 0\n",
+			errSubstr: "must be greater than 0",
+		},
+		{
+			name:      "negative files max_file_size",
+			yaml:      "files:\n  max_file_size: -1\n",
+			errSubstr: "must be greater than 0",
+		},
+		{
+			name:      "zero files max_dir_entries",
+			yaml:      "files:\n  max_dir_entries: 0\n",
+			errSubstr: "out of range [1, 10000]",
+		},
+		{
+			name:      "negative files max_dir_entries",
+			yaml:      "files:\n  max_dir_entries: -10\n",
+			errSubstr: "out of range [1, 10000]",
+		},
+		{
+			name:      "files max_dir_entries above the hard cap",
+			yaml:      "files:\n  max_dir_entries: 10001\n",
+			errSubstr: "out of range [1, 10000]",
+		},
+		{
+			name:      "files root that does not exist",
+			yaml:      "files:\n  roots:\n    - \"/nonexistent-root-for-the-files-config-test\"\n",
+			errSubstr: "files.roots",
+		},
 	}
 
 	dummyLookup := func(k string) (string, bool) { return "", false }
@@ -736,6 +810,87 @@ func TestConfig_NegativeNumbersAndBounds(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Roots are the whole of the operator-facing boundary, so what Load does with
+// them is worth pinning: an omitted list must leave the boundary open rather
+// than enclosing nothing, and a configured root must be stored canonically.
+func TestConfig_FilesRoots(t *testing.T) {
+	dummyLookup := func(k string) (string, bool) { return "", false }
+
+	load := func(t *testing.T, yaml string) (*Config, error) {
+		t.Helper()
+		tmpDir := t.TempDir()
+		cfgPath := filepath.Join(tmpDir, "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, _, err := Load([]string{"--config", cfgPath}, tmpDir, dummyLookup, "v1.0")
+		return cfg, err
+	}
+
+	t.Run("omitted roots", func(t *testing.T) {
+		cfg, err := load(t, "version: 1\n")
+		if err != nil {
+			t.Fatalf("omitting roots must be valid, got: %v", err)
+		}
+		if len(cfg.Files.Roots) != 0 {
+			t.Errorf("expected the boundary to stay open, got roots %v", cfg.Files.Roots)
+		}
+		if !cfg.Files.Enabled {
+			t.Error("expected the file manager to be enabled by default")
+		}
+	})
+
+	t.Run("empty roots list", func(t *testing.T) {
+		cfg, err := load(t, "files:\n  roots: []\n")
+		if err != nil {
+			t.Fatalf("an empty roots list must be valid, got: %v", err)
+		}
+		if len(cfg.Files.Roots) != 0 {
+			t.Errorf("expected the boundary to stay open, got roots %v", cfg.Files.Roots)
+		}
+	})
+
+	t.Run("configured limits round-trip", func(t *testing.T) {
+		cfg, err := load(t, "files:\n  enabled: false\n  max_file_size: 1024\n  max_dir_entries: 7\n")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.Files.Enabled || cfg.Files.MaxFileSize != 1024 || cfg.Files.MaxDirEntries != 7 {
+			t.Errorf("the files section did not round-trip: %+v", cfg.Files)
+		}
+	})
+
+	t.Run("symlinked root stores its target", func(t *testing.T) {
+		target := t.TempDir()
+		link := filepath.Join(t.TempDir(), "link-to-root")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		resolved, err := filepath.EvalSymlinks(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		cfg, err := load(t, "files:\n  roots:\n    - "+strconv.Quote(link)+"\n")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if len(cfg.Files.Roots) != 1 || cfg.Files.Roots[0] != resolved {
+			t.Errorf("expected the root to resolve to %q, got %v", resolved, cfg.Files.Roots)
+		}
+	})
+
+	t.Run("root that is not a directory", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "not-a-dir")
+		if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := load(t, "files:\n  roots:\n    - "+strconv.Quote(file)+"\n"); err == nil {
+			t.Fatal("expected a root that is not a directory to be rejected")
+		}
+	})
 }
 
 func TestConfig_ExtremeDurationsAndUnits(t *testing.T) {

@@ -15,6 +15,7 @@ import {
 
 const nonDefaultConfig: ClientConfig = {
   version: 1,
+  files: { enabled: true, max_file_size: 104857600 },
   web: {
     session_poll_interval: 3000,
     activity_decay: 1500,

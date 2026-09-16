@@ -26,6 +26,7 @@ type SessionService interface {
 	KillSession(ctx context.Context, name string) error
 	GetSession(ctx context.Context, name string) (*session.Session, error)
 	HasSession(ctx context.Context, name string) bool
+	PaneWorkingDirectory(ctx context.Context, name string) (string, error)
 }
 
 // TicketIssuer specifies the contract to generate single-use terminal tickets.
@@ -37,13 +38,21 @@ type TicketIssuer interface {
 type RouterConfig struct {
 	Token               string
 	MaxRequestBodyBytes int64
-	WebConfig           config.WebConfig
-	StaticFS            fs.FS
+	// MaxFileSize bounds a file write request body. It is separate from
+	// MaxRequestBodyBytes because a write is the one request that legitimately
+	// carries megabytes.
+	MaxFileSize int64
+	// FilesEnabled is published to the browser so it can leave the file manager's
+	// entry point out. It grants nothing: every operation is gated on its own.
+	FilesEnabled bool
+	WebConfig    config.WebConfig
+	StaticFS     fs.FS
 }
 
 type handlerState struct {
 	cfg      RouterConfig
 	sessions SessionService
+	files    FileService
 	tickets  TicketIssuer
 }
 
@@ -166,7 +175,7 @@ func (s *handlerState) issueTicket(w http.ResponseWriter, r *http.Request) {
 
 func (s *handlerState) getClientConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	dto := NewPublicClientConfig(s.cfg.WebConfig)
+	dto := NewPublicClientConfig(s.cfg.WebConfig, s.cfg.FilesEnabled, s.cfg.MaxFileSize)
 	writeJSON(w, http.StatusOK, dto)
 }
 
@@ -174,6 +183,7 @@ func (s *handlerState) getClientConfig(w http.ResponseWriter, r *http.Request) {
 func NewRouter(
 	cfg RouterConfig,
 	sessions SessionService,
+	files FileService,
 	tickets TicketIssuer,
 	wsHandler http.Handler,
 ) http.Handler {
@@ -184,6 +194,7 @@ func NewRouter(
 	state := &handlerState{
 		cfg:      cfg,
 		sessions: sessions,
+		files:    files,
 		tickets:  tickets,
 	}
 
@@ -195,7 +206,19 @@ func NewRouter(
 	mux.Handle("POST /api/hosts/{hostId}/sessions", auth(http.HandlerFunc(state.createSession)))
 	mux.Handle("PATCH /api/hosts/{hostId}/sessions/{name}", auth(http.HandlerFunc(state.renameSession)))
 	mux.Handle("DELETE /api/hosts/{hostId}/sessions/{name}", auth(http.HandlerFunc(state.killSession)))
+	mux.Handle("GET /api/hosts/{hostId}/sessions/{name}/working-directory",
+		auth(http.HandlerFunc(state.sessionWorkingDirectory)))
 	mux.Handle("POST /api/ws-ticket", auth(http.HandlerFunc(state.issueTicket)))
+
+	// File API (Authenticated). read and download share a handler but stay
+	// separate routes, so the browser's intent is legible in the request.
+	mux.Handle("GET /api/hosts/{hostId}/files/list", auth(http.HandlerFunc(state.listFiles)))
+	mux.Handle("GET /api/hosts/{hostId}/files/read", auth(http.HandlerFunc(state.readFile)))
+	mux.Handle("GET /api/hosts/{hostId}/files/download", auth(http.HandlerFunc(state.downloadFile)))
+	mux.Handle("PUT /api/hosts/{hostId}/files/write", auth(http.HandlerFunc(state.writeFile)))
+	mux.Handle("POST /api/hosts/{hostId}/files/create", auth(http.HandlerFunc(state.createEntry)))
+	mux.Handle("POST /api/hosts/{hostId}/files/rename", auth(http.HandlerFunc(state.renameEntry)))
+	mux.Handle("POST /api/hosts/{hostId}/files/delete", auth(http.HandlerFunc(state.deleteEntry)))
 
 	// Client Config (Unauthenticated, no-store)
 	mux.HandleFunc("GET /api/client-config", state.getClientConfig)

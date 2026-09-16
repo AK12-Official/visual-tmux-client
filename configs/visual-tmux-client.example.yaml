@@ -63,3 +63,34 @@ web:
     error_lifetime: "8s"
     warning_lifetime: "5s"
     info_lifetime: "3s"
+
+files:
+  # Whether the browser file manager and its REST API are available.
+  # When false, every file operation is refused without touching the filesystem;
+  # terminal and session operations are unaffected.
+  enabled: true
+
+  # Root directories the file manager is confined to.
+  #
+  # Omitting this key (or leaving the list empty) means NO directory containment:
+  # file operations are bounded only by the access the hub process's own
+  # operating-system user already has. The hub issues a bearer token that also
+  # authorizes a full interactive terminal as that same user, so an operator who
+  # holds the token can reach those paths through the terminal regardless.
+  #
+  # Setting roots replaces that default and confines every file operation to
+  # them. Each root must be an absolute path to an existing directory; it is
+  # resolved through symlinks at startup, and a root that does not exist, is not
+  # a directory, or cannot be resolved is a startup error. `/proc`, `/sys` and
+  # `/dev` are always refused, in both modes.
+  #
+  # roots:
+  #   - "/srv/projects"
+  #   - "/var/log"
+
+  # Largest single file the API will read, write, or download, in bytes.
+  max_file_size: 104857600 # 100 MiB
+
+  # Largest number of entries one directory listing returns, after which the
+  # result is reported as truncated. Hard cap: 10000.
+  max_dir_entries: 1000

@@ -4,8 +4,20 @@ import "github.com/AK12-Official/visual-tmux-client/hub/internal/config"
 
 // PublicClientConfig defines the unauthenticated configuration envelope returned to browsers.
 type PublicClientConfig struct {
-	Version int       `json:"version"`
-	Web     PublicWeb `json:"web"`
+	Version int         `json:"version"`
+	Web     PublicWeb   `json:"web"`
+	Files   PublicFiles `json:"files"`
+}
+
+// PublicFiles tells the browser whether the file manager is available, and what
+// its per-file limit is, so the entry point can be left out rather than offered
+// and refused, and a refusal can name the limit instead of a wire code.
+//
+// Neither value is a boundary. Enabled grants nothing: every operation is gated
+// on its own, and MaxFileSize is the same bound the service already enforces.
+type PublicFiles struct {
+	Enabled     bool  `json:"enabled"`
+	MaxFileSize int64 `json:"max_file_size"`
 }
 
 // PublicWeb defines web UI parameters with durations formatted as integer milliseconds.
@@ -42,9 +54,10 @@ type PublicNotifications struct {
 }
 
 // NewPublicClientConfig maps an internal WebConfig into the public browser projection.
-func NewPublicClientConfig(web config.WebConfig) PublicClientConfig {
+func NewPublicClientConfig(web config.WebConfig, filesEnabled bool, maxFileSize int64) PublicClientConfig {
 	return PublicClientConfig{
 		Version: 1,
+		Files:   PublicFiles{Enabled: filesEnabled, MaxFileSize: maxFileSize},
 		Web: PublicWeb{
 			SessionPollInterval: web.SessionPollInterval.Duration().Milliseconds(),
 			ActivityDecay:       web.ActivityDecay.Duration().Milliseconds(),
@@ -85,4 +98,41 @@ type renameSessionRequest struct {
 type wsTicketRequest struct {
 	HostID  string `json:"hostId"`
 	Session string `json:"session"`
+}
+
+// fileKindDirectory is the kind a create request uses for a directory. Anything
+// else, including an absent value, creates a file.
+const fileKindDirectory = "dir"
+
+type createFileRequest struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
+}
+
+type renameFileRequest struct {
+	Path    string `json:"path"`
+	NewPath string `json:"new_path"`
+}
+
+type deleteFileRequest struct {
+	Path      string `json:"path"`
+	Recursive bool   `json:"recursive"`
+}
+
+// writeFileResponse returns the target's resulting modification time, so the
+// browser can keep editing without re-reading the file -- and without guessing
+// a value that would make its next save look like a conflict.
+type writeFileResponse struct {
+	Mtime int64 `json:"mtime"`
+}
+
+// workingDirectoryResponse seeds the file manager's starting directory.
+//
+// Substituted is set when the session's own directory falls outside a configured
+// boundary, in which case Path names a permitted directory instead. It is
+// omitted rather than sent as false, so an unrestricted hub answers exactly as
+// it did before this field existed.
+type workingDirectoryResponse struct {
+	Path        string `json:"path"`
+	Substituted bool   `json:"substituted,omitempty"`
 }
