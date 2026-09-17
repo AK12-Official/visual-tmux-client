@@ -1,6 +1,6 @@
 // The operations a path has outstanding, and the ability to wait for them.
 //
-// Kept out of the component for the reason renames.ts is: what goes wrong here
+// Kept out of the component for the reason pathChanges.ts is: what goes wrong here
 // is an interleaving, and an interleaving is only observable if the state it
 // turns on can be driven directly.
 //

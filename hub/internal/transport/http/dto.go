@@ -100,9 +100,19 @@ type wsTicketRequest struct {
 	Session string `json:"session"`
 }
 
-// fileKindDirectory is the kind a create request uses for a directory. Anything
-// else, including an absent value, creates a file.
-const fileKindDirectory = "dir"
+// The kinds a create request may name, in the field that decides what is created
+// at the path.
+//
+// The field is required and has no default. Reading an absent value as "a file"
+// would answer a request that never said what it wanted with a file at that
+// path, and report success: a caller that meant a directory -- and misspelled
+// the kind, or asked an older hub -- would be told its directory was created and
+// would find a file. Both values are named here so the route can refuse anything
+// that is neither.
+const (
+	fileKindFile      = "file"
+	fileKindDirectory = "dir"
+)
 
 type createFileRequest struct {
 	Path string `json:"path"`

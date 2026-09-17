@@ -31,8 +31,63 @@ function place() {
   }
 }
 
+/** items are the entries a user can choose right now, in the order they appear.
+ *
+ * A disabled one -- Download over a directory -- is not a stop: a menu that
+ * lands the focus on something that cannot be chosen and then moves nowhere is
+ * the same as no focus at all. */
+function items(): HTMLButtonElement[] {
+  const el = menu.value
+  if (!el) return []
+  return Array.from(el.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'))
+}
+
+/** focusItem puts the focus on one of them, wrapping at either end. */
+function focusItem(index: number) {
+  const found = items()
+  if (found.length === 0) return
+  found[((index % found.length) + found.length) % found.length].focus()
+}
+
+/**
+ * onKeydown answers the keys a menu is expected to answer.
+ *
+ * The focus is one of these keys' business at all because the menu takes it when
+ * it opens: a menu that is read but not reachable is a menu a keyboard user
+ * cannot act on, and every action here -- rename, delete, download -- is
+ * otherwise reachable only with a pointer. Which entry the move is measured from
+ * is the focus itself rather than a second index kept beside it, so there is
+ * nothing to fall out of step with what is on screen.
+ *
+ * Escape is answered wherever the key is pressed, as it was before; the moves
+ * only apply while the focus is on an item, since an arrow aimed at something
+ * else is that something else's key.
+ */
 function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') emit('close')
+  if (event.key === 'Escape') {
+    emit('close')
+    return
+  }
+  const found = items()
+  const current = found.indexOf(document.activeElement as HTMLButtonElement)
+  if (current < 0) return
+  const move: Record<string, number> = {
+    ArrowDown: current + 1,
+    ArrowUp: current - 1,
+    Home: 0,
+    End: found.length - 1,
+  }
+  const to = move[event.key]
+  if (to === undefined) {
+    // Tab is the one other key that means something here: a menu is not a form,
+    // so leaving it is dismissing it rather than a step to its neighbour.
+    if (event.key === 'Tab') emit('close')
+    return
+  }
+  // The browser's own use of these keys -- scrolling the page under a menu that
+  // is anchored to a point on it -- is not what a menu's arrow keys mean.
+  event.preventDefault()
+  focusItem(to)
 }
 
 /** onPointerDown dismisses the menu when the press lands anywhere else. */
@@ -49,6 +104,11 @@ function onViewportChange() {
 
 onMounted(() => {
   place()
+  // Opened, and taken: the focus moves into the menu for every way of opening
+  // it, which is what makes the keyboard route -- Shift+F10 or the menu key on
+  // the row -- land somewhere the user can act from. Closing hands it back; see
+  // the overlay's closeMenu.
+  focusItem(0)
   document.addEventListener('keydown', onKeydown)
   // Capture phase, so a press that a descendant stops still dismisses the menu.
   document.addEventListener('pointerdown', onPointerDown, true)

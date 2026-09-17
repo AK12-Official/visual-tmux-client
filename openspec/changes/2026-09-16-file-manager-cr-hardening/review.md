@@ -720,3 +720,135 @@ That is a tail without a fixed point: a check can always be narrower than its cl
 is narrowed to match, and this round did that too. The product code has been unchanged by five
 consecutive rounds; what remains is a list of accepted costs and pre-existing gaps, each with the
 reason it is bounded, which is the state this change set out to reach.
+
+## The eleventh review of the change
+
+The seven findings came from a review of the branch as a whole rather than of its newest commit. Six
+were defects, one was a claim the code could not support; each was reproduced before anything was
+changed, and the reverts are recorded in `tasks.md` section 21.
+
+**The one that lost data.** An image is opened without being read: the preview fetches what it needs,
+and the bytes are never decoded as text. That is sound only while the *name* says image, and a rename
+replaces the name. Renaming `photo.png` to `photo.txt` left the tab in the editor as an empty document
+whose `saved` text was also empty, so one keystroke made it dirty and Save wrote that document over the
+picture. Two things were wrong and both are now fixed: the presentation rule let the name decide in
+*both* directions for a file nobody had read, and nothing read the file the new name described. The rule
+now says what it can support -- an unread file may be *shown* as an image, because the preview decodes
+nothing, and may not be *edited*, because there are no contents in hand -- and a rename to a name that
+asks for the editor reads the file so that the tab becomes what the hub says it is. Until that answer
+lands the tab presents as information, which is what makes the read safe rather than merely fast: there
+is no window in which the editor holds a document nobody read, whether the read is still travelling or
+has failed. This changed a rule the frontend tests had pinned, and the tests were changed with it.
+
+**The delete that a read outlived.** The manager's delete sweeps the tabs it finds when the hub answers,
+and a read the hub had already granted can land behind that sweep -- so the sweep was a moment rather
+than a rule, and the tab installed behind it named a path that was gone and could only be refused when
+saved. The first attempt at this asked the *tree*: refuse the tab when the directory's cached listing is
+known and no longer names the file. That was written, and a run of the existing tests rejected it -- the
+rename-during-a-probe test renames a file the static test hub keeps listing under its old name, so the
+check refused a legitimate open. A check that answers from a cache can be wrong in both directions, and
+the cost of the false refusal is a file the user cannot open. What replaced it is the delete's own
+record: a delete that the hub has answered says what it removed, for the reads that were travelling when
+it was answered, and those reads install nothing. Nothing is inferred, so nothing is inferred wrongly;
+the module that held renames now holds both and is named for it.
+
+**The cache that stepped backwards.** `loadDirectory` wrote the tree's listing cache before its caller
+could check whether that load was still the current one, and the check it had -- a navigation ticket --
+therefore came after the damage. Two waits for one directory overlap whenever a refresh and a navigation
+name it, or two navigations do. The rule is now where the cache is: a wait takes a ticket for the path
+it is reading, and only the newest may write it. The ticket is issued *after* the cache check, because a
+call answered from the cache makes no claim about the disk and must not retire a wait that does; and a
+directory that is dropped retires the waits for it, so a forgotten listing cannot be put back by its own
+answer. Three of the four new cases fail against one of those two decisions being wrong.
+
+**A promise about filesystems.** `files.enabled: false` says the capability is off without touching the
+filesystem, and the hub resolved every configured root while loading the configuration and opened a
+handle on each while building the service. A root that was missing, or unreadable,
+therefore stopped the process -- taking the terminal and the session list with it, which the READMEs
+explicitly promise will not happen. The roots are no longer resolved while the capability is off and are
+no longer opened, so what the service is in that state has to be said rather than assumed: no roots and
+no roots and no boundary, behind a transport that refuses every file route before it is called -- and it
+is the transport's gate, not the construction, that keeps it out of reach.
+
+**The menu that was not one.** The context menu declared `role="menu"` and its entries `role="menuitem"`,
+and it behaved like a list of buttons: no focus on open, no arrow keys, no Home/End, and no focus given
+back. Every action it holds -- rename, delete, download, copy path, insert path -- was reachable only
+with a pointer, and a browser that raises `contextmenu` from the keyboard (Shift+F10, or the menu key)
+opened it somewhere the user was not looking, because such an event reports the pointer origin rather
+than a position that means anything. It now takes the focus, walks the actions a user can choose, skips
+the disabled ones rather than stopping on them, hands the focus back to the row it came from, and is
+anchored to that row when the event carries no pointer. The test mounts into the document, because focus
+is a property of one and a detached element cannot hold it -- which is also why the previous rounds'
+tests could not have caught this.
+
+**A contract that was not one.** The create route read `kind` and made everything that was not `dir` a
+file, so a request asking for a directory -- `"kind":"directory"`, a spelling from another tool -- made
+a file at that path and answered 204. The field is now required and checked against the two names the
+hub has, and the decoder shared by the three change routes refuses an unknown field, a second value
+after the object, and an empty body. The browser and the hub ship together, so a field one of them does
+not know is a mistake rather than an older version; silently ignoring it is how a create, a move, or a
+delete becomes an action nobody asked for.
+
+**The claim, not the defect.** The last finding read `ParsePanes`' doc comment, which said a field
+carrying a newline could split a record and forge one for another session, and named executable names
+and argv as the way in. Neither half survived measurement. Against a real tmux, a session name and a
+window name containing a newline are refused when they are set, and `select-pane -T` refuses a title
+containing one -- silently, leaving the title as it was, which is why the test reads the title back
+rather than a status. The comment was the defect: it described a vulnerability as a known limitation,
+which is how a reviewer came to report a live one.
+
+The first draft of the corrected comment was wrong in the other direction, and the review of this round
+caught that too. It said a break would *always* drop the pane's own record and let the tail parse in its
+place. Measured, that is one of two outcomes: a break in the **last** field leaves the head with all nine
+fields, so the pane is read with its command truncated and the tail is an extra record -- a forgery that
+loses the pane nothing. Both outcomes are now pinned by
+`TestALineBreakInAFieldWouldNotBeDetected`, because the difference is what makes the unmeasured field the
+one worth naming.
+
+That field is the command, the one a program names itself, and it is the only one no test covers: what
+tmux reports for it was seen to escape a line break once, which later attempts could not reproduce, and
+a process whose own name carries one could not be produced on this machine -- a copy of a system binary
+under such a name does not run. tmux escaping control bytes on its way out is real behaviour, which is
+why the field separator in this code is printable, so the observation stands as the likely answer rather
+than being dismissed. The comment now states what the parser does and does not do, names the guarantee's
+owner, and records that limit instead of implying the whole protocol is measured.
+
+### The review of this round's fixes
+
+Three reviewers were given the fixes themselves, split across the browser, the hub's Go, and the claims
+this record makes. Eight findings came back, and every one was reproduced before it was acted on; the
+reverts are in `tasks.md` section 21, and the two that changed product code are worth naming here.
+
+**A read that landed on a tab which was no longer unread.** Filling in a renamed tab identified the tab
+by session *and path*, and a path cannot tell one read of it from another. A tab renamed away from a text
+name and back -- image name, text name, image name, text name -- leaves two reads in flight for one path,
+and the second to land replaced the contents the first had brought: the user's keystrokes went with them,
+and the tab reported itself saved against contents they had never seen. The fix is not another ticket. It
+is that the *state* the answer was asked about is what makes it wanted: only a tab that is still unread
+is filled in, so an answer that arrives for a tab which has since been read -- or edited -- is dropped.
+
+**A reason the panel had no basis for.** The information panel decides between "binary or too large"
+and "nobody has read this" by asking what the name asks for. That is false for a rename to a
+binary-extension name: `archive.zip` is not a name the editor would hold, so no read is started, and the
+panel then described a file it had never looked at as binary -- at five bytes. What separates the two
+cases is whether the name says *image*, which is size-independent where the other question is not.
+
+**And three of the eight were claims rather than behaviour.** The disabled file manager was described as
+"failing closed" when it has no boundary at all and the operations that change the filesystem consult no
+limit; the standing `runtime-configuration` requirement that a root which cannot be used is a startup
+error had been contradicted without being amended; a wire contract had been made stricter with nothing in
+the specification saying what a request carries. Each is the species the last three rounds of this branch
+kept finding, and each was found by a reviewer reading the *change* rather than the diff.
+
+### What this round says about the previous one
+
+The tenth round concluded that the product code had been unchanged for five rounds and that only claims
+and checks were still being found. This round found six product defects, two of them reachable in
+ordinary use, one of them a data-loss path -- from a review given the branch as a whole rather than the
+latest commit's delta, and asked what a user could actually do to it. The review of those fixes then
+found two more in the fixes themselves, one of which was another silent loss of the user's work: the
+instrument that found the first six answers a different question from the one that found these two, and
+neither answers the other's. The tenth round's own conclusion
+was that a check can always be narrower than its claim; the sharper lesson here is that a *reader* of
+the code is a different instrument from a reader of the diff, and that the accessibility of a component
+is a product property that no amount of prose about it will exercise.

@@ -364,6 +364,54 @@ with an empty frame, no notice, and no download action, where the information pa
 component that creates it -- and it was a dead end for a misnamed image under the bound before this
 change, too.
 
+### 5b. A file nobody has read can be shown, and cannot be edited
+
+The manager opens an image without reading it: the preview fetches what it needs, and the bytes are
+never decoded as text. That is sound only while the *name* says image, and until this round the
+presentation rule said something stronger for a file nobody had read -- that the name decided in both
+directions, so a name the editor would hold meant the editor. A rename replaces the name and nothing
+else, so renaming `photo.png` to `photo.txt` handed the editor an empty document over a picture, with a
+Save button beside it: one keystroke and a save replaced the file's bytes with an empty string.
+
+Two things were wrong. The rule now distinguishes what can be *shown* from what can be *edited*: an
+unread file may be presented as an image, because the image preview decodes nothing, and may not be
+offered as text, because there are no contents in hand to edit -- whatever the name says. And a rename
+that gives such a tab a name asking for the editor reads the file, so the tab becomes what the hub says
+it is rather than what it is called. The two together leave no window in which the editor holds a
+document nobody read: before the answer arrives the tab presents as information, and if the read fails
+it stays that way.
+
+*Alternative considered:* close the tab and reopen it at the new name (rejected: the closed tab changes
+the id, the tab order and the active tab, and the user's rename would be undone by a flicker of nothing
+being open).
+
+### 5c. What happened to a path while a read travelled is recorded, not inferred
+
+A read the hub has already granted goes on returning the file's contents after the file is deleted, and
+the answer can arrive after the delete has swept the tabs it found. The sweep was therefore a moment
+rather than a rule, and the tab installed behind it named a path that was gone -- a save of it could only
+be answered `not_found`, with nothing in the interface to recover with.
+
+*Alternative considered:* refuse the install when the directory's cached listing is known and no longer
+names the file. This was written and run, and an existing test rejected it: the manager's rename completes
+while a probe is in flight, the test hub keeps listing the old name, and the check refused a legitimate
+open. A check that answers from a cache can be wrong in both directions, and its false refusal costs the
+user a file they cannot open at all. What replaced it infers nothing: the delete records what it removed,
+for the reads that were travelling when the hub answered it, and those reads install nothing. The module
+that held renames now holds removals too, and is named `files/pathChanges.ts` for it.
+
+### 5d. The newest wait owns the listing cache
+
+`loadDirectory` wrote the tree's cache before its caller could tell whether the load was still current,
+so the ticket a navigation kept was checked after the damage: two waits for one directory -- a refresh
+and a navigation, or two navigations -- let the older answer land last and put the tree back to a listing
+the user had already navigated away from. Ownership is now a property of the cache rather than a
+responsibility of each caller: a wait takes a ticket for the path it is reading and only the newest
+ticket may write. Two details are what make it correct rather than merely present. The ticket is issued
+*after* the cache check, because a call answered from the cache makes no claim about the disk and must
+not retire a wait that does. And dropping a directory retires the waits for it, so a forgotten listing
+cannot be written back by the answer that was already travelling.
+
 ### 6. The hub gives its root handles back when it stops
 
 Each configured root is an open descriptor, held for the hub's lifetime and used by every operation
@@ -411,6 +459,56 @@ be type-checked against each other any other way.
 
 *Alternative considered:* a Go side test that prints the codes to a generated file the frontend
 reads (rejected: a build step and a generated artifact for eleven strings).
+
+### 7. A disabled capability resolves nothing
+
+`files.enabled: false` says the capability is off without touching the filesystem, and the hub resolved
+every configured root while loading the configuration and opened a handle on each while building the
+service. A root that was missing or unreadable therefore stopped the process, taking
+the terminal and the session list with it -- which both READMEs promise will not happen. Validation now
+skips root resolution while the capability is off, and the composition root builds the service without a
+boundary.
+
+What the service *is* in that state has to be said rather than assumed, and the first draft of this
+section said it wrongly: it claimed a service with no roots and a size bound of zero "fails closed". It
+does not. `Create`, `Rename` and `Delete` consult no bound at all, and an empty root set is by
+definition unrestricted -- `guard.go` says so: with no roots the boundary is whatever the hub's user can
+reach. A reviewer ran it and made a file through the "disabled" service in two lines.
+
+So the honest statement is the one now in `newFileService`: the disabled service is not a boundary, and
+what keeps it out of reach is the *gate* rather than the construction. Every file route refuses on the
+same `Enabled` flag before it calls a method, and the working-directory route checks it before asking
+the service to substitute a directory. That gate is now pinned across all eight routes by
+`TestFileRoutesAnswerADisabledManagerWithoutReachingTheService`, which is what makes it a property
+rather than an assumption: widening that test from one route to all of them is what found that the
+working-directory route is deliberately answered rather than refused. The limits are carried as
+configured, because there is nothing for a hidden override to protect.
+
+### 8. The pane protocol's unbreakable field is tmux's to keep, and is measured
+
+`ParsePanes` splits records on newlines, and its doc comment said a field carrying one could split a
+record and forge one for another session -- naming executable names and argv as the way in. Measured
+against a real tmux, the names cannot carry the terminator: a session name and a window name containing a
+newline are refused when they are set ("invalid session name", "invalid window name"), and `select-pane
+-T` leaves a title containing one as it was -- silently, which is why the test reads the title back rather
+than checking a status. So the parse is sound, and the guarantee is tmux's rather than the parser's, which
+is the part that has to be written down: the field count is validation of shape and not escaping, and a
+reader who takes it for a defence will not go looking for one.
+
+**What a break would do was worth measuring rather than assuming, and the first correction got it wrong.**
+It said a break drops the pane's own record and lets the tail take its place. That is one of two outcomes.
+A break *before* the last field leaves too few fields to parse, so the pane's record goes and the tail --
+with the separators a forger writes into it and the fields that follow it in the real record -- is read
+instead, naming whichever session the fragment starts with. A break in the *last* field leaves the head
+with all nine fields, so the pane is read with its command truncated and the tail is an extra record: a
+forgery that costs the pane nothing. Both are pinned by `TestALineBreakInAFieldWouldNotBeDetected`.
+
+*The measurement has a limit, recorded here rather than smoothed over:* the command field is the one a
+program names itself, and the only field no test covers. What tmux reports for it was seen to escape a
+line break once, which later attempts could not reproduce, and a process whose own name carries one could
+not be produced on this machine at all -- a copy of a system binary under such a name does not run. That
+tmux escapes control bytes on its way out is real behaviour (it is why the field separator in that code
+is printable), so the observation stands as the likely answer rather than being dismissed.
 
 ## Risks / Trade-offs
 
@@ -509,6 +607,26 @@ reads (rejected: a build step and a generated artifact for eleven strings).
   descriptor after the scan was considered and rejected: an append is indistinguishable from an
   in-place rewrite by size and time, and refusing on either would break reading a log that is being
   written to, which the spec explicitly allows.*
+
+- **[Accepted] A disabled file manager is a service with no boundary, and the gate is what keeps
+  it out of reach.** → *See decision 7. Every file route refuses on `Enabled` before calling a method,
+  and that is now pinned across all of them. The construction itself is not protective: with no roots
+  the service is unrestricted, and the operations that change the filesystem consult no limit. It is
+  named here because the protection lives in the transport's gate, so a future caller that reached the
+  service without passing one would find no boundary at all.*
+- **[Accepted] A tab whose file was removed by another process still saves with `not_found`.** → *The
+  manager now refuses to install a tab that its own delete removed, which is the case it can know
+  about. A file removed from the terminal is not: the manager learns of it when a save is refused, and
+  the edit is then stranded in the tab with no way to write it anywhere. Closing that needs a save-as or
+  a re-create flow, which is a feature rather than a repair of this defect, and the open file's contents
+  at least survive in the tab -- they are not lost until the tab is closed, which warns.*
+- **[Residual] The pane protocol rests on tmux, and its last field is unmeasured.** → *See decision
+  8. The two name refusals and the silent title refusal are pinned against a real server, so a tmux that
+  stopped refusing would fail a test rather than mis-attribute a summary in the UI. The command field is
+  not pinned: the escape it was once seen to produce could not be reproduced, and a process named with a
+  line break could not be produced here at all. A break there would forge a record exactly as a break
+  anywhere else does, so this is a gap in the evidence rather than a known hole, and it is stated as
+  one.*
 
 ## Migration Plan
 

@@ -8,10 +8,21 @@ export interface TreeState {
   children: Map<string, Entry[]>
   truncated: Set<string>
   expanded: Set<string>
+  /**
+   * loads is the newest wait for a directory's listing, by path.
+   *
+   * A wait that goes to the hub can be answered out of order, so the answer a
+   * superseded wait carries describes the disk as it was before a later answer
+   * does -- and writing it would move the cache backwards. The newest wait for a
+   * path is therefore the only one allowed to write it, which is a rule about
+   * this map rather than about any caller: a caller that checked a ticket of its
+   * own could only check it after the write had already happened.
+   */
+  loads: Map<string, number>
 }
 
 export function createTreeState(): TreeState {
-  return { children: new Map(), truncated: new Set(), expanded: new Set() }
+  return { children: new Map(), truncated: new Set(), expanded: new Set(), loads: new Map() }
 }
 
 export function cachedChildren(state: TreeState, path: string): Entry[] | undefined {
@@ -42,6 +53,7 @@ export function isExpanded(state: TreeState, path: string): boolean {
 export function invalidateDirectory(state: TreeState, path: string): void {
   state.children.delete(path)
   state.truncated.delete(path)
+  supersede(state, path)
 }
 
 /**
@@ -67,6 +79,11 @@ export function forgetDirectory(state: TreeState, path: string): void {
   // what said so, and that is what just went.
   for (const key of [...state.expanded]) {
     if (under(key)) state.expanded.delete(key)
+  }
+  // A wait for anything this covered is a wait for a listing that no longer
+  // describes anything, so its answer must not put one back.
+  for (const key of [...state.loads.keys()]) {
+    if (under(key)) supersede(state, key)
   }
 }
 
@@ -111,12 +128,37 @@ function join(dir: string, name: string): string {
   return dir === '/' ? `/${name}` : `${dir}/${name}`
 }
 
+/** issue records that a wait for a directory's listing is beginning, and returns
+ * the ticket that wait has to present to write it. */
+function issue(state: TreeState, path: string): number {
+  const ticket = (state.loads.get(path) ?? 0) + 1
+  state.loads.set(path, ticket)
+  return ticket
+}
+
+/** supersede ends whatever wait is outstanding for a directory.
+ *
+ * Every ticket a later wait for that path can be given is higher than the ones
+ * already issued, so a wait that is still travelling finds its ticket stale and
+ * keeps its answer to itself. */
+function supersede(state: TreeState, path: string): void {
+  issue(state, path)
+}
+
 /**
  * loadDirectory fetches a directory's children, or returns the ones already
  * known. Loading on first use rather than walking the tree up front is what
  * keeps opening the manager bounded on a directory with thousands of children.
  *
  * Pass force to re-read a directory whose contents may have changed.
+ *
+ * Only the newest wait for a path may write it. Two waits overlap whenever a
+ * refresh and a navigation name the same directory -- or two navigations do --
+ * and the header stays live throughout, so the older answer can arrive last.
+ * Its listing describes the disk as it was when it was read, so storing it would
+ * leave the manager showing a directory it has already moved past, and the
+ * caller's own check cannot prevent that: by the time a caller has the answer,
+ * this write has happened.
  */
 export async function loadDirectory(
   state: TreeState,
@@ -127,7 +169,11 @@ export async function loadDirectory(
     const cached = state.children.get(path)
     if (cached) return cached
   }
+  // Issued after the cache check, because a call that answers from the cache
+  // makes no claim about the disk and must not retire a wait that does.
+  const ticket = issue(state, path)
   const result = await listDirectory(path)
+  if (state.loads.get(path) !== ticket) return result.entries
   state.children.set(path, result.entries)
   if (result.truncated) {
     state.truncated.add(path)

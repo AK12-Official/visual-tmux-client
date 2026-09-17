@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -159,6 +160,31 @@ func TestShutdownReleasesTheConfiguredRoots(t *testing.T) {
 	// TestClosingAServiceReleasesItsRootHandles, which asks the descriptor.
 	if !errors.Is(err, files.ErrPathNotAllowed) {
 		t.Fatalf("expected a released root set to refuse, got: %v", err)
+	}
+}
+
+// `files.enabled: false` is what an operator reaches for when the file manager
+// must not be available -- usually because the directories it was pointed at are
+// not usable from this process: not mounted yet, or belonging to somebody else.
+// Building the service resolved every configured root and opened a handle on
+// each, so a hub whose file manager was off refused to start over a root it would
+// never look at, taking the terminal and the session list down with it.
+func TestADisabledFileManagerStartsWithUnusableRoots(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "not-mounted")
+	cfg := config.DefaultConfig()
+	cfg.Files.Enabled = false
+	cfg.Files.Roots = []string{missing}
+	cfg.Server.Addr = "127.0.0.1:0"
+
+	built, err := New(&cfg, config.Provenance{}, nil, Options{
+		Backend:     &dummyBackend{},
+		ProcessFact: &dummyFactory{},
+	})
+	if err != nil {
+		t.Fatalf("a disabled file manager must not need its roots: %v", err)
+	}
+	if built.files.Enabled() {
+		t.Error("expected the file manager to be off")
 	}
 }
 

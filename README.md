@@ -173,7 +173,7 @@ files:
 
 ### File access
 
-`files.enabled: false` turns the whole capability off: every file operation is refused without touching the filesystem, and terminal and session operations are unaffected.
+`files.enabled: false` turns the whole capability off: every file operation is refused without touching the filesystem, and terminal and session operations are unaffected. The configured `roots` are not resolved or opened either, so a root that is missing or unreadable cannot stop a hub whose file manager is off — with the file manager on, the same root is a startup error. That is the setting to reach for when the directories this hub was pointed at are not usable from the process it runs as.
 
 By default there is **no directory containment**. File operations are bounded only by what the hub process's own operating-system user can already reach. That is deliberate, and it grants nothing new: the same bearer token also authorizes a full interactive terminal as that same user, so anyone holding the token can `cat` any file the account can read whether or not a root is configured. A `$HOME`-only default would break work on projects under `/srv`, `/data`, or `/var/log` while withholding nothing from the token holder.
 

@@ -60,7 +60,9 @@ function hubFetch(
     rename: Responder
     delete: Responder
     probe: Responder
-    read: Responder
+    // The read route answers both the manager's reads and the image preview's
+    // fetch of the same bytes, so this one is told which path was asked for.
+    read: (url: string) => Response | Promise<Response>
     // The listing is asked about different directories, so its override is given
     // the path it was asked for rather than being a fixed answer.
     list: (path: string) => Response | Promise<Response>
@@ -94,7 +96,7 @@ function hubFetch(
       // The probe is the same route asked with HEAD, which is how the manager
       // asks what a file is without transferring it.
       if (method === 'HEAD' && overrides.probe) return overrides.probe()
-      if (overrides.read) return overrides.read()
+      if (overrides.read) return overrides.read(url)
       return text('hello')
     }
     if (url.includes('/files/write')) {
@@ -413,6 +415,10 @@ test('an image that turns out to be over the bound is presented as information',
 
   assert.equal(wrapper.find('.image-preview').exists(), false, 'the image was rendered anyway')
   assert.equal(wrapper.find('.fm__info').exists(), true, 'no information panel was offered')
+  // And the panel gives the reason this file is not shown, which is the bound --
+  // not the fact that nobody read it, which is true of every image and would be
+  // a non-answer here.
+  assert.match(wrapper.find('.fm__info').text(), /binary or too large to preview/)
   const notices = (wrapper.emitted('notice') ?? []).flat()
   assert.ok(
     notices.some((text) => String(text).includes('larger than this view renders')),
@@ -842,6 +848,245 @@ test('a decode failure for a file that is gone is not read against the next one'
 // The editor stand-in has to model the editor's change set rather than a
 // plausible-looking one: a test written against a stand-in that composes
 // positions the wrong way is a green test over a document no user could produce.
+// A file opened as an image is never read: the preview fetches what it needs,
+// and its bytes are never decoded as text. The *name* is what made that sound,
+// and a rename replaces the name -- the file is the same file, and what it now
+// claims to be is a guess nothing has checked. Handing the editor an empty
+// document under the new name would put a Save button in front of the picture.
+test('a renamed image is read, rather than offered as an empty editor', async () => {
+  // The first read is the preview fetching the image for itself; the second is
+  // the one the rename starts, and the test holds it open.
+  const afterRename = deferred()
+  let reads = 0
+  hubFetch({
+    read: () => {
+      reads += 1
+      return reads === 1 ? text('PNGDATA') : afterRename.respond()
+    },
+  })
+  const wrapper = await mountManager()
+
+  await openFile(wrapper, 'photo.png')
+  await flush(2)
+  assert.equal(
+    wrapper.find('.image-preview__img').exists(),
+    true,
+    'the picture should have been previewed, not read',
+  )
+
+  await renameViaMenu(wrapper, 'photo.png', 'photo.txt')
+  await flush(2)
+
+  // Until that read answers, the tab is information about the file: the editor
+  // is never handed a document nobody has read, whether the read is travelling
+  // or fails.
+  assert.equal(
+    wrapper.findAll('.fm__editor').length,
+    0,
+    'the editor was offered for a file nobody had read',
+  )
+  assert.match(wrapper.find('.fm__info').text(), /have not been read/)
+
+  afterRename.release(text('hello'))
+  await flush()
+
+  // And once it answers, what the hub read is what the tab holds -- which is
+  // what a save would write.
+  const editors = wrapper.findAll('.fm__editor')
+  assert.equal(editors.length, 1, 'the renamed tab was not read')
+  assert.equal(instances[instances.length - 1].doc, 'hello')
+  wrapper.unmount()
+})
+
+// A rename to a name the editor would hold starts a read; a rename to a name it
+// would not -- a binary extension -- does not, because the editor is not what
+// such a name asks for. The tab is left holding nothing, and the panel has to say
+// that rather than describe the file: nobody has read it, so "binary" would be a
+// claim the manager has no basis for, and its size is not the reason either.
+test('a file renamed to a name nobody read is described as unread', async () => {
+  hubFetch()
+  const wrapper = await mountManager()
+
+  await openFile(wrapper, 'photo.png')
+  await flush(2)
+  await renameViaMenu(wrapper, 'photo.png', 'archive.zip')
+  await flush(2)
+
+  assert.equal(
+    wrapper.findAll('.fm__editor').length,
+    0,
+    'the editor was offered for a file nobody had read',
+  )
+  const panel = wrapper.find('.fm__info').text()
+  assert.match(panel, /have not been read/)
+  assert.doesNotMatch(panel, /binary or too large/, 'the panel described a file nothing had read')
+  wrapper.unmount()
+})
+
+// Two reads of one path can be in flight, because a tab can be renamed away from
+// a text name and back to it: the first answer to land is what makes the tab
+// editable, and a later one was asked for a tab that no longer exists in that
+// state. Writing it anyway would take the user's keystrokes with it and leave the
+// tab reporting itself saved against contents they never saw.
+test('a second read of a renamed tab does not overwrite what the user typed', async () => {
+  const reads: { respond: () => Promise<Response>; release: (res: Response) => void }[] = []
+  hubFetch({
+    // Both names are listed, so the test can rename the entry either way. A real
+    // hub would list whichever one exists; what this stands in for is a listing
+    // that is re-read after each rename the manager performs.
+    list: (path) =>
+      json({
+        path,
+        entries: [
+          { name: 'photo.png', is_dir: false, size: 5, mtime: 1000 },
+          { name: 'photo.txt', is_dir: false, size: 5, mtime: 1000 },
+        ],
+        truncated: false,
+      }),
+    read: (url) => {
+      // The image preview fetches its own bytes whenever the tab shows the
+      // picture again; the reads this test is about are the ones a rename starts,
+      // and those name the text path.
+      if (url.includes('photo.png')) return text('PNGDATA')
+      const wait = deferred()
+      reads.push(wait)
+      return wait.respond()
+    },
+  })
+  const wrapper = await mountManager()
+
+  await openFile(wrapper, 'photo.png')
+  await flush(2)
+  await renameViaMenu(wrapper, 'photo.png', 'photo.txt')
+  await flush(2)
+  // Away from the text name and back: nothing is read for an image name, and the
+  // tab is still unread when the name is a text one again -- so this second rename
+  // starts a second read of the *same* path.
+  await renameViaMenu(wrapper, 'photo.txt', 'photo.png')
+  await flush(2)
+  await renameViaMenu(wrapper, 'photo.png', 'photo.txt')
+  await flush(2)
+  assert.equal(reads.length, 2, 'expected two reads of the renamed tab')
+
+  // The first answer lands and makes the tab editable, and the user types.
+  reads[0].release(text('hello'))
+  await flush()
+  await type(' typed')
+  assert.equal(wrapper.find('.fm__dirty').exists(), true, 'the keystroke should have made it dirty')
+
+  // The second answer describes the tab as it was when that read was asked for,
+  // and must leave what is in it now alone.
+  reads[1].release(text('other'))
+  await flush()
+  assert.equal(instances[instances.length - 1].doc, 'hello typed')
+  assert.equal(
+    wrapper.find('.fm__dirty').exists(),
+    true,
+    'the tab reported itself saved against contents the user never saw',
+  )
+  wrapper.unmount()
+})
+
+// A read the hub has already granted goes on returning the file's contents after
+// the file is deleted, and it can land after the delete has swept the tabs it
+// found. That sweep is what removes the tabs that were open when the delete was
+// answered; this is the answer arriving behind it, which would install a tab
+// naming a path that is gone -- and whose save is answered not_found, with
+// nothing in the interface to get out of it with.
+test('a read that lands after the delete of its file installs no tab', async () => {
+  const read = deferred()
+  hubFetch({ read: read.respond })
+  const wrapper = await mountManager()
+
+  // The click starts a read the test holds open.
+  await row(wrapper, 'a.txt').find('.tree__label').trigger('click')
+  await flush(2)
+
+  // The user deletes the file while it is travelling, and the hub answers that
+  // before the read comes back.
+  await deleteViaMenu(wrapper, 'a.txt')
+  await flush(2)
+
+  read.release(text('hello'))
+  await flush()
+
+  assert.equal(
+    wrapper.findAll('.tabs__tab').length,
+    0,
+    'a tab was installed for a file that had been deleted',
+  )
+  // And the click is answered rather than swallowed: the user asked for a file
+  // and is told why they did not get it.
+  const notices = (wrapper.emitted('notice') ?? []).flat()
+  assert.ok(
+    notices.some((text) => String(text).includes('deleted before it could be opened')),
+    `expected a notice saying the file was deleted, got ${JSON.stringify(notices)}`,
+  )
+  wrapper.unmount()
+})
+
+// A menu is opened from the keyboard as well as with a pointer -- Shift+F10, or
+// the menu key, on a focused row -- and it declares itself a menu, which is a
+// promise about how it behaves. Taking the focus when it opens, moving it with
+// the arrow keys, and giving it back to the row it came from is what makes the
+// actions it holds reachable without a pointer.
+test('the context menu takes the focus, walks its items, and gives it back', async () => {
+  // Attached to the document, because focus is a property of a document: an
+  // element outside one cannot hold it, and nothing here would be observable.
+  resetEditors()
+  setToken('tok')
+  hubFetch({
+    list: (path) =>
+      json({
+        path,
+        entries: [
+          { name: 'a.txt', is_dir: false, size: 5, mtime: 1000 },
+          { name: 'dir', is_dir: true, size: 0, mtime: 1000 },
+        ],
+        truncated: false,
+      }),
+  })
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work' },
+    attachTo: document.body,
+  })
+  await flush()
+
+  const focused = () => (document.activeElement as HTMLElement | null)?.textContent?.trim()
+  const label = row(wrapper, 'dir').find('.tree__label')
+  await label.trigger('contextmenu')
+  await flush(2)
+
+  assert.equal(wrapper.find('.menu').exists(), true, 'the menu never opened')
+  assert.equal(focused(), 'New file', 'the menu did not take the focus when it opened')
+
+  // Keys go to whatever holds the focus, which is how a user presses them.
+  const press = async (key: string) => {
+    const item = document.activeElement
+    assert.ok(item instanceof HTMLElement, 'nothing held the focus to press a key on')
+    item.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
+    await flush(1)
+  }
+
+  // Down walks it in the order shown, and End reaches the last item a user can
+  // actually choose: Download is refused for a directory, and a disabled item is
+  // not a stop for the focus.
+  await press('ArrowDown')
+  assert.equal(focused(), 'New directory')
+  await press('End')
+  assert.equal(focused(), 'Delete', 'the focus stopped on an item that cannot be chosen')
+  await press('ArrowDown')
+  assert.equal(focused(), 'New file', 'ArrowDown past the last item should wrap')
+  await press('ArrowUp')
+  assert.equal(focused(), 'Delete', 'ArrowUp past the first item should wrap')
+
+  await press('Escape')
+  await flush(2)
+  assert.equal(wrapper.find('.menu').exists(), false, 'Escape did not close the menu')
+  assert.equal(document.activeElement, label.element, 'the focus did not go back to the row')
+  wrapper.unmount()
+})
+
 test('the editor stand-in applies a transaction the way the editor does', () => {
   const view = new EditorView({ doc: 'abcdef', extensions: [] })
 

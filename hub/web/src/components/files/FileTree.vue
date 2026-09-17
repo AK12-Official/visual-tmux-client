@@ -17,7 +17,7 @@ const emit = defineEmits<{
   (e: 'open', entry: Entry, path: string): void
   (e: 'select', path: string): void
   (e: 'toggle', path: string): void
-  (e: 'context', event: MouseEvent, entry: Entry, path: string): void
+  (e: 'context', event: MouseEvent, entry: Entry, path: string, opener: HTMLElement | null): void
 }>()
 
 // Two affordances per directory, because they are two different things: the
@@ -39,8 +39,16 @@ const truncated = computed(() => isTruncated(props.state, props.path))
 // claim there is nothing in there.
 const loaded = computed(() => cachedChildren(props.state, props.path) !== undefined)
 
+/** onContext passes the row itself along with the event.
+ *
+ * The menu the overlay opens is anchored to a place on screen, and a contextmenu
+ * the browser raised for the keyboard -- Shift+F10, or the menu key -- carries
+ * no pointer position to anchor it to. The row is what it is anchored to then,
+ * and where the focus goes back when the menu closes, so the overlay is given
+ * the element rather than having to find it again by name. */
 function onContext(event: MouseEvent, entry: Entry, path: string) {
-  emit('context', event, entry, path)
+  const opener = event.currentTarget
+  emit('context', event, entry, path, opener instanceof HTMLElement ? opener : null)
 }
 </script>
 

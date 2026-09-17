@@ -10,7 +10,9 @@ import {
   choosePreview,
   editable,
   presentation,
+  namesAnImage,
   renderMarkdown,
+  wantsText,
 } from './preview'
 
 test('choosePreview dispatches by kind', () => {
@@ -148,24 +150,30 @@ test('renderMarkdown returns what the sanitizer produced', () => {
 // must not be unmounted just because the user looked elsewhere. The second half
 // is why this is a question about a *tab*, not about the active one.
 test('the editor holds source, and nothing it must not render as text', () => {
-  // Never asked: the name is all there is to go on.
-  assert.equal(editable('main.go', 100, null), true)
-  assert.equal(editable('notes.md', 100, null), true)
-  assert.equal(editable('photo.png', 100, null), false)
-  assert.equal(editable('archive.zip', 100, null), false)
-  // The hub read it as binary: information, whatever the name says.
-  assert.equal(editable('main.go', 100, true), false)
-  assert.equal(editable('notes.md', 100, true), false)
   // The hub read it as text: the editor, whatever the name says -- which is what
   // asking it was for.
   assert.equal(editable('archive.zip', 100, false), true)
   assert.equal(editable('build.log', 100, false), true)
+  // The hub read it as binary: information, whatever the name says.
+  assert.equal(editable('main.go', 100, true), false)
+  assert.equal(editable('notes.md', 100, true), false)
+  // Nobody read it, so there is nothing for the editor to hold. A file is opened
+  // without reading only when its name says image, and the only way that answer
+  // and a text name meet is a rename -- which is not a reason to hand the editor
+  // a document nobody has, with a Save button beside it.
+  assert.equal(editable('main.go', 100, null), false)
+  assert.equal(editable('notes.md', 100, null), false)
+  assert.equal(editable('photo.png', 100, null), false)
+  assert.equal(editable('archive.zip', 100, null), false)
 })
 
 test('presentation follows the hub about what may be decoded as text', () => {
   assert.equal(presentation('photo.png', 100, null), 'image')
-  assert.equal(presentation('notes.md', 100, null), 'markdown')
-  assert.equal(presentation('main.go', 100, null), 'editor')
+  // Unread and not an image: there is nothing to decode, so nothing is offered
+  // as text, and what is shown is information about the file. This is the state
+  // a rename leaves a picture in, for as long as the read it starts takes.
+  assert.equal(presentation('notes.md', 100, null), 'info')
+  assert.equal(presentation('main.go', 100, null), 'info')
   // Binary the name did not suggest is information, which is the point in this
   // direction: decoding bytes the hub read as binary is what would replace them
   // on the next save, whatever the name suggests.
@@ -176,6 +184,24 @@ test('presentation follows the hub about what may be decoded as text', () => {
   // choice rather than a guess about the contents.
   assert.equal(presentation('archive.zip', 100, false), 'editor')
   assert.equal(presentation('notes.md', 100, false), 'markdown')
+})
+
+// The rename case those two answer for, asked directly: what the name alone
+// decides is whether the editor is what the file is *for*.
+test('a name asks for the editor, which is not the same as being shown in it', () => {
+  assert.equal(wantsText('main.go', 100), true)
+  assert.equal(wantsText('notes.md', 100), true)
+  assert.equal(wantsText('photo.png', 100), false)
+  assert.equal(wantsText('archive.zip', 100), false)
+
+  // And the other question the name is asked -- whether it says image at all --
+  // which is deliberately blind to size where choosePreview is not: it tells a
+  // picture that is being refused for its size from a file whose contents nobody
+  // has, and both of those reach the information panel.
+  assert.equal(namesAnImage('photo.png'), true)
+  assert.equal(namesAnImage('huge.png'), true)
+  assert.equal(namesAnImage('archive.zip'), false)
+  assert.equal(namesAnImage('main.go'), false)
 })
 
 // The classification settles whether bytes may be decoded as text, and an image

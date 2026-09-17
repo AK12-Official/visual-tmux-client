@@ -49,6 +49,31 @@ export function choosePreview(name: string, size: number): PreviewKind {
 }
 
 /**
+ * wantsText reports whether a name asks for the editor, before anything has been
+ * read.
+ *
+ * It is the open-time question -- `choosePreview` -- asked again later, which is
+ * what a rename needs: what changes is the name, and a name is all this has ever
+ * had to go on. See `presentation` for what is done with the answer.
+ */
+export function wantsText(name: string, size: number): boolean {
+  const byName = choosePreview(name, size)
+  return byName === 'editor' || byName === 'markdown'
+}
+
+/**
+ * namesAnImage reports whether a name says image, whatever its size.
+ *
+ * Size is not part of the answer, unlike `choosePreview`'s: this is asked about
+ * a tab the manager has not read, to tell a picture it is refusing for its size
+ * from a name it has no contents for at all. `choosePreview` answers the second
+ * one with 'info' too, which is why it cannot be used here.
+ */
+export function namesAnImage(name: string): boolean {
+  return classifyExtension(name) === 'image'
+}
+
+/**
  * presentation decides how a file's contents are shown, given the hub's
  * classification of them (see Classification in ./classification).
  *
@@ -68,6 +93,17 @@ export function choosePreview(name: string, size: number): PreviewKind {
  * the read found it under the bound: the file had shrunk since the listing, the
  * hub's answer was true, and the preview was still refused.
  *
+ * Null is a third answer, and a different one: nobody asked, because the manager
+ * opened the file without reading it. The name still decides what can be
+ * *shown* -- an image, which the preview fetches for itself -- but it cannot
+ * decide what may be *edited*, because the editor would be holding an empty
+ * document where the file's bytes are, and saving it would write that emptiness
+ * over them. A rename is what makes the two come apart: it replaces the name,
+ * and a file opened as an image under one name can end up under a name that asks
+ * for the editor. So nothing unread is offered as text. The read a rename starts
+ * is what settles it, and until that answer lands the file is shown for what it
+ * is here -- an image, or a file whose contents nobody can show.
+ *
  * It lives here rather than beside the open-file state because it is a
  * presentation rule: the module that owns the save and conflict rules has no
  * business importing the renderer to answer a question about a file name.
@@ -80,10 +116,17 @@ export function presentation(name: string, size: number, binary: Classification)
     // contents.
     return byName === 'markdown' ? 'markdown' : 'editor'
   }
-  if (binary === null) return byName
-  // Binary, which settles the text question and only that one. An image within
-  // the bound is still an image; anything else is information rather than a
-  // rendering of bytes nobody may decode.
+  // Binary, or nobody has read it at all. The two agree here, for neighbouring
+  // reasons: bytes the hub read as binary may not be decoded, and bytes nobody
+  // read are not in hand to decode -- so neither may be offered as text, and
+  // what is shown is information rather than a rendering. An image within the
+  // bound is still an image either way, because the image preview decodes
+  // nothing: it hands the response to the browser as an image.
+  //
+  // The unread case is the one a name can move: a file opened as an image is
+  // never read, and renamed to a name the editor would hold it would otherwise
+  // be handed an empty document to save over the original bytes. The read that
+  // follows a rename fills this in; this is what holds until it lands.
   return byName === 'image' ? 'image' : 'info'
 }
 

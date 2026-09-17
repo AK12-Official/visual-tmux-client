@@ -39,17 +39,45 @@ var PaneFormat = strings.Join([]string{
 // than guessed at: a mis-attributed title would be shown to the user as fact,
 // which is worse than showing no summary at all.
 //
-// Records are split on newlines before the field count is checked, so a newline
-// inside a field splits one pane's record in two. The tail is then usually
-// dropped, but if it carries enough separators of its own it parses as a record
-// in its own right -- and since the session name is its first field, that record
-// can name a session that exists, displacing that session's real summary with a
-// fragment of another pane's. Field-order is therefore not guaranteed against a
-// value containing a raw newline.
+// Records are split on newlines before the field count is checked, so a field
+// carrying the record terminator would not be read as one field. What follows
+// depends on which field it is:
 //
-// This line-based format assumes fields do not contain the record terminator.
-// Do not treat field-count validation as escaping or as a security boundary:
-// executable names and argv can contain newlines.
+//   - A break before the last field drops that pane's record -- the fields before
+//     the break are too few to parse -- and leaves the tail to be read, with the
+//     separators a forger writes into it and the fields that follow it in the
+//     real record, as a record of its own.
+//   - A break in the last field keeps the pane's record, read with its command
+//     truncated, and the tail may be read as a record of its own all the same.
+//
+// Either way a record can appear that no pane stands behind, and since a
+// record's first field is a session name, what it names is a session that
+// exists: that session's summary is then chosen from a fragment of another
+// pane's field. The field count does not detect either case and must not be read
+// as a defence -- it validates the shape of what it was given, and says nothing
+// about whether a value inside it held one field or two.
+// TestALineBreakInAFieldWouldNotBeDetected pins both outcomes, so that neither
+// has to be worked out from here.
+//
+// What keeps the terminator out of the fields is tmux, not this parser. A
+// session name and a window name containing a newline are refused when they are
+// set ("invalid session name", "invalid window name"), and a pane title
+// containing one is refused by select-pane -- silently, leaving the title as it
+// was, which is why the test asserts the title rather than a status. The indexes
+// and the flags are tmux's own numbers.
+// TestNamesTmuxRefusesToLetCarryALineBreak pins those three against a real
+// server, because none of it is this code's to guarantee: the assumption is
+// measured against tmux, and a version that stopped holding it would fail that
+// test rather than quietly mis-attribute a summary.
+//
+// The command field is the one a program names itself, and it is the one thing
+// here that no test covers: what tmux reports for it was seen to escape a line
+// break once, which later attempts could not reproduce, and a process whose own
+// name carries one could not be produced on this machine at all. That tmux
+// escapes control bytes on its way out is a real behaviour -- it is why the
+// separator in this file is printable, which the delimiter test pins -- so the
+// observation is recorded as the likely answer rather than dismissed. It is the
+// residual this comment exists to state.
 func ParsePanes(stdout string) []session.Pane {
 	out := make([]session.Pane, 0)
 	for _, line := range strings.Split(stdout, "\n") {

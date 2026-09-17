@@ -72,6 +72,72 @@ Roots are therefore a boundary against a caller, and against a replaced path com
 - **WHEN** roots are configured and a caller writes a new file whose parent directory is a symbolic link pointing outside every configured root
 - **THEN** the hub refuses the operation rather than creating the file at the resolved parent
 
+### Requirement: File and directory operations
+
+The hub SHALL support creating an empty file, creating a directory, renaming or moving a file or directory, and deleting a file or directory. Creating or renaming SHALL validate both the source and the destination against the access boundary. Creating a target that already exists SHALL be refused. Deleting a directory that contains entries SHALL require the caller to request recursive deletion, and SHALL be refused otherwise.
+
+A create request SHALL name the kind of entry it asks for, from the set the hub defines. A request that names none of them -- an absent field, or a spelling this hub does not have -- SHALL be refused rather than carried out as the creation of a file, since the caller asked for something else and would be told it succeeded. Every request on these routes SHALL be exactly one JSON object carrying the fields the route defines: an unknown field, a body with nothing in it, and a second value after the object SHALL each be refused, because acting on the part of such a request that is recognised would carry out something the caller did not write.
+
+#### Scenario: Create a file
+
+- **WHEN** a caller creates a file at a path inside a configured root whose parent exists and which does not already exist
+- **THEN** the hub creates an empty file at that path
+
+#### Scenario: Create a directory
+
+- **WHEN** a caller creates a directory at a path inside a configured root whose parent exists and which does not already exist
+- **THEN** the hub creates the directory
+
+#### Scenario: Create over an existing entry
+
+- **WHEN** a caller creates a file or directory at a path that already exists
+- **THEN** the hub refuses and leaves the existing entry unmodified
+
+#### Scenario: Parent does not exist
+
+- **WHEN** a caller creates an entry whose parent directory does not exist
+- **THEN** the hub refuses rather than creating intermediate directories
+
+#### Scenario: Rename within the boundary
+
+- **WHEN** a caller renames an existing entry to a path inside a configured root
+- **THEN** the entry is reachable at the new path and no longer at the old one
+
+#### Scenario: Rename across the boundary
+
+- **WHEN** a caller renames an entry to a destination outside every configured root
+- **THEN** the hub refuses and leaves the entry at its original path
+
+#### Scenario: Rename onto an existing entry
+
+- **WHEN** a caller renames an entry to a path that already exists
+- **THEN** the hub refuses and leaves both entries unmodified
+
+#### Scenario: Delete a non-empty directory without recursion
+
+- **WHEN** a caller deletes a directory that contains entries without requesting recursive deletion
+- **THEN** the hub refuses with a distinct error and removes nothing
+
+#### Scenario: Delete a non-empty directory recursively
+
+- **WHEN** a caller deletes a directory that contains entries and requests recursive deletion
+- **THEN** the hub removes the directory and its contents
+
+#### Scenario: Create names no kind of entry
+
+- **WHEN** a caller asks for a create without naming the kind of entry, or names a kind the hub does not define
+- **THEN** the hub refuses the request and creates nothing
+
+#### Scenario: A request carries a field the hub does not define
+
+- **WHEN** a caller's body on a create, rename, or delete route carries a field the hub does not define
+- **THEN** the hub refuses the request rather than acting on the fields it recognises
+
+#### Scenario: A request body is not one JSON object
+
+- **WHEN** a caller's body on one of those routes is empty, is not JSON, or carries a second value after the object
+- **THEN** the hub refuses the request
+
 ### Requirement: Directory listing
 
 The hub SHALL return the immediate children of a directory, each carrying at least its name, whether it is a directory, its size, and its modification time. A child that is a symbolic link SHALL be described by what it points at, within the boundary: a link to a directory SHALL be reported as a directory, so the browser offers it for expanding rather than for opening. A link whose target lies outside every configured root SHALL NOT be described by that target, so a listing never answers with the size or modification time of a path the caller may not name. An entry that cannot be described at all SHALL be reported as present without a size or modification time, rather than failing the listing or reporting the link's own size in place of a target's; a link whose target is missing is one of those. Listing SHALL order directories before files, and each group by name. Listing SHALL be bounded by the configured maximum number of entries and SHALL report whether the result was truncated. Listing a directory with no children SHALL succeed and return an empty result, not an error.
@@ -316,6 +382,8 @@ The hub's classification answers whether a file's bytes may be decoded as text, 
 
 Rendering SHALL be bounded independently of the transfer limit, so that a large file cannot freeze the interface: an image larger than the preview bound SHALL NOT be rendered, and rendered Markdown SHALL be limited to a bounded prefix of the source. The bound SHALL be applied to the size the hub reports at the moment of the read rather than to a size a directory listing reported earlier, and no content beyond it SHALL be transferred for a preview that will not use it. A file found to be over the bound SHALL be presented as information with a download action, and the user SHALL be told why.
 
+A file the manager opened without reading has no contents in hand, and only an image is opened that way: the preview fetches what it needs, and the bytes are never decoded as text. What such a file is *called* SHALL NOT decide that its contents may be shown in the editor, because there are none to show. A rename that gives it a name the editor would hold SHALL start a read instead, and the hub's answer SHALL decide how the file is presented. Until that answer arrives the file SHALL be presented as information about the file, so that a picture renamed to a text extension cannot be saved over with a document nobody read.
+
 #### Scenario: Image file
 
 - **WHEN** the user opens a file whose type is a previewable image within the preview bound
@@ -366,11 +434,25 @@ Rendering SHALL be bounded independently of the transfer limit, so that a large 
 - **WHEN** the user opens a file detected as binary
 - **THEN** the browser presents file information and a download action instead of the contents
 
+#### Scenario: An image renamed to a name the editor would hold
+
+- **WHEN** the user renames a file that is open as an image to a name the editor would hold
+- **THEN** the browser reads the file and presents it according to the hub's answer, rather than offering the editor an empty document
+
+#### Scenario: A renamed file whose read has not answered
+
+- **WHEN** a file opened as an image has been renamed to a name the editor would hold, and the read that rename started has not yet answered
+- **THEN** the browser presents it as information about the file, and the editor is not offered for it
+
 ### Requirement: Browser file manager
 
 The browser SHALL provide a file manager opened from the terminal for the current session. On opening, the browser SHALL resolve the manager's starting directory from the session's active pane working directory. That starting directory SHALL be captured once, so that later changes to the active pane do not move an already-open manager. The browser SHALL then let the user navigate freely within the boundary, including moving to a parent directory and selecting any directory in the tree as the current one. When the pane working directory is not permitted by the boundary, the browser SHALL open at a permitted directory instead and inform the user that it did so. The manager SHALL load directory contents on demand as the user expands the tree. The manager SHALL offer creating a file, creating a directory, renaming, deleting, and downloading, and SHALL require the user to confirm a delete before it is performed.
 
 The browser SHALL NOT let the deletes it sends race the saves it sends. The hub's last check before replacing a file and the replacement itself are two adjacent system calls, so a write landing between them leaves the file present at a path the user has just been told it was deleted from, while the delete's own answer reports success. Before sending a delete the browser SHALL wait for the writes already travelling that name the entry or anything beneath it, and it SHALL refuse to send a save whose path, or a directory holding it, has a delete in flight rather than letting the two race. This orders the browser's own requests against each other; a write from any other process is not ordered by it, which is specified under Optimistic concurrent writes.
+
+The manager SHALL be operable without a pointer. Its context menu SHALL take the focus when it opens, SHALL move that focus among the actions a user can choose -- an action that cannot be chosen is not a stop -- and SHALL return it to the entry the menu was opened from when it closes. A menu the browser raised for the keyboard SHALL be anchored to that entry, because such an event carries no pointer position to open at.
+
+The manager SHALL NOT open a tab for a file whose contents it has asked the hub for when its own delete of that file, or of a directory holding it, is answered before that answer arrives. The read was granted before the delete, so it still returns the file's contents; a tab built from them would name a path that no longer exists, and every later save of it could only be refused. A delete SHALL record what it removed for the reads that were travelling when it was answered, and those reads SHALL install nothing.
 
 #### Scenario: Open from the terminal
 
@@ -416,3 +498,31 @@ The browser SHALL NOT let the deletes it sends race the saves it sends. The hub'
 
 - **WHEN** a file operation is refused by the hub
 - **THEN** the browser reports the reason using the application's existing notification mechanism and leaves the manager usable
+
+#### Scenario: The context menu from the keyboard
+
+- **WHEN** the user opens an entry's context menu from the keyboard and then closes it
+- **THEN** the menu holds the focus while it is open, the arrow keys move between the actions that can be chosen, and the focus returns to that entry when it closes
+
+#### Scenario: A file deleted while its contents were being read
+
+- **WHEN** the user deletes a file whose contents the browser has already asked the hub for, and the delete is answered before that read answers
+- **THEN** the browser opens no tab for it and reports that it was deleted
+
+## ADDED Requirements
+
+### Requirement: Disabled file manager
+
+When the hub's file capability is disabled, the hub SHALL refuse every file operation without touching the filesystem, and it SHALL NOT resolve or open the configured roots. A root that cannot be used supplies no boundary to a capability that is off, and refusing to start over one would take down operations that have nothing to do with files.
+
+The hub SHALL therefore start, and serve its terminal and session operations, with a configuration whose roots cannot be used, as long as the capability is disabled. With the capability enabled the same roots SHALL be resolved while the configuration loads, so that one which cannot enclose anything is reported at startup rather than surfacing later as every operation being refused.
+
+#### Scenario: Disabled with a root that cannot be used
+
+- **WHEN** the hub is configured with the file capability disabled and a root that does not exist
+- **THEN** the hub starts, and its file operations are refused without the filesystem being touched
+
+#### Scenario: Enabled with a root that cannot be used
+
+- **WHEN** the hub is configured with the file capability enabled and a root that does not exist
+- **THEN** the configuration is refused and the root is reported

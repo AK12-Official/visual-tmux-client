@@ -74,11 +74,30 @@ func (s *handlerState) filesAvailable(w http.ResponseWriter) bool {
 	return true
 }
 
-// decodeFileRequest reads a JSON body under the global request-body limit, which
-// is generous for these requests: none of them carries file content.
+// decodeFileRequest reads the one JSON object every file request carries, under
+// the global request-body limit, which is generous for these requests: none of
+// them carries file content.
+//
+// One object, exactly. A body that carries a field this hub does not know, a
+// second value after the object, or nothing at all is refused rather than read
+// for the parts that are understood. The browser and the hub are built from one
+// source and ship together, so a field one of them does not know is a mistake
+// rather than a newer client talking to an older hub -- and ignoring it would
+// carry out a request the caller did not write, on a route that creates, moves,
+// or deletes something.
 func (s *handlerState) decodeFileRequest(w http.ResponseWriter, r *http.Request, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxRequestBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(target); err != nil && !errors.Is(err, io.EOF) {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return false
+	}
+	// Decode reads one value. What follows it is either whitespace, which ends
+	// the stream, or a second request that this route has no answer for -- and
+	// reading the first one while ignoring the second is how a body carrying two
+	// of them would be answered by whichever came first.
+	if err := decoder.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return false
 	}
@@ -225,11 +244,35 @@ func (s *handlerState) createEntry(w http.ResponseWriter, r *http.Request) {
 	if !s.decodeFileRequest(w, r, &req) {
 		return
 	}
-	if err := s.files.Create(r.Context(), req.Path, req.Kind == fileKindDirectory); err != nil {
+	isDir, ok := createKind(req.Kind)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if err := s.files.Create(r.Context(), req.Path, isDir); err != nil {
 		mapFileError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// createKind reads the kind a create request named, and reports whether it named
+// one at all.
+//
+// Nothing is rounded down to a file: a request whose kind is absent, or is a
+// spelling of a kind this hub does not have, would otherwise create a file at
+// the named path and answer that it succeeded -- to a caller that asked for
+// something else, and whose own listing would then show the entry it did not
+// mean to make.
+func createKind(kind string) (isDir bool, ok bool) {
+	switch kind {
+	case fileKindFile:
+		return false, true
+	case fileKindDirectory:
+		return true, true
+	default:
+		return false, false
+	}
 }
 
 func (s *handlerState) renameEntry(w http.ResponseWriter, r *http.Request) {

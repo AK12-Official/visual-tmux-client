@@ -216,16 +216,60 @@ func TestMapFileErrorSeesThroughWrapping(t *testing.T) {
 	}
 }
 
+// A disabled manager is answered without the service being consulted, on every
+// route: the capability is off, so nothing looks at a path and nothing is
+// attempted on the caller's behalf. Every route, rather than one of them,
+// because this gate is what makes it safe to build a disabled service with no
+// boundary at all -- see the composition root's newFileService. A route that
+// lost the check would be an unrestricted file manager wearing a disabled one's
+// configuration.
 func TestFileRoutesAnswerADisabledManagerWithoutReachingTheService(t *testing.T) {
-	svc := &mockFileService{disabled: true, listFn: func(string) (files.ListResult, error) {
-		t.Error("a disabled manager must not reach the service")
-		return files.ListResult{}, nil
-	}}
-	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+	touched := ""
+	mark := func(what string) { touched = what }
+	svc := &mockFileService{
+		disabled: true,
+		listFn: func(string) (files.ListResult, error) {
+			mark("list")
+			return files.ListResult{}, nil
+		},
+		readFn: func(string) (files.ReadResult, error) {
+			mark("read")
+			return files.ReadResult{}, nil
+		},
+		writeFn: func(string, io.Reader, int64, *files.ExpectedMtime) (files.WriteResult, error) {
+			mark("write")
+			return files.WriteResult{}, nil
+		},
+		createFn: func(string, bool) error { mark("create"); return nil },
+		renameFn: func(string, string) error { mark("rename"); return nil },
+		deleteFn: func(string, bool) error { mark("delete"); return nil },
+		startFn:  func(string) (string, bool) { mark("start directory"); return "", false },
+	}
+	sessions := &mockSessionService{
+		sessions: []session.Session{{Name: "work"}},
+		paneDir:  "/home/user/project",
+	}
+	router := NewRouter(testRouterConfig("tok", nil), sessions, svc, &mockTicketIssuer{}, nil)
 
-	rec := authedGet(t, router, "/api/hosts/local/files/list?path=/tmp")
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected a disabled manager to answer 404, got %d", rec.Code)
+	for _, route := range fileRoutes() {
+		// The working-directory route is not refused and is not meant to be: it
+		// reports the session's own directory, and asks the file manager only to
+		// substitute a permitted one when a boundary exists, so a disabled manager
+		// changes nothing about its answer (see
+		// TestWorkingDirectoryRouteFlagsASubstitutedDirectory). What it shares with
+		// the rest is the part under test here -- that the disabled manager is not
+		// consulted -- so it stays in the loop for that and is not asserted to 404.
+		refused := strings.Contains(route.target, "/files/")
+		t.Run(route.method+" "+route.target, func(t *testing.T) {
+			touched = ""
+			rec := authedRequest(t, router, route.method, route.target, route.body)
+			if refused && rec.Code != http.StatusNotFound {
+				t.Errorf("expected a disabled manager to answer 404, got %d", rec.Code)
+			}
+			if touched != "" {
+				t.Errorf("a disabled manager reached the service: %s", touched)
+			}
+		})
 	}
 }
 
@@ -503,6 +547,84 @@ func TestFileOperationRoutesCarryTheirBodies(t *testing.T) {
 	}
 	if deleted.path != "/tmp/a" || !deleted.recursive {
 		t.Errorf("delete decoded %+v", deleted)
+	}
+}
+
+// The create route carried out whatever the body said, including a body that did
+// not say what to create: `kind` was compared against the name for a directory
+// and everything else -- absent, misspelled, from another version -- created a
+// file. A caller that asked for a directory and was handed a file at that path,
+// with a success status, has been told something untrue about its own filesystem.
+func TestCreateRouteRequiresAKindItKnows(t *testing.T) {
+	created := 0
+	var lastDir bool
+	svc := &mockFileService{
+		createFn: func(_ string, isDir bool) error {
+			created++
+			lastDir = isDir
+			return nil
+		},
+	}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+
+	for _, body := range []string{
+		`{"path":"/tmp/x","kind":"directory"}`,
+		`{"path":"/tmp/x","kind":"DIR"}`,
+		`{"path":"/tmp/x","kind":""}`,
+		`{"path":"/tmp/x"}`,
+		`{}`,
+	} {
+		rec := authedRequest(t, router, http.MethodPost, "/api/hosts/local/files/create", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: expected a refusal, got %d", body, rec.Code)
+		}
+	}
+	if created != 0 {
+		t.Errorf("expected nothing to be created, got %d creations", created)
+	}
+
+	// Both kinds it does know still work, so the refusal above is about the value
+	// and not about the field.
+	for body, wantDir := range map[string]bool{
+		`{"path":"/tmp/x","kind":"file"}`: false,
+		`{"path":"/tmp/x","kind":"dir"}`:  true,
+	} {
+		rec := authedRequest(t, router, http.MethodPost, "/api/hosts/local/files/create", body)
+		if rec.Code != http.StatusNoContent {
+			t.Errorf("%s: expected 204, got %d", body, rec.Code)
+		}
+		if lastDir != wantDir {
+			t.Errorf("%s: expected isDir=%v, got %v", body, wantDir, lastDir)
+		}
+	}
+}
+
+// Every file request is one JSON object, and the routes act on what it says. A
+// field this hub does not know, a second object after the first, and no body at
+// all are refused rather than read for the parts that are understood: silently
+// ignoring what it does not recognise is how a create, a move, or a delete turns
+// into an action the caller did not ask for.
+func TestFileRequestBodiesAreOneKnownObject(t *testing.T) {
+	svc := &mockFileService{
+		createFn: func(string, bool) error { return nil },
+		renameFn: func(string, string) error { return nil },
+		deleteFn: func(string, bool) error { return nil },
+	}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+
+	for _, route := range []string{"create", "rename", "delete"} {
+		for _, body := range []string{
+			``,
+			`{"path":"/tmp/x","kind":"file","extra":1}`,
+			`{"path":"/tmp/x","kind":"file"}{"path":"/tmp/y","kind":"file"}`,
+			`{"path":"/tmp/x","kind":"file"} trailing`,
+			`not json`,
+		} {
+			rec := authedRequest(t, router, http.MethodPost, "/api/hosts/local/files/"+route, body)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("%s %s: expected a refusal, got %d", route, body, rec.Code)
+			}
+		}
 	}
 }
 

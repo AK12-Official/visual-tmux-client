@@ -20,10 +20,10 @@ import {
 import { basename, dirname, joinPath, quoteForShell } from '../../files/pathUtils'
 import { createPending } from '../../files/pending'
 import { reasonFor as reasonForCode } from '../../files/reasons'
-import { createRenames } from '../../files/renames'
+import { createPathChanges } from '../../files/pathChanges'
 import { getConfig } from '../../config'
 import type { Classification } from '../../files/classification'
-import { choosePreview, editable, presentation } from '../../files/preview'
+import { choosePreview, editable, namesAnImage, presentation, wantsText } from '../../files/preview'
 import {
   anyDirty,
   beginSave,
@@ -69,7 +69,15 @@ const navError = ref('')
 const tabs = ref<OpenFile[]>([])
 const activePath = ref<string | null>(null)
 const markdownView = reactive(new Map<string, 'source' | 'preview'>())
-const menu = ref<{ x: number; y: number; entry: Entry; path: string } | null>(null)
+const menu = ref<{
+  x: number
+  y: number
+  entry: Entry
+  path: string
+  /** opener is the row the menu was opened from, and where the focus goes back
+   * to when it closes. Null when the event carried no element to return to. */
+  opener: HTMLElement | null
+} | null>(null)
 
 // navigationAt is the ticket of the most recent goTo; an earlier one that
 // finishes later must not write. opening holds the paths being read right now.
@@ -120,6 +128,21 @@ const editorVisible = computed(
   () =>
     preview.value === 'editor' || (preview.value === 'markdown' && activeIsMarkdownSource.value),
 )
+// notShown is why a file presented as information is not shown. The reasons are
+// different facts and the panel says which one holds. A file whose bytes the hub
+// read as binary, or an image too large to render, has a reason of its own that
+// has nothing to do with reading. A tab that holds nothing *because* nobody read
+// the file is the one a rename leaves behind: the name no longer says image, so
+// there is no preview to fetch and no contents to edit, and the panel says that
+// rather than describing the file as something nobody has looked at. An image
+// name is the one case left out of it -- the size may be the reason, and the
+// image preview is what knows it.
+const notShown = computed(() => {
+  const file = active.value
+  if (file === null) return ''
+  if (file.binary === null && !namesAnImage(file.name)) return 'its contents have not been read'
+  return 'it is binary or too large to preview'
+})
 
 watch(dirty, (value) => emit('dirty-change', value), { immediate: true })
 
@@ -152,6 +175,24 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
 }
 
+/** reportRemoved says that a file the hub had already been asked for was deleted
+ * before the answer landed.
+ *
+ * A read this manager has sent is granted before the answer arrives, so a delete
+ * answered in between does not stop it: the contents come back for a path that
+ * is gone. The delete sweeps the tabs it finds afterwards, and this is the other
+ * half of that sweep -- the answer that lands after it would install a tab
+ * naming nothing, whose save is answered not_found with no way out through the
+ * interface. What records that is the delete itself, for the reads that were
+ * travelling when it was answered; see files/pathChanges.ts.
+ *
+ * A directory being deleted takes its open files with it, which resolves the
+ * same way, so there is one thing to say about both. Naming the file rather than
+ * the path because the name is what the user clicked. */
+function reportRemoved(name: string) {
+  emit('notice', `${name} was deleted before it could be opened.`, 'warning')
+}
+
 /** openWithoutReading opens a tab for a file whose contents are not read: an
  * image, which the preview fetches for itself, or something the hub read as
  * binary. The size is whichever of the two observations is truthful.
@@ -168,7 +209,11 @@ function openWithoutReading(
   size: number,
   binary: Classification,
 ) {
-  const at = renames.resolve(path, startedAt)
+  const at = changes.resolve(path, startedAt)
+  if (at === null) {
+    reportRemoved(entry.name)
+    return
+  }
   if (tabs.value.some((tab) => tab.path === at)) {
     activePath.value = at
     return
@@ -321,7 +366,7 @@ async function openFile(entry: Entry, path: string) {
   // disagree about what they are showing.
   if (opening.has(path)) return
   opening.add(path)
-  const startedAt = renames.generation()
+  const startedAt = changes.generation()
 
   try {
     const kind = choosePreview(entry.name, entry.size)
@@ -360,7 +405,14 @@ async function openFile(entry: Entry, path: string) {
     // whatever is at that name now -- possibly a file the user has just created
     // there -- and following an older record would open a different file under
     // the wrong name and then save over it.
-    const at = renames.resolve(path, startedAt)
+    const at = changes.resolve(path, startedAt)
+    // A delete of this path, or of a directory holding it, was answered while
+    // this read was travelling: the answer describes a file that is gone, and
+    // installing it would leave a tab naming nothing.
+    if (at === null) {
+      reportRemoved(entry.name)
+      return
+    }
     // Two paths can resolve to one name after a rename, and a click on the new
     // name during the flight arrives with a different one -- so the check at the
     // top has to happen again here, or two tabs end up sharing a path.
@@ -389,7 +441,7 @@ async function openFile(entry: Entry, path: string) {
     opening.delete(path)
     // The record only exists for reads that are travelling; with none left it
     // would start redirecting files created at those names later on.
-    if (opening.size === 0) renames.clear()
+    if (opening.size === 0) changes.clear()
   }
 }
 
@@ -502,10 +554,11 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
   }
 }
 
-// renames records where a rename moved a path, for the reads that were travelling
-// when it happened. See files/renames.ts for why the record is scoped to the read
-// rather than consulted wholesale.
-const renames = createRenames()
+// changes records what happened to a path -- a rename that moved it, a delete
+// that removed it -- for the reads that were travelling when it happened. See
+// files/pathChanges.ts for why each record is scoped to the read rather than
+// consulted wholesale.
+const changes = createPathChanges()
 
 /** liveTab is the tab as it is now, by session.
  *
@@ -657,7 +710,7 @@ async function createHere(isDir: boolean) {
  * the UI. Renaming a directory carries its open files with it. */
 function retargetTabs(path: string, target: string, name: string) {
   const prefix = `${path}/`
-  renames.record(path, target)
+  changes.record(path, target)
 
   // Where each tab that followed the rename ends up. A name freed outside the
   // manager -- a file removed from the terminal -- can already have a tab on it,
@@ -676,6 +729,25 @@ function retargetTabs(path: string, target: string, name: string) {
     const names = lost.map((tab) => tab.name).join(', ')
     emit('notice', `Unsaved changes in ${names} were dropped: ${target} replaced that name.`, 'warning')
   }
+  // A tab nobody has read was opened without reading, and its *name* is the
+  // reason: an image goes to the preview, which fetches what it needs, and its
+  // bytes are never decoded as text. A rename replaces the name and with it the
+  // reason -- the file is the same file, and what it now claims to be is a guess
+  // nothing has checked. So a tab that follows a rename to a name the editor
+  // would hold is read at that name, and becomes whatever the hub says it is:
+  // text to edit, or a file to download. Until the answer lands, `presentation`
+  // keeps the unread tab out of the editor, which is what stops an empty
+  // document from standing in front of bytes nobody read.
+  //
+  // Collected before the tabs are moved, because the first party that changes
+  // the tab's name is the assignment below.
+  const unread = tabs.value.flatMap((tab) => {
+    const destination = moving.get(tab.id)
+    if (destination === undefined) return []
+    const renamed = tab.path === path ? name : tab.name
+    if (tab.binary !== null || !wantsText(renamed, tab.size)) return []
+    return [{ id: tab.id, path: destination }]
+  })
   tabs.value = tabs.value
     .filter((tab) => moving.has(tab.id) || !taken.has(tab.path))
     .map((tab) => {
@@ -683,6 +755,7 @@ function retargetTabs(path: string, target: string, name: string) {
       if (destination === undefined) return tab
       return { ...tab, path: destination, name: tab.path === path ? name : tab.name }
     })
+  for (const tab of unread) void readRenamedTab(tab.id, tab.path)
 
   if (activePath.value === path) activePath.value = target
   else if (activePath.value?.startsWith(prefix)) {
@@ -699,6 +772,46 @@ function retargetTabs(path: string, target: string, name: string) {
       markdownView.delete(key)
       markdownView.set(target + key.slice(path.length), view)
     }
+  }
+}
+
+/** readRenamedTab reads the file a tab was opened on without reading, after a
+ * rename gave it a name that asks to be decoded as text.
+ *
+ * The tab's session rather than its path identifies it, because what is being
+ * filled in is the state of an editing session that followed the file. That
+ * state is also what decides whether the answer is still wanted, and it is
+ * checked before anything is written: only a tab that is still *unread* is
+ * filled in. Two reads of one path can be in flight -- renamed to a text name,
+ * renamed back to an image name, renamed to the text name again -- and the first
+ * of them to land is what makes the tab editable. Letting a later answer replace
+ * that would take the user's keystrokes with it and leave the tab reporting
+ * itself saved against contents they never saw. The path is checked as well,
+ * since a tab that has moved on names another file.
+ *
+ * What comes back replaces the contents, the observation, and the hub's
+ * classification together, so the tab describes the file the hub read rather
+ * than the name it was given. A hub that answers not_found leaves the tab as it
+ * is: it says the file is not there, which the tab now shows as information,
+ * and reopening it reports the same thing in the same words. */
+async function readRenamedTab(id: number, path: string) {
+  try {
+    const contents = await readFile(path)
+    const live = liveTab(id)
+    if (!live || live.path !== path || live.binary !== null) return
+    tabs.value = tabs.value.map((tab) =>
+      tab.id === id
+        ? {
+            ...tab,
+            text: contents.text,
+            saved: contents.text,
+            stamp: contents.stamp,
+            binary: contents.binary,
+          }
+        : tab,
+    )
+  } catch (err) {
+    report(err, `Could not open ${basename(path)}`)
   }
 }
 
@@ -768,6 +881,15 @@ async function deleteTarget(entry: Entry, path: string) {
     await saving.idle(path)
 
     await deleteEntry(path, entry.is_dir)
+
+    // The hub has answered that the entry is gone, and that is what the reads
+    // still travelling need to know: one of them was granted before this delete
+    // was sent, so it comes back with contents for a path that has been removed,
+    // and it can land after the sweep below. The record is what makes that sweep
+    // a rule rather than a moment. It is kept before the sweep rather than after,
+    // because there is no await between the answer and this line: an answer that
+    // arrives from here on finds it.
+    changes.recordRemoval(path)
 
     // Filtered by path where the answer lands, not by the set captured before
     // the request: a tab opened while the delete travelled names a file that is
@@ -839,7 +961,7 @@ function insertPath(path: string) {
 
 function onMenuAction(action: string) {
   const target = menu.value
-  menu.value = null
+  closeMenu()
   if (!target) return
   switch (action) {
     case 'new-file':
@@ -866,8 +988,49 @@ function onMenuAction(action: string) {
   }
 }
 
-function openMenu(event: MouseEvent, entry: Entry, path: string) {
-  menu.value = { x: event.clientX, y: event.clientY, entry, path }
+function openMenu(event: MouseEvent, entry: Entry, path: string, opener: HTMLElement | null) {
+  menu.value = { ...anchorFor(event, opener), entry, path, opener }
+}
+
+/** anchorFor is where a menu for this event should open.
+ *
+ * A press carries the pointer's own position, and the menu belongs there. A
+ * contextmenu the browser raised for the keyboard -- Shift+F10, or the menu key
+ * on a focused row -- carries no pointer at all: what it reports is the origin,
+ * or wherever the mouse was last left, and a menu opened at either is a menu the
+ * user has to go looking for. The row that raised it is the anchor in that case,
+ * and the test is whether the event's position is inside the row: a press on the
+ * row is inside by construction, so anything else is a position that does not
+ * describe this press. */
+function anchorFor(event: MouseEvent, opener: HTMLElement | null): { x: number; y: number } {
+  if (opener === null) return { x: event.clientX, y: event.clientY }
+  const box = opener.getBoundingClientRect()
+  const inside =
+    event.clientX >= box.left &&
+    event.clientX <= box.right &&
+    event.clientY >= box.top &&
+    event.clientY <= box.bottom
+  if (inside) return { x: event.clientX, y: event.clientY }
+  // Under the row rather than over it, which is where a press on it would put a
+  // menu and where the entry stays visible while the menu is up.
+  return { x: box.left + 8, y: box.bottom }
+}
+
+/** closeMenu dismisses the menu, and hands the keyboard back to the row it was
+ * opened from.
+ *
+ * The menu takes the focus when it opens, so it has to give it back: closing it
+ * without that leaves the focus nowhere, and a keyboard user who opened it from
+ * a row has to walk back to that row through every control between. The row may
+ * be gone by now -- the action just taken may have deleted or renamed it -- in
+ * which case there is nothing to focus and the browser's own default stands.
+ *
+ * preventScroll because a dismissal is not a navigation: the row is where the
+ * user left it, and focusing it must not drag the tree back to it. */
+function closeMenu() {
+  const opener = menu.value?.opener ?? null
+  menu.value = null
+  if (opener !== null && opener.isConnected) opener.focus({ preventScroll: true })
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -890,7 +1053,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
 </script>
 
 <template>
-  <div class="fm" @click.self="menu = null">
+  <div class="fm" @click.self="closeMenu()">
     <header class="fm__bar">
       <button
         class="fm__btn"
@@ -967,10 +1130,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
                 :source="active.text"
               />
               <div v-else-if="!editorVisible" class="fm__info">
-                <p class="fm__state">
-                  {{ active.name }} is not shown here: it is
-                  {{ preview === 'info' ? 'binary or too large to preview' : 'not previewable' }}.
-                </p>
+                <p class="fm__state">{{ active.name }} is not shown here: {{ notShown }}.</p>
                 <p class="fm__meta">{{ formatSize(active.size) }} · {{ active.path }}</p>
                 <button class="fm__btn" type="button" @click="download(active.path, active.name)">
                   Download
@@ -1016,7 +1176,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
       @download="onMenuAction('download')"
       @copy-path="onMenuAction('copy-path')"
       @insert-path="onMenuAction('insert-path')"
-      @close="menu = null"
+      @close="closeMenu"
     />
   </div>
 </template>

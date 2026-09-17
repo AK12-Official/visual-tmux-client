@@ -152,10 +152,30 @@ func New(cfg *config.Config, prov config.Provenance, staticFS fs.FS, opt ...Opti
 	}, nil
 }
 
-// newFileService builds the file manager's service. The roots are resolved once,
-// here, so a root that cannot enclose anything is a startup error rather than
-// every later operation being refused.
+// newFileService builds the file manager's service.
+//
+// A disabled file manager is built without a boundary: its roots are never
+// resolved, and no handle is opened on one. Opening a root is filesystem work
+// that `enabled: false` promises does not happen, and a root that is missing, or
+// not readable by this process, must not stop a hub that will never look at a
+// path. The limits are carried as configured, because they are what the operator
+// wrote and there is nothing here for a hidden override to protect.
+//
+// What this returns is therefore *not* a boundary: with no roots, every
+// operation it could be asked for is unbounded by directories, whatever limits
+// it carries -- the operations that change the filesystem consult no limit at
+// all. What keeps it out of reach is the gate, not the construction: every file
+// route refuses on the same Enabled flag before it calls a method, and the one
+// route that asks for a starting directory checks it too. The gate is
+// load-bearing rather than incidental, which is what
+// TestFileRoutesAnswerADisabledManagerWithoutReachingTheService pins.
 func newFileService(cfg *config.Config) (*files.Service, error) {
+	if !cfg.Files.Enabled {
+		return files.NewService(files.Options{
+			MaxFileSize:   cfg.Files.MaxFileSize,
+			MaxDirEntries: cfg.Files.MaxDirEntries,
+		}), nil
+	}
 	roots, err := files.NewRootSet(cfg.Files.Roots)
 	if err != nil {
 		return nil, fmt.Errorf("file roots: %w", err)

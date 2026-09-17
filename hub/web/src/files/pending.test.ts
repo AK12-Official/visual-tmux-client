@@ -169,7 +169,7 @@ test('an idle wait on a file does not wait on its directory', async () => {
   await pending.idle('/d/dir/f.txt')
 })
 
-// A prefix is a path element, not a string -- the same rule renames.ts states for
+// A prefix is a path element, not a string -- the same rule pathChanges.ts states for
 // the same reason -- and both directions have to hold it.
 test('a path is a whole element, not the start of one', async () => {
   const pending = createPending()

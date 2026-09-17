@@ -343,6 +343,15 @@ func validateStringList(valNode *yaml.Node, fullPath string) error {
 // Resolution happens here, while the configuration loads, so that a root which
 // cannot enclose anything is reported at startup rather than surfacing later as
 // every operation being refused.
+//
+// A disabled file manager resolves nothing. Its roots are not a boundary for
+// anything -- nothing resolves a path against them, and nothing opens them -- so
+// resolving them here would only make a hub that never reads the filesystem
+// refuse to start over a root it would not use: a directory that is not mounted
+// yet, or not readable by the hub's user, is exactly the case `enabled: false`
+// is reached for. The limits are still checked, because they are a range and not
+// a property of this machine, and a configuration that is wrong should be wrong
+// where it is written.
 func validateFilesConfig(f *FilesConfig) error {
 	if f.MaxFileSize <= 0 {
 		return fmt.Errorf("field \"files.max_file_size\": %d must be greater than 0", f.MaxFileSize)
@@ -350,6 +359,9 @@ func validateFilesConfig(f *FilesConfig) error {
 	if f.MaxDirEntries <= 0 || f.MaxDirEntries > maxFilesDirEntries {
 		return fmt.Errorf("field \"files.max_dir_entries\": %d out of range [1, %d]",
 			f.MaxDirEntries, maxFilesDirEntries)
+	}
+	if !f.Enabled {
+		return nil
 	}
 
 	for i, root := range f.Roots {
