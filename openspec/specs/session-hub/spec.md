@@ -11,7 +11,7 @@ The hub SHALL expose an operation that returns the tmux sessions currently prese
 
 The representative pane SHALL be chosen by skipping panes that have exited and then preferring, in order: a pane that is both in the active window and active, then an active pane, then a pane in the active window, then any remaining live pane. Panes of equal rank SHALL be separated by the lowest window index and then the lowest pane index, so the choice is a function of server state rather than of the order in which tmux emits panes.
 
-Window names, pane titles, and commands are free-form text. The pane wire format SHALL use the printable multi-character sentinel `|vtc-pane|` as its field separator; a normal `|` is valid field content. The parser SHALL require exactly the expected number of fields and SHALL omit a record containing the complete sentinel inside a value rather than shifting subsequent fields. Each field SHALL be capped at 200 Unicode code points before it is returned, so that one pane cannot inflate every listing response, and the cap SHALL be applied at character boundaries rather than mid-character. The line-based format assumes fields do not contain the raw newline record terminator supplied by tmux.
+Window names, pane titles, and commands are free-form text. Every pane field in the tmux wire format SHALL be prefixed by the byte length tmux reports for that value, so field contents are never parsed as separators or record terminators. A newline, colon, or record-looking string inside a value SHALL remain part of that value and SHALL NOT create or shift a pane record. A malformed length frame SHALL stop parsing rather than be guessed at. Each free-form field SHALL be capped at 200 Unicode code points before it is returned, so that one pane cannot inflate every listing response, and the cap SHALL be applied at character boundaries rather than mid-character.
 
 When no representative pane can be determined, or when the pane query fails, the hub SHALL still return the session list successfully with the summary absent for the affected sessions, rather than failing the listing.
 
@@ -50,10 +50,10 @@ When no representative pane can be determined, or when the pane query fails, the
 - **WHEN** a session's window name, pane title, or current command contains spaces or non-ASCII text
 - **THEN** the hub reports those values as tmux gave them, without misattribution between fields
 
-#### Scenario: A value carrying the field separator itself
+#### Scenario: A value carrying record syntax
 
-- **WHEN** a value contains the field separator, so its record no longer splits into the expected number of fields
-- **THEN** the hub omits that record rather than reporting a summary whose fields may have shifted
+- **WHEN** a value contains a newline, a colon, or text shaped like another pane record
+- **THEN** the hub returns it as that field's content and does not create or shift a pane record
 
 #### Scenario: Oversized pane field
 

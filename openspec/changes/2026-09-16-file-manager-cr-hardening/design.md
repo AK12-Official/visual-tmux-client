@@ -197,7 +197,10 @@ Two separate holes produced one symptom — a save reported as stored somewhere 
 *Hub side.* `confirmUnchanged` returned early for a forced write, so the whole upload was a
 window in which a rename could land. The commit check is now unconditional and asks two
 questions: is the target still the same file (`os.SameFile`, which compares device and inode
-and is portable), and — when the caller supplied a time — is that time still current. A write
+and is portable), and — when the caller supplied a time — is that time still current. The
+target inode is pinned by a metadata-only descriptor for the lifetime of the write; without
+that descriptor Linux can free an unlinked inode and immediately reuse the same device/inode
+pair for the replacement, making `SameFile` agree about two different files. A write
 that began against a free name now also requires the name to still be free, closing the same
 hole from the other side: a create landing on a file created meanwhile would replace something
 its author never agreed to lose.
@@ -208,8 +211,8 @@ finds nothing where it points, and reports the name as free -- so the write woul
 replace the link, which is precisely the shape the check at the start of `Write`
 exists to refuse.
 
-The origin is captured by the *same* `os.Stat` that the pre-transfer check already performs,
-so this adds one `stat` at commit and no new failure mode when the target never existed.
+The origin is captured from that descriptor's `Stat`, so the identity compared at commit is
+the inode kept alive by the write rather than a reusable pair of numbers.
 
 *Frontend side.* The overlay folded a save answer in by tab id alone. A rename completing
 during the flight retargets the tab to the new path — creating a *new* tab object — so the
@@ -510,36 +513,20 @@ rather than an assumption: widening that test from one route to all of them is w
 working-directory route is deliberately answered rather than refused. The limits are carried as
 configured, because there is nothing for a hidden override to protect.
 
-### 8. The pane protocol's unbreakable field is tmux's to keep, and its value is measured
+### 8. Pane fields are byte-length framed
 
-`ParsePanes` splits records on newlines, and its doc comment said a field carrying one could split a
-record and forge one for another session -- naming executable names and argv as the way in. Measured
-against a real tmux, the names cannot carry the terminator: a session name and a window name containing
-a newline are refused when they are set ("invalid session name", "invalid window name"), and `select-pane
--T` leaves a title containing one as it was -- silently, which is why the test reads the title back
-rather than checking a status. So the parse is sound, and the guarantee is tmux's rather than the
-parser's, which is the part that has to be written down: the field count is validation of shape and not
-escaping, and a reader who takes it for a defence will not go looking for one.
+The delimiter protocol was not portable. macOS tmux rejected or escaped the values used by its tests,
+but Ubuntu tmux accepted a session name containing a newline and returned a live process name containing
+one verbatim. The old line parser then read the tail as a complete record for another session. The
+guarantee therefore belongs in this parser rather than in assumptions about what a particular tmux
+version escapes.
 
-The command field is the one a program names itself, and it is the field tmux is never asked to set, so
-it is the one that had to be measured. The first attempt to measure it produced a claim that was wrong
-in both directions, and the review of this round is what unpicked it. A *process* whose own name carries
-a line break cannot be produced on this machine at all -- a copy of a system binary is killed by the
-platform, a symbolic link reports the name of the binary it resolves to, and a script reports its
-interpreter -- but that is not what the test ended up measuring: the copy never ran, the pane was left
-dead, and what tmux reported was the *command string* it had been given. That value is what the round
-measured, and it is worth having: it is the route any process name would reach the parser through.
-
-So the comment, the test and this decision say three things now, each of them checked. The line break is
-escaped -- where the name had one byte the value has three, two backslashes and an `n` -- so the record
-is never split, and no fragment of a pane can be read as a record for another session. The separators are
-not escaped, so a record whose value carries them has too many fields and is dropped whole: that pane
-contributes no summary, and no other session's summary is touched. And whether a *live process* whose
-name carries a line break would be reported the same way is not measured, because no such process can be
-made here. On Linux, where a copy of a binary does run, the test would exercise that route instead -- and
-what it would assert there is only the half that holds either way: that no more records come back than
-there are panes. Whether the record is dropped, or the escape has the same shape, is this platform's
-answer and not a promise about that one.
+`PaneFormat` now prefixes every value with `#{n:field}:`; tmux documents `n` as the value's byte length.
+`ParsePanes` consumes exactly that many bytes for each of the nine fields before accepting the record
+terminator. Newlines, colons, the former separator, and text shaped like a whole victim record are all
+ordinary field bytes. A malformed frame stops parsing rather than attempting to resynchronize at
+attacker-controlled text. Unit tests cover arbitrary syntax in fields, and the real-server test uses
+the same newline-bearing command that forged a victim record on Ubuntu CI.
 
 - **[Pre-existing, named not fixed] The service's other methods classify where they raise, not at their return.** → *`Write` and `Delete` classify everything they return through one deferred call, which is what closed the finding that three write-path call sites could each be reverted unnoticed. `List`, `Read`, `Create` and `Rename` still call the classifier at each site that can raise an error, and a call dropped from one of them would turn a not-found read into a reported server fault with nothing failing -- a reviewer demonstrated exactly that by deleting two of them and watching the suites stay green. Closing it is the same shape as the fix above (a named return and one defer per method); it is not this change's to do, and it is named so that the next reader of that comment does not take "one place" for the whole service.*
 - **[Accepted] A write follows a symbolic link; a delete and a rename do not.** → *`RootSet.Resolve` canonicalizes a caller's path -- through `EvalSymlinks`, including the final element when it exists -- so a write to a link writes the file it points at and leaves the link a link, and a read does the same. `Delete` and `Rename` go through `entryTarget`, which resolves the containing directory and leaves the last element alone, because removing or moving the *name* the caller gave is what those operations mean. Two side effects are worth knowing. A link whose target is gone is refused for a write, which is checked for explicitly. And a link to a file that has other names reports the *pointed-at* file's count in the message, which names the link the caller used: `alias.txt is also reachable as 1 other name(s)` is true of the file and reads oddly about the name.*
@@ -653,13 +640,6 @@ answer and not a promise about that one.
   the edit is then stranded in the tab with no way to write it anywhere. Closing that needs a save-as or
   a re-create flow, which is a feature rather than a repair of this defect, and the open file's contents
   at least survive in the tab -- they are not lost until the tab is closed, which warns.*
-- **[Residual] The pane protocol rests on tmux, and its last field is unmeasured.** → *See decision
-  8. The two name refusals and the silent title refusal are pinned against a real server, so a tmux that
-  stopped refusing would fail a test rather than mis-attribute a summary in the UI. The command field is
-  not pinned: the escape it was once seen to produce could not be reproduced, and a process named with a
-  line break could not be produced here at all. A break there would forge a record exactly as a break
-  anywhere else does, so this is a gap in the evidence rather than a known hole, and it is stated as
-  one.*
 
 ## Migration Plan
 

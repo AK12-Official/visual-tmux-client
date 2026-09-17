@@ -2,8 +2,34 @@ package files
 
 import (
 	"os"
+	"runtime"
 	"syscall"
 )
+
+const (
+	// Linux O_PATH and Darwin O_EVTONLY both open a metadata-only descriptor:
+	// they pin the inode without requiring permission to read its contents. The
+	// project ships only for these two operating systems (see package.sh).
+	linuxPathOnly   = 0x200000
+	darwinEventOnly = 0x8000
+)
+
+// pinMetadata opens a descriptor that keeps the target inode alive for the
+// duration of a write. Keeping it alive is part of the identity check: without
+// the descriptor, removing the target can free its inode immediately, and a
+// replacement created at the same name can reuse the same device/inode pair.
+// os.SameFile would then call the replacement the original file.
+func pinMetadata(target Confined) (*os.File, error) {
+	flag := os.O_RDONLY | syscall.O_NONBLOCK
+	switch runtime.GOOS {
+	case "linux":
+		flag = linuxPathOnly
+	case "darwin":
+		// O_EVTONLY still follows FIFO open semantics unless NONBLOCK is present.
+		flag = darwinEventOnly | syscall.O_NONBLOCK
+	}
+	return openFile(target, flag, 0)
+}
 
 // otherNames is how many names the entry has besides the one it was reached by.
 //

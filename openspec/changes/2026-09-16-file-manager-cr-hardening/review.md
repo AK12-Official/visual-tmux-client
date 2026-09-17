@@ -1022,3 +1022,18 @@ private staging mode" for a replacement, where it is unset and the privacy comes
 own override -- the same trap this round congratulated itself for closing, one field over; `tasks.md`'s
 Verify line for 23.3 described the test the same item's note records as superseded, and named neither
 the real title nor the second test; and the new test carried its comment block twice.
+
+## The Ubuntu CI review after PR creation
+
+The first PR run disproved two platform assumptions that every local suite had agreed with. Linux
+reused an unlinked inode quickly enough that `os.SameFile` compared the original snapshot with a new
+file carrying the same device/inode pair and allowed a forced write to overwrite it. The write now
+holds a metadata-only descriptor (`O_PATH` on Linux, `O_EVTONLY|O_NONBLOCK` on Darwin) for its full
+lifetime, so the original inode cannot be freed and reused until the comparison is over.
+
+Ubuntu tmux also accepted a newline-bearing session/process name and emitted the current command with
+the newline intact. The line-and-sentinel parser read the tail as a forged record for `victim`, exactly
+the residual earlier rounds had incorrectly closed by measuring macOS behavior. The protocol now uses
+tmux's byte-length modifier for every field and parses the resulting frames without treating any field
+byte as syntax. The same adversarial command is retained as a real-server regression test on both
+platforms.

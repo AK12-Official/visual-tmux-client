@@ -562,8 +562,9 @@ func isPartialRune(b []byte) bool {
 
 // writeTarget resolves the path a write names and applies every check that can be
 // made before a byte of the body is transferred, so that a refusal costs the
-// caller a round trip rather than an upload. It returns the target and what was
-// found there -- nil for a name that was free -- or the refusal that stopped it.
+// caller a round trip rather than an upload. It returns the target, what was
+// found there, and a metadata-only descriptor pinning that inode -- or nil for a
+// name that was free -- or the refusal that stopped it.
 //
 // Each check is here for the reason it is stated at:
 //
@@ -585,30 +586,42 @@ func isPartialRune(b []byte) bool {
 //     others holding the contents they had.
 func (s *Service) writeTarget(
 	path string, expected *ExpectedMtime, allowOtherNames bool,
-) (Confined, os.FileInfo, error) {
+) (Confined, os.FileInfo, *os.File, error) {
 	resolved, err := s.roots.Resolve(path, ModeCreate)
 	if err != nil {
-		return Confined{}, nil, err
+		return Confined{}, nil, nil, err
 	}
 	target := s.roots.Confine(resolved)
 
-	existing, statErr := stat(target)
-	if statErr != nil {
-		if !os.IsNotExist(statErr) {
+	// A final dangling link survives canonicalization as the entry itself. Check it
+	// before the metadata-only open: Linux O_PATH|O_NOFOLLOW can successfully pin
+	// the link rather than answer not-found, while the write contract reports the
+	// missing target and never replaces the link.
+	if info, linkErr := lstat(target); linkErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return Confined{}, nil, nil,
+			fmt.Errorf("%w: %s is a link whose target does not exist", ErrNotFound, path)
+	}
+
+	pinned, openErr := pinMetadata(target)
+	if openErr != nil {
+		if !os.IsNotExist(openErr) {
 			// Returned as it is: Write's own return classifies everything that
 			// leaves it, which is the one place that has to be right. See Write.
-			return Confined{}, nil, statErr
-		}
-		if info, linkErr := lstat(target); linkErr == nil && info.Mode()&os.ModeSymlink != 0 {
-			return Confined{}, nil, fmt.Errorf("%w: %s is a link whose target does not exist", ErrNotFound, path)
+			return Confined{}, nil, nil, openErr
 		}
 		if expected != nil {
-			return Confined{}, nil, fmt.Errorf("%w: %s", ErrNotFound, path)
+			return Confined{}, nil, nil, fmt.Errorf("%w: %s", ErrNotFound, path)
 		}
-		return target, nil, nil
+		return target, nil, nil, nil
+	}
+	existing, err := pinned.Stat()
+	if err != nil {
+		_ = pinned.Close() //nolint:errcheck // the stat error is the one worth reporting
+		return Confined{}, nil, nil, err
 	}
 	if existing.IsDir() {
-		return Confined{}, nil, fmt.Errorf("%w: %s is a directory", ErrInvalidPath, path)
+		_ = pinned.Close() //nolint:errcheck // the kind error is the one worth reporting
+		return Confined{}, nil, nil, fmt.Errorf("%w: %s is a directory", ErrInvalidPath, path)
 	}
 	if !existing.Mode().IsRegular() {
 		// The same rule the read path applies to the same kinds -- a named pipe, a
@@ -617,15 +630,18 @@ func (s *Service) writeTarget(
 		// with a file and the node would be gone. A caller asking to write contents
 		// has not agreed to that, which is the same refusal the dangling link above
 		// gets: what the name holds is not a file with contents.
-		return Confined{}, nil, fmt.Errorf("%w: %s is not a regular file", ErrInvalidPath, path)
+		_ = pinned.Close() //nolint:errcheck // the kind error is the one worth reporting
+		return Confined{}, nil, nil, fmt.Errorf("%w: %s is not a regular file", ErrInvalidPath, path)
 	}
 	if expected != nil && !expected.matches(existing) {
-		return Confined{}, nil, fmt.Errorf("%w: %s changed since it was read", ErrConflict, path)
+		_ = pinned.Close() //nolint:errcheck // the conflict is the one worth reporting
+		return Confined{}, nil, nil, fmt.Errorf("%w: %s changed since it was read", ErrConflict, path)
 	}
 	if err := linkedError(path, existing, allowOtherNames); err != nil {
-		return Confined{}, nil, err
+		_ = pinned.Close() //nolint:errcheck // the refusal is the one worth reporting
+		return Confined{}, nil, nil, err
 	}
-	return target, existing, nil
+	return target, existing, pinned, nil
 }
 
 // Write replaces a file's contents and reports what it produced.
@@ -658,9 +674,14 @@ func (s *Service) Write(
 		}
 	}()
 
-	target, existing, err := s.writeTarget(path, expected, allowOtherNames)
+	target, existing, pinned, err := s.writeTarget(path, expected, allowOtherNames)
 	if err != nil {
 		return WriteResult{}, err
+	}
+	if pinned != nil {
+		defer func() {
+			_ = pinned.Close() //nolint:errcheck // the write result is the one worth reporting
+		}()
 	}
 
 	// The replacement carries the target's permission bits and, where the hub may

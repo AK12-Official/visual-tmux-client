@@ -9,104 +9,65 @@ import (
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/session"
 )
 
-// paneFieldSep stays printable because some tmux versions escape control bytes
-// in command output (a Unit Separator becomes the literal text \037). A full
-// delimiter inside a field makes the record ambiguous and is rejected below;
-// ordinary pipes and backslash sequences remain untouched.
-const paneFieldSep = "|vtc-pane|"
-
 // paneFieldCount is the number of fields PaneFormat emits.
 const paneFieldCount = 9
 
 // tmuxTrue is how tmux renders a set boolean in a format string.
 const tmuxTrue = "1"
 
-// PaneFormat is the -F format string for list-panes, one record per pane.
-var PaneFormat = strings.Join([]string{
-	"#{session_name}",
-	"#{window_index}",
-	"#{pane_index}",
-	"#{window_active}",
-	"#{pane_active}",
-	"#{pane_dead}",
-	"#{window_name}",
-	"#{pane_title}",
-	"#{pane_current_command}",
-}, paneFieldSep)
+// paneFormatFields is the order shared by PaneFormat and ParsePanes.
+var paneFormatFields = []string{
+	"session_name",
+	"window_index",
+	"pane_index",
+	"window_active",
+	"pane_active",
+	"pane_dead",
+	"window_name",
+	"pane_title",
+	"pane_current_command",
+}
 
-// ParsePanes parses list-panes -F output into panes.
-// A record that does not carry exactly paneFieldCount fields is dropped rather
-// than guessed at: a mis-attributed title would be shown to the user as fact,
-// which is worse than showing no summary at all.
-//
-// Records are split on newlines before the field count is checked, so a field
-// carrying the record terminator would not be read as one field. What follows
-// depends on which field it is:
-//
-//   - A break before the last field drops that pane's record -- the fields before
-//     the break are too few to parse -- and leaves the tail to be read, with the
-//     separators a forger writes into it and the fields that follow it in the
-//     real record, as a record of its own.
-//   - A break in the last field keeps the pane's record, read with its command
-//     truncated, and the tail may be read as a record of its own all the same.
-//
-// Either way a record can appear that no pane stands behind, and since a
-// record's first field is a session name, what it names is a session that
-// exists: that session's summary is then chosen from a fragment of another
-// pane's field. The field count does not detect either case and must not be read
-// as a defence -- it validates the shape of what it was given, and says nothing
-// about whether a value inside it held one field or two.
-// TestALineBreakInAFieldWouldNotBeDetected pins both outcomes, so that neither
-// has to be worked out from here.
-//
-// What keeps the terminator out of the fields is tmux, not this parser. A
-// session name and a window name containing a newline are refused when they are
-// set ("invalid session name", "invalid window name"), and a pane title
-// containing one is refused by select-pane -- silently, leaving the title as it
-// was, which is why the test asserts the title rather than a status. The indexes
-// and the flags are tmux's own numbers.
-// TestNamesTmuxRefusesToLetCarryALineBreak pins those three against a real
-// server, because none of it is this code's to guarantee: the assumption is
-// measured against tmux, and a version that stopped holding it would fail that
-// test rather than quietly mis-attribute a summary.
-//
-// The command field is the one a program names itself, so it is the one field a
-// program in a pane could try to put the record terminator into -- and the one
-// field TestNamesTmuxRefusesToLetCarryALineBreak cannot reach, because it is the
-// program's own name rather than something tmux is asked to set.
-//
-// What a *process* name carrying a line break would do here is not measured: a
-// process with one cannot be produced on this machine. A copy of a system binary
-// does not run -- the platform kills it, and the pane is left dead holding the
-// command it was given -- a symbolic link reports the name of the binary it
-// resolves to, and a script reports its interpreter rather than its own name. On
-// Linux a copy does run, and the field would then carry whatever tmux prints for
-// that process; that is the case this comment cannot speak for.
-//
-// What is measured is the value tmux reports for that field when the value itself
-// carries a line break, which is the route a process name would have to reach the
-// parser through in any case: TestACommandNameCarryingALineBreakCannotForgeARecord
-// builds one and asks a real server. Two things come back, and both are asserted
-// there. The line break is escaped -- where the name had one byte the value has
-// three, two backslashes and an `n` -- so the record is never split, and no
-// fragment of that pane can be read as a record for another session. And the
-// separators are *not* escaped, so the record carries more fields than a record
-// has and is dropped whole: that pane contributes no summary, which is what
-// validating the shape costs, and it costs no other session's summary, which is
-// what validating it is for. The count is the assertion that fails if the escape
-// stops: a raw line break would give the head a truncated command and the tail a
-// whole forged record for the session it names.
+// framedPaneField emits one byte-length-prefixed value. tmux's n modifier is
+// explicitly a byte count, so arbitrary field bytes -- including newlines,
+// colons and the strings another record uses -- cannot change the framing.
+func framedPaneField(name string) string {
+	return "#{n:" + name + "}:#{" + name + "}"
+}
+
+// PaneFormat is the -F format string for list-panes, one framed record per pane.
+var PaneFormat = func() string {
+	var out strings.Builder
+	for _, name := range paneFormatFields {
+		out.WriteString(framedPaneField(name))
+	}
+	return out.String()
+}()
+
+// ParsePanes parses length-prefixed list-panes output. Length framing is the
+// boundary: no field value is treated as syntax, so a command or externally
+// created session containing a newline cannot create a record that no pane
+// stands behind. A malformed frame stops parsing rather than guessing where the
+// next record begins; displaying fewer summaries is safer than mis-attributing
+// one to another session.
 func ParsePanes(stdout string) []session.Pane {
 	out := make([]session.Pane, 0)
-	for _, line := range strings.Split(stdout, "\n") {
-		line = strings.TrimSuffix(line, "\r")
-		if line == "" {
+	for len(stdout) > 0 {
+		// Tolerate blank transport lines, including CRLF, around records.
+		if strings.HasPrefix(stdout, "\r\n") {
+			stdout = stdout[2:]
 			continue
 		}
-		fields := strings.Split(line, paneFieldSep)
-		if len(fields) != paneFieldCount {
+		if strings.HasPrefix(stdout, "\n") {
+			stdout = stdout[1:]
 			continue
 		}
+
+		fields, rest, ok := parsePaneRecord(stdout)
+		if !ok {
+			break
+		}
+		stdout = rest
 		out = append(out, session.Pane{
 			Session:        fields[0],
 			WindowIndex:    atoiOrZero(fields[1]),
@@ -120,6 +81,35 @@ func ParsePanes(stdout string) []session.Pane {
 		})
 	}
 	return out
+}
+
+// parsePaneRecord reads exactly paneFieldCount byte-length-prefixed fields and
+// the line ending tmux appends to the formatted record.
+func parsePaneRecord(input string) ([]string, string, bool) {
+	fields := make([]string, 0, paneFieldCount)
+	for range paneFieldCount {
+		colon := strings.IndexByte(input, ':')
+		if colon <= 0 {
+			return nil, input, false
+		}
+		length, err := strconv.Atoi(input[:colon])
+		if err != nil || length < 0 || length > len(input)-colon-1 {
+			return nil, input, false
+		}
+		input = input[colon+1:]
+		fields = append(fields, input[:length])
+		input = input[length:]
+	}
+	if strings.HasPrefix(input, "\r\n") {
+		return fields, input[2:], true
+	}
+	if strings.HasPrefix(input, "\n") {
+		return fields, input[1:], true
+	}
+	if input == "" {
+		return fields, input, true
+	}
+	return nil, input, false
 }
 
 // atoiOrZero parses a numeric tmux field, treating anything unparseable as zero
