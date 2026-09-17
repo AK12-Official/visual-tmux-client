@@ -1518,6 +1518,106 @@ test('a rename keeps the editor that is holding the file', async () => {
   wrapper.unmount()
 })
 
+// Closing a tab takes the element the keyboard was on with it -- the tab itself
+// when Delete closed it, the button beside it when a pointer did -- and the
+// browser leaves the focus on the document body, where the next Tab starts over
+// from the top of the page. The strip takes it back on whichever tab is *active*,
+// which is not always the one that ends up first, and the listing takes it when
+// the last tab has gone.
+test('closing a tab puts the keyboard back on the active one', async () => {
+  resetEditors()
+  setToken('tok')
+  hubFetch()
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work' },
+    attachTo: document.body,
+  })
+  await flush()
+
+  await openFile(wrapper, 'a.txt')
+  await openFile(wrapper, 'b.txt')
+  await openFile(wrapper, 'notes.dat')
+
+  const tab = (index: number) => wrapper.findAll('.tabs__label')[index]
+  const close = (index: number) => wrapper.findAll('.tabs__close')[index]
+
+  // The second of three is active, so the survivors are [a, b]: landing on the
+  // active tab (b) and landing on the first (a) are different answers.
+  await tab(1).trigger('click')
+  await flush(2)
+  assert.equal(tab(1).attributes('aria-selected'), 'true', 'the second tab is not the active one')
+
+  // Closed with the pointer, on the button beside the last tab -- which is the
+  // other way the element the focus is on goes away.
+  close(2).element.focus()
+  await close(2).trigger('click')
+  await flush(2)
+  assert.equal(wrapper.findAll('.tabs__tab').length, 2, 'the tab was not closed')
+  assert.equal(
+    document.activeElement,
+    wrapper.findAll('.tabs__label')[1].element,
+    'the focus did not go to the active tab',
+  )
+
+  // And with the last two gone the listing takes it: with nothing open the panel
+  // is not rendered at all, and the listing is what the user acts on next.
+  await close(1).trigger('click')
+  await flush(2)
+  await close(0).trigger('click')
+  await flush(2)
+  assert.equal(wrapper.findAll('.tabs__tab').length, 0, 'the last tab was not closed')
+  const focused = document.activeElement as HTMLElement | null
+  assert.ok(
+    focused?.classList.contains('tree__label') || focused?.classList.contains('fm__tree'),
+    `the focus was lost with the last tab: ${String(focused?.className)}`,
+  )
+  wrapper.unmount()
+})
+
+// The listing is what takes the focus when there is no row of it to take: an
+// empty directory renders none, and a directory being loaded renders no tree at
+// all. Either way the column itself is focusable, so the keyboard stays in the
+// panel rather than on the document body.
+test('closing the last tab in an empty directory leaves the keyboard in the panel', async () => {
+  resetEditors()
+  setToken('tok')
+  hubFetch({
+    list: (path) =>
+      path === '/srv/work'
+        ? json({
+            path,
+            entries: [{ name: 'a.txt', is_dir: false, size: 5, mtime: 1000 }],
+            truncated: false,
+          })
+        : json({ path, entries: [], truncated: false }),
+  })
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work' },
+    attachTo: document.body,
+  })
+  await flush()
+
+  await openFile(wrapper, 'a.txt')
+  // Up to a directory with nothing in it, which is where the tab is closed: the
+  // listing is now empty and has no row for the keyboard to land on.
+  await goUp(wrapper)
+  await flush(2)
+  assert.equal(wrapper.findAll('.tree__row').length, 0, 'the listing is not empty')
+
+  const close = wrapper.findAll('.tabs__close')[0]
+  close.element.focus()
+  await close.trigger('click')
+  await flush(2)
+
+  assert.equal(wrapper.findAll('.tabs__tab').length, 0)
+  const focused = document.activeElement as HTMLElement | null
+  assert.ok(
+    focused?.classList.contains('fm__tree'),
+    `the focus was lost with nothing left to focus: ${String(focused?.className)}`,
+  )
+  wrapper.unmount()
+})
+
 test('the editor stand-in applies a transaction the way the editor does', () => {
   const view = new EditorView({ doc: 'abcdef', extensions: [] })
 

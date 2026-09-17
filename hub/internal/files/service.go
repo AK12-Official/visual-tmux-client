@@ -569,7 +569,9 @@ func isPartialRune(b []byte) bool {
 //
 //   - the path must resolve inside the boundary, and a path it cannot stat is
 //     classified rather than reported as a server fault;
-//   - a directory is not a file to write;
+//   - a directory is not a file to write, and neither is anything else that is not
+//     a regular file: a named pipe, a socket or a device would not be written, it
+//     would be *replaced* by the staged regular file, and the node would be gone;
 //   - a name held by a link whose target is gone is not a name to write over: the
 //     rename that commits the write would replace the link, destroying where it
 //     pointed without saying so, and the caller asked to write a file rather than
@@ -607,6 +609,15 @@ func (s *Service) writeTarget(
 	}
 	if existing.IsDir() {
 		return Confined{}, nil, fmt.Errorf("%w: %s is a directory", ErrInvalidPath, path)
+	}
+	if !existing.Mode().IsRegular() {
+		// The same rule the read path applies to the same kinds -- a named pipe, a
+		// socket, a device -- and here it means more than refusing to read one:
+		// the staged file is a *regular* file, so the rename would replace a pipe
+		// with a file and the node would be gone. A caller asking to write contents
+		// has not agreed to that, which is the same refusal the dangling link above
+		// gets: what the name holds is not a file with contents.
+		return Confined{}, nil, fmt.Errorf("%w: %s is not a regular file", ErrInvalidPath, path)
 	}
 	if expected != nil && !expected.matches(existing) {
 		return Confined{}, nil, fmt.Errorf("%w: %s changed since it was read", ErrConflict, path)
@@ -675,8 +686,11 @@ func (s *Service) Write(
 	if existing != nil {
 		// What the target was when this write began, whether or not the caller
 		// supplied a time to compare it against. See confirmUnchanged.
+		//
+		// No mode is set for this case: a replacement's staging file is private
+		// while it is incomplete, and the mode the file ends up with is the
+		// target's, read at commit. See writeOptions.mode.
 		opts.origin = existing
-		opts.mode = existing.Mode().Perm()
 		opts.preserve = true
 	} else {
 		opts.mode = os.FileMode(createFileMode)
@@ -687,8 +701,11 @@ func (s *Service) Write(
 
 // writeOptions carries what the staging path needs beyond the body itself.
 type writeOptions struct {
-	// mode is what the file ends up with: the target's permission bits when it is
-	// replacing one, the documented default when it is creating one.
+	// mode is the mode the staging file is *created* with. For a new file that is
+	// the mode it ends up with, applied at creation so that the umask governs it
+	// as it governs any other new file. For a replacement it is the private
+	// staging mode, and the target's own mode is applied later, from the metadata
+	// read at commit -- see writeAtomically.
 	mode os.FileMode
 	// preserve says mode describes an existing file rather than a new one. An
 	// existing mode is a value to keep, so it is applied with chmod -- which the
@@ -751,19 +768,29 @@ func (s *Service) writeAtomically(
 		_ = stage.Close() //nolint:errcheck // the copy error is the one worth reporting
 		return WriteResult{}, err
 	}
-	// A replacement keeps the target's mode exactly, which the umask must not
-	// reduce -- so it is set here, after the body and before the sync, rather than
-	// at creation.
+	// The target is checked here for two reasons, and the second is why this is not
+	// simply moved down to the rename. It is the metadata the replacement keeps,
+	// read *now* rather than when the write began -- an upload can take minutes, and
+	// a chmod or a chown during it touches the ctime and not the modification time,
+	// so nothing else here would notice, and applying what was captured at the
+	// start would restore permissions an administrator had just tightened. It is
+	// also an early refusal: what it finds is refused before the metadata is
+	// applied to a staging file that would then be thrown away.
+	current, err := confirmUnchanged(target, opts)
+	if err != nil {
+		_ = stage.Close() //nolint:errcheck // the refusal is the one worth reporting
+		return WriteResult{}, err
+	}
+
+	// The mode is set with chmod rather than at creation, because the umask must
+	// not reduce a value that is being kept; the owner is given back by takeOwner
+	// where the hub may, and not being allowed to is not an error there.
 	if opts.preserve {
-		if err := stage.Chmod(opts.mode); err != nil {
+		if err := stage.Chmod(current.Mode().Perm()); err != nil {
 			_ = stage.Close() //nolint:errcheck // the chmod error is the one worth reporting
 			return WriteResult{}, fmt.Errorf("%w: chmod: %w", ErrWriteFailed, err)
 		}
-		// And the owner, where the hub may give it back. A replacement is a file
-		// the hub created, so it belongs to the hub's user unless this succeeds --
-		// which it does only for an owner the hub already is, or one it may adopt.
-		// See takeOwner for what that leaves, and why it is not an error.
-		if err := takeOwner(stage, opts.origin); err != nil {
+		if err := takeOwner(stage, current); err != nil {
 			_ = stage.Close() //nolint:errcheck // the stat error is the one worth reporting
 			return WriteResult{}, fmt.Errorf("%w: owner: %w", ErrWriteFailed, err)
 		}
@@ -776,13 +803,15 @@ func (s *Service) writeAtomically(
 		return WriteResult{}, fmt.Errorf("%w: close: %w", ErrWriteFailed, err)
 	}
 
-	// The target is checked again here, and this is the check that makes the write
-	// optimistic. The first one happened before the body was transferred, which for
-	// a large file is as long as the request lasts: a second writer landing inside
-	// that window would be overwritten without either writer being told. What
-	// remains is the gap between this check and the rename below, two adjacent
-	// syscalls rather than a whole upload.
-	if err := confirmUnchanged(target, opts); err != nil {
+	// And checked once more, immediately before the replacement, which is what
+	// makes the write optimistic: the first check happened before the body was
+	// transferred -- for a large file, as long as the request lasts -- and the one
+	// above is followed by a chmod, a chown, an fsync of the whole body and a
+	// close, which on a 256 MiB replacement measured tens of milliseconds. A second
+	// writer landing in any of that would be overwritten without either writer
+	// being told. What remains is the gap between this check and the rename below,
+	// two adjacent syscalls rather than a whole upload.
+	if _, err := confirmUnchanged(target, opts); err != nil {
 		return WriteResult{}, err
 	}
 
@@ -821,7 +850,11 @@ func (s *Service) writeAtomically(
 // A nil expected modification time means the caller forced the overwrite, so it
 // is compared against nothing. The origin check is not optional in the same way:
 // it asks what the path is, not what the caller expected it to be.
-func confirmUnchanged(target Confined, opts writeOptions) error {
+//
+// What it observed is returned, because it is also the metadata the replacement
+// keeps: read here rather than at the start of the write, so that a mode or an
+// owner changed during the upload is the one that survives. See writeAtomically.
+func confirmUnchanged(target Confined, opts writeOptions) (os.FileInfo, error) {
 	if opts.origin == nil {
 		// The name was free when the write began, so it is still free only if
 		// nothing has taken it.
@@ -831,23 +864,23 @@ func confirmUnchanged(target Confined, opts writeOptions) error {
 		// and reports the name as free -- so the write would replace the link,
 		// which is the shape the check at the start of Write exists to refuse.
 		if _, err := lstat(target); os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		} else if err != nil {
-			return classifyPathError(opts.display, err)
+			return nil, classifyPathError(opts.display, err)
 		}
-		return fmt.Errorf("%w: %s was created while it was being written", ErrConflict, opts.display)
+		return nil, fmt.Errorf("%w: %s was created while it was being written", ErrConflict, opts.display)
 	}
 	current, err := stat(target)
 	if err != nil {
-		return classifyPathError(opts.display, err)
+		return nil, classifyPathError(opts.display, err)
 	}
 	if !os.SameFile(opts.origin, current) {
-		return fmt.Errorf("%w: %s was replaced while it was being written", ErrConflict, opts.display)
+		return nil, fmt.Errorf("%w: %s was replaced while it was being written", ErrConflict, opts.display)
 	}
 	if opts.expected != nil && !opts.expected.matches(current) {
-		return fmt.Errorf("%w: %s changed while it was being written", ErrConflict, opts.display)
+		return nil, fmt.Errorf("%w: %s changed while it was being written", ErrConflict, opts.display)
 	}
-	return linkedError(opts.display, current, opts.allowOtherNames)
+	return current, linkedError(opts.display, current, opts.allowOtherNames)
 }
 
 // linkedError is the refusal for a target that is reachable under more than one

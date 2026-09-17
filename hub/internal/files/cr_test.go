@@ -638,3 +638,130 @@ func TestARootedWriteRefusesATargetWithOtherNames(t *testing.T) {
 		t.Errorf("the refused write changed the file: %q", got)
 	}
 }
+
+// The read path refuses anything that is not a regular file, and the write path
+// has to do the same for a stronger reason: the staged file *is* a regular file,
+// so the rename would not write the pipe, it would replace it -- and the node the
+// caller named would be gone. Asking to write contents is not agreement to that,
+// which is the same refusal the dangling link gets.
+func TestAWriteRefusesATargetThatIsNotARegularFile(t *testing.T) {
+	dir := sandbox(t)
+	pipe := filepath.Join(dir, "a.pipe")
+	if err := syscall.Mkfifo(pipe, 0o644); err != nil {
+		t.Skipf("this platform cannot make a named pipe: %v", err)
+	}
+
+	svc := mustService(t, Options{})
+	_, err := svc.Write(context.Background(), pipe, strings.NewReader("contents"), 8, nil, false)
+	if !errors.Is(err, ErrInvalidPath) {
+		t.Fatalf("expected a target that is not a regular file to be refused, got: %v", err)
+	}
+
+	info, statErr := os.Lstat(pipe)
+	if statErr != nil {
+		t.Fatalf("the refused write removed the pipe: %v", statErr)
+	}
+	if info.Mode()&os.ModeNamedPipe == 0 {
+		t.Errorf("the refused write replaced the pipe with a %v", info.Mode())
+	}
+	if residue := stagingResidue(t, dir); len(residue) != 0 {
+		t.Errorf("a refused write left a staging file behind: %v", residue)
+	}
+}
+
+// The mode a replacement keeps is the one the target has when the write is
+// committed, not the one it had when the upload began. A chmod during an upload
+// touches the ctime and not the modification time, so nothing else in the write
+// would notice it: the old behaviour restored permissions that had been tightened
+// while the body travelled.
+func TestAReplacementUsesTheModeTheTargetHasAtCommit(t *testing.T) {
+	dir := sandbox(t)
+	file := filepath.Join(dir, "a.txt")
+	mustWrite(t, file, "first")
+	if err := os.Chmod(file, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := mustService(t, Options{})
+	body := &raceReader{
+		inner: strings.NewReader("edited"),
+		race: func() {
+			if err := os.Chmod(file, 0o600); err != nil {
+				t.Errorf("tightening the mode during the write failed: %v", err)
+			}
+		},
+	}
+
+	if _, err := svc.Write(context.Background(), file, body, 6, nil, false); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	info, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("the replacement has mode %v, want 0600: a change made during the upload was undone",
+			info.Mode().Perm())
+	}
+}
+
+// And the owner on the same terms as the mode: the group a replacement keeps is
+// the one the target has when the write is committed, not the one it had when the
+// upload began. A chgrp during the upload touches the ctime alone, so this is the
+// other half of the same finding -- and it is testable without root, since a file
+// may be moved to a group this process belongs to.
+func TestAReplacementUsesTheGroupTheTargetHasAtCommit(t *testing.T) {
+	dir := sandbox(t)
+	file := filepath.Join(dir, "a.txt")
+	mustWrite(t, file, "first")
+
+	info, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("no group to compare on this platform")
+	}
+	groups, err := os.Getgroups()
+	if err != nil {
+		t.Skipf("cannot list this process's groups: %v", err)
+	}
+	before := int(stat.Gid)
+	wanted := -1
+	for _, group := range groups {
+		if group != before {
+			wanted = group
+			break
+		}
+	}
+	if wanted < 0 {
+		t.Skip("this process belongs to no other group")
+	}
+
+	svc := mustService(t, Options{})
+	body := &raceReader{
+		inner: strings.NewReader("edited"),
+		race: func() {
+			if err := os.Chown(file, -1, wanted); err != nil {
+				t.Errorf("moving the file to another group during the write failed: %v", err)
+			}
+		},
+	}
+	if _, err := svc.Write(context.Background(), file, body, 6, nil, false); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	after, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok = after.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("no group to compare on this platform")
+	}
+	if int(stat.Gid) != wanted {
+		t.Errorf("the replacement is in group %d, want %d: a change made during the upload was undone",
+			stat.Gid, wanted)
+	}
+}

@@ -16,6 +16,23 @@ const emit = defineEmits<{
 
 const root = ref<HTMLElement | null>(null)
 
+/** focusActiveTab puts the focus on the tab the manager says is active -- the one
+ * in the tab order -- and reports whether there was one to put it on.
+ *
+ * It is how the keyboard is put back after a tab is closed: the element that had
+ * the focus is removed with its tab, and the browser leaves the focus on the
+ * document body. There is always an active tab while there are tabs at all --
+ * the overlay keeps its active path pointing at one that is open -- and the
+ * manager has a destination of its own for the case where there is none, so a
+ * tab that cannot be found is reported rather than guessed at. */
+function focusActiveTab(): boolean {
+  const found = labels()
+  const active = found.find((label) => label.tabIndex === 0)
+  if (!active) return false
+  active.focus({ preventScroll: true })
+  return true
+}
+
 /** labels are the tab buttons rendered right now, in the order they appear. */
 function labels(): HTMLButtonElement[] {
   const el = root.value
@@ -57,6 +74,7 @@ function onKeydown(event: KeyboardEvent) {
   const next = found[at].dataset.path
   if (next !== undefined) emit('select', next)
 }
+defineExpose({ focusActiveTab })
 </script>
 
 <template>

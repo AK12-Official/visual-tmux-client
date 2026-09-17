@@ -2,7 +2,7 @@
 // The file manager. It owns every piece of its own state -- the loaded tree, the
 // open tabs, the dirty set -- and discards all of it on close, so nothing here
 // outlives the panel and no store or route is needed.
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import {
   FileApiError,
@@ -65,6 +65,15 @@ const tree = reactive(createTreeState())
 // treeRef is the rendered tree, asked to put the keyboard back after an action
 // removes or renames the row it was on.
 const treeRef = ref<InstanceType<typeof FileTree> | null>(null)
+// tabsRef is where the keyboard goes back after a tab is closed: its strip, and
+// the tree when the strip has nothing left -- the panel is not rendered at all
+// once no file is open, and the listing is what the user would act on next.
+//
+// listingRef is that column itself, which is what is left when there is no row to
+// put the focus on: a directory still loading (the tree is not rendered while one
+// is) or one with nothing in it.
+const tabsRef = ref<InstanceType<typeof EditorTabs> | null>(null)
+const listingRef = ref<HTMLElement | null>(null)
 const current = ref('')
 const loading = ref(true)
 // failure takes over the panel, so it is only ever set when there is nothing
@@ -623,6 +632,29 @@ function closeTab(path: string) {
   if (activePath.value === path) {
     activePath.value = tabs.value.length > 0 ? tabs.value[tabs.value.length - 1].path : null
   }
+  void replaceTabFocus()
+}
+
+/** replaceTabFocus puts the keyboard back after a tab closes.
+ *
+ * The element that had the focus -- the tab itself, or the close button beside it
+ * -- is removed with the tab, and the browser leaves the focus on the document
+ * body: the next Tab then starts from the top of the page, and the file the user
+ * was working on is no longer reachable from where they are. The strip takes it
+ * back on whichever tab is active now, or on the listing when the last tab has
+ * gone and there is nothing left in the strip.
+ *
+ * Left alone when the focus is somewhere else, which is the user having moved it
+ * -- the same rule the tree's restore follows. */
+async function replaceTabFocus() {
+  await nextTick()
+  if (!focusIsNowhere()) return
+  // The listing column rather than a row of it when there is no row: a directory
+  // being loaded renders no tree at all, and an empty one renders no row, so
+  // there would otherwise be nowhere to put the keyboard and it would stay on the
+  // body.
+  if (tabsRef.value?.focusActiveTab()) return
+  if (!treeRef.value?.focusFirstRow()) listingRef.value?.focus()
 }
 
 /** requestClose warns before discarding unsaved edits, which are not recoverable
@@ -1139,7 +1171,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
     </header>
 
     <div class="fm__body">
-      <aside class="fm__tree">
+      <aside ref="listingRef" class="fm__tree" tabindex="-1" aria-label="Files">
         <p v-if="loading" class="fm__state">Loading…</p>
         <p v-else-if="failure" class="fm__state fm__state--error" role="alert">{{ failure }}</p>
         <template v-else>
@@ -1163,7 +1195,13 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
       </aside>
 
       <section class="fm__viewer">
-        <EditorTabs :files="tabs" :active="activePath" @select="activePath = $event" @close="closeTab" />
+        <EditorTabs
+          ref="tabsRef"
+          :files="tabs"
+          :active="activePath"
+          @select="activePath = $event"
+          @close="closeTab"
+        />
 
         <div v-if="!active" class="fm__state">Select a file to open it.</div>
 

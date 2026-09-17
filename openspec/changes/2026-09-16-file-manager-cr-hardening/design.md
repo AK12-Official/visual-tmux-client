@@ -235,8 +235,11 @@ that sends only milliseconds.
 The write stages the body in a sibling and renames it over the target, which is what makes a failed or
 interrupted write leave the old contents alone. It is also what makes the replacement a *new file*: the
 inode the target had is unlinked, and everything that belonged to it rather than to its contents goes
-with it. The permission bits are carried over, and so is the owner where `takeOwner` is allowed to set
-it -- the ordinary case of a file the hub's user already owns needs nothing, and a hub running as root
+with it. The permission bits are carried over as they stand *when the body has arrived* -- not as they stood
+when the upload began, since a chmod or a chown during the transfer touches the ctime and nothing here would
+otherwise notice -- and so is the owner where `takeOwner` is allowed to set it. The reading is taken where
+it is applied, and the last identity check is what sits adjacent to the replacement, so a change made in
+the tail between them is not carried: that is the trade, stated rather than implied. -- the ordinary case of a file the hub's user already owns needs nothing, and a hub running as root
 can give another account's file back to it. What cannot be carried is everything else the inode held:
 a hard link to the file now points at the contents it had before the save, and ACLs and extended
 attributes are the empty set a new file has.
@@ -538,8 +541,8 @@ what it would assert there is only the half that holds either way: that no more 
 there are panes. Whether the record is dropped, or the escape has the same shape, is this platform's
 answer and not a promise about that one.
 
-- **[Pre-existing, named not fixed] Closing a tab leaves the keyboard on the document body.** → *The strip's `Delete` closes the focused tab, and the button that does it with a pointer is out of the tab order; either way the element the focus was on is gone, and the focus falls to the body. The tree's rename and delete restore it because this round had to touch them for the same reason; the tab strip's close is the same defect class and a different component, and it is named here rather than fixed in passing.*
 - **[Pre-existing, named not fixed] The service's other methods classify where they raise, not at their return.** → *`Write` and `Delete` classify everything they return through one deferred call, which is what closed the finding that three write-path call sites could each be reverted unnoticed. `List`, `Read`, `Create` and `Rename` still call the classifier at each site that can raise an error, and a call dropped from one of them would turn a not-found read into a reported server fault with nothing failing -- a reviewer demonstrated exactly that by deleting two of them and watching the suites stay green. Closing it is the same shape as the fix above (a named return and one defer per method); it is not this change's to do, and it is named so that the next reader of that comment does not take "one place" for the whole service.*
+- **[Accepted] A write follows a symbolic link; a delete and a rename do not.** → *`RootSet.Resolve` canonicalizes a caller's path -- through `EvalSymlinks`, including the final element when it exists -- so a write to a link writes the file it points at and leaves the link a link, and a read does the same. `Delete` and `Rename` go through `entryTarget`, which resolves the containing directory and leaves the last element alone, because removing or moving the *name* the caller gave is what those operations mean. Two side effects are worth knowing. A link whose target is gone is refused for a write, which is checked for explicitly. And a link to a file that has other names reports the *pointed-at* file's count in the message, which names the link the caller used: `alias.txt is also reachable as 1 other name(s)` is true of the file and reads oddly about the name.*
 ## Risks / Trade-offs
 
 - **[Risk] The commit-time identity check adds a refusal that did not exist**, so a write that

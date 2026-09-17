@@ -251,6 +251,16 @@ new file has. And a target reachable under more than one name SHALL be refused u
 agreed to the replacement, because the entry the caller named is the one that is written while every
 other name keeps the contents it had -- which is a thing to be told, not to discover.
 
+Two rules bound what a replacement may meet and what it keeps. A target that is not a regular file SHALL be
+refused, exactly as the read path refuses one: the staged file is a regular file, so replacing a named pipe,
+a socket or a device with it would *remove* the node rather than write it, and a caller asking for contents
+to be written has not agreed to that. And what the replacement keeps is the target's metadata as it
+stands once the body has arrived, not as it stood when the upload began: a mode or an owner changed while
+the body was being transferred touches the ctime and not the modification time, so nothing else in the
+write would notice it, and applying what was captured at the start would undo a change that was made for
+safety. A change made in the tail between that reading and the replacement is not carried, which is what
+keeps the reading adjacent to the metadata work and the last identity check adjacent to the replacement.
+
 #### Scenario: Write with a matching modification time
 
 - **WHEN** a caller writes a file supplying the modification time it last observed, and the file is unchanged
@@ -325,6 +335,16 @@ other name keeps the contents it had -- which is a thing to be told, not to disc
 
 - **WHEN** a caller writes an existing file that has one name
 - **THEN** the replacement carries its permission bits, and its owner where the hub is allowed to set it
+
+#### Scenario: A target that is not a regular file
+
+- **WHEN** a caller writes a path that holds a named pipe, a socket, or a device
+- **THEN** the hub refuses and leaves the node as it was
+
+#### Scenario: The target's mode changed while the body travelled
+
+- **WHEN** the target's permissions are changed while the body is being transferred
+- **THEN** the replacement carries the permissions the target has when the body has arrived
 
 ### Requirement: Session working directory
 

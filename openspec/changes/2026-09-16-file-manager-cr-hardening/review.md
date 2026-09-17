@@ -957,3 +957,68 @@ prevent, and now fixed with a test that reaches `removeAll`; and the round's own
 correction, in `tasks.md` and in `design.md`'s decision 8, which named an artefact that had not been
 edited. The fourth was the skip guard in the new test, keyed on a string that survives the failure it was
 meant to detect, so a platform where the file cannot run was measured as one where it did.
+
+## The thirteenth review of the change
+
+Three findings, and the first two are the same shape: the write path was less careful about *what it
+replaces* than the read path is about what it reads.
+
+The read has refused everything but regular files from the beginning, and can say why -- a named pipe
+blocks a request goroutine until something writes to it, a device answers with what it produces rather
+than with what it holds. The write refused only directories, and for a write that is not the same
+question: the staged file *is* a regular file, so writing one over a pipe does not write the pipe, it
+removes it. A caller who asked for contents to be written has not agreed to that, which is exactly the
+refusal the dangling link beside it already got. Both are refused now, in the read path's words.
+
+The second is subtler and follows from the fix of the previous round. Keeping the target's mode and owner
+is right; keeping the ones it had when the *upload began* is not, because an upload can take minutes and
+a chmod during it touches the ctime and not the modification time -- so nothing else in the write would
+notice, and the save would quietly undo a permission that had just been tightened. The metadata now comes
+from the stat the identity check performs at commit, which is why it costs nothing to be current there,
+and the window that remains is the two adjacent syscalls that check has always had.
+
+The third was the tab strip's own footprint: `Delete` closes a tab and the element that had the focus
+goes with it, so the keyboard landed on the document body. It goes to the active tab now, and to the
+listing when the last tab has gone. The note that recorded this as pre-existing is withdrawn rather than
+left standing -- it became this change's when the strip grew a way to close a tab from the keyboard.
+
+**And the review of this round found four things**, one of them severe and this round's own doing. Moving
+the metadata read to the commit point put the mode, the owner, an fsync of the whole body and a close
+between the identity check and the rename -- so the two were no longer the adjacent system calls the
+requirement insists on, and the window the check exists to close had grown from microseconds to tens of
+milliseconds on a large replacement. The reviewer measured it: with a competing write started after the
+body had arrived, the broken version lost the competitor's contents silently in three runs out of three,
+where the previous shape lost nothing. The check now runs twice, once after the body (where the metadata
+comes from) and once immediately before the rename; that second one cannot be pinned by a test, and the
+record says so. The other three: the accepted item this round added about symbolic links said the
+opposite of what the code does -- `Resolve` canonicalizes, so a write to a link writes what it points at
+and the link stays a link, while delete and rename go through `entryTarget` and act on the name -- and is
+rewritten around that invariant; the owner's half of the commit-time rule was recorded as tested when no
+test reached it (it has one now); and the mode field was left assigned for a case whose value is
+overridden, inviting a removal that would quietly make a replacement's staging file world-readable.
+
+**The browser side was reviewed too, and found three more.** The restore had an unhandled third case --
+nothing in the listing to take the keyboard -- and failed silently: a directory being loaded renders no
+tree at all, and an empty one renders no row, so `focusFirstRow`'s false was discarded and the focus
+stayed on the body, while the record and the code's own comment both said the listing took it. The
+listing column is focusable now and takes it in that case. The "active tab" half was unpinned: the test
+closed the active tab of a two-tab strip, where the survivor is both the active tab and the first, so a
+strip that always focused the first would have passed -- it now closes a different tab, with the pointer,
+and asserts the focus lands on the active one, which also covers the path the record names where a click
+rather than a key removes the focused element. And `focusActiveTab`'s own doc promised a destination the
+manager does not use (the panel, which is not rendered once nothing is open) and named a fallback that
+cannot be reached.
+
+**A closure reviewer checked the fixes themselves and found five**, all prose, which is where the last
+few rounds of this branch have ended up. The one that mattered: the specification, the delta and the
+design note all said the replacement keeps the target's metadata "as it stands when the write is
+committed" or "at the moment of the replacement", where the code reads it once the body has arrived --
+a chmod landing in the tail between that reading and the rename is not carried, and the tail is the
+chmod, the chown, the fsync and the close. The words now say what the code does, and say why that is the
+shape: the reading is adjacent to the metadata work and the last identity check is adjacent to the
+replacement, which is the trade this branch chose one round ago. The rest: `linkedError`'s doc counted
+two calls where the new post-body check makes three; `writeOptions.mode`'s doc called the field "the
+private staging mode" for a replacement, where it is unset and the privacy comes from `createStaged`'s
+own override -- the same trap this round congratulated itself for closing, one field over; `tasks.md`'s
+Verify line for 23.3 described the test the same item's note records as superseded, and named neither
+the real title nor the second test; and the new test carried its comment block twice.
