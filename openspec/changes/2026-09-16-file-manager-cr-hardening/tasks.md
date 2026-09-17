@@ -233,4 +233,4 @@ the second. The accepted-item note that recorded this as pre-existing is gone fr
 
 - [x] 24.1 Pin an existing write target with a metadata-only descriptor for the whole transfer, so Linux cannot free and reuse the inode number while `os.SameFile` is the outstanding identity check. Verify on macOS with `TestAForcedWriteRefusesAFileReplacedDuringTheTransfer`, and in Ubuntu CI where the unpinned implementation reproduced the overwrite.
 - [x] 24.2 Replace the line-and-sentinel pane protocol with tmux byte-length framing for all nine fields. Verify with `TestParsePanesKeepsRecordSyntaxInsideFields`, the real-server `TestACommandNameCarryingALineBreakCannotForgeARecord`, and the Ubuntu CI case that previously produced two records for `victim`.
-- [ ] 24.3 Run the complete Go, race, frontend, lint, build, and strict OpenSpec checks; rebuild the `0.4.0-rc.1` candidate from the corrected commit and verify PR #10 is green.
+- [x] 24.3 Run the complete Go, race, frontend, lint, build, and strict OpenSpec checks; rebuild the `0.4.0-rc.1` candidate from the corrected commit and verify PR #10 is green.
