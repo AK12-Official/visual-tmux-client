@@ -840,6 +840,47 @@ error had been contradicted without being amended; a wire contract had been made
 the specification saying what a request carries. Each is the species the last three rounds of this branch
 kept finding, and each was found by a reviewer reading the *change* rather than the diff.
 
+**A second reviewer read the browser, and found four more.** The retry after the agreement was
+described as a replay of the refused request and is not one: it saves the tab as it stands when the
+answer arrives, which is what the user's click meant, and the comment, `tabs.ts`'s doc and the test now
+say that -- with a keystroke typed while the refused write travelled, so the property is asserted rather
+than assumed. The delete's focus restore could land on a row of a listing the user had opened *while the
+delete waited for a write* (that wait is unbounded by design), which is a place they have never been and
+which the next Space or Enter would act on: it now measured the entry that stands beside the deleted one,
+by path, and only restores in the listing it measured. The strip's claim to be one stop in the tab order
+was false while each tab's close button was the next stop -- with ten files open, ten stops and ten
+destructive buttons between the user and the panel -- so the close buttons are out of the tab order and
+Delete closes the focused tab, and the panel and the tabs now name each other by id rather than the panel
+being named alone. And the test for the delete's rule could not see it: its fake listing kept returning
+the deleted name, so any restore passed. It asserts the path now, and the navigation case has a test of
+its own.
+
+**A third reviewer read the hub's write path**, whose first finding was the `Delete` regression above --
+found and fixed while it was reading -- and whose remaining three were the same species. The round had
+recorded the owner path as needing root and left it unverified; the reviewer measured that half of it
+does not, since a file may be moved to a group the user belongs to, and the round's only new branch that
+touches the filesystem was therefore testable all along. `closedRootError`'s comment still justified
+itself by the write path and the recursive delete "reporting their own", which stopped being true when
+both started deferring to the classifier -- and that comment is what would have reassured a reader
+about exactly the mistake `Delete` had made. And `confirmUnchanged`'s doc said three things are refused
+at commit where the code refuses four, with the link count asked last and after the observed time: that
+order is what keeps the browser's two questions from overwriting each other's answer. All three
+corrected, the redundant per-site classifications are gone so that "one place" is true, and the rooted
+half of the new check has a test.
+
+**A fourth reviewer closed the round**, verifying the fixes with reverts and finding five more -- four claims
+and one behaviour. The behaviour was the delete's focus restore: the row that follows a directory in a flat
+listing is its first *child*, which the delete removes with it, so the search landed at the top of the
+listing instead of where the directory stood. It follows the row's depth now, and has a test with a child
+rendered between them. Of the claims: the design note had the choice *inverted* (it said the requirement
+accepts a half-written file, where the staged replacement exists to prevent exactly that); a test was named
+in `tasks.md` that a careless edit of this round's own had deleted -- restored, and the lesson is that a
+range-replacement over a test file is as dangerous as one over code; "one place" was true of `Write` and
+`Delete` and false of the service, since `List`, `Read`, `Create` and `Rename` still classify where they
+raise (demonstrated by deleting two of them and watching the suites stay green) -- scoped in the comment and
+recorded as a pre-existing gap rather than smoothed over; and the pane item's "asserted" covered a
+one-directional count, which cannot see a tmux that escaped the separators as well.
+
 ### What this round says about the previous one
 
 The tenth round concluded that the product code had been unchanged for five rounds and that only claims
@@ -852,3 +893,67 @@ neither answers the other's. The tenth round's own conclusion
 was that a check can always be narrower than its claim; the sharper lesson here is that a *reader* of
 the code is a different instrument from a reader of the diff, and that the accessibility of a component
 is a product property that no amount of prose about it will exercise.
+
+## The twelfth review of the change
+
+Four findings and three standing tasks, from a review of the branch as it now stands.
+
+**The write replaced more than the contents.** Saving stages the body in a sibling and renames it over
+the target, which is what the specification requires so that a failed write leaves the old contents
+alone -- and which also means the replacement is a *new file*. Everything that belonged to the inode
+rather than to its contents goes with it: a hard link to the file keeps the contents it had, ACLs and
+extended attributes are not carried, and the owner is the hub's user's unless the hub may give the
+target's back. The finding is right about all of it.
+
+*What was refused.* Writing through the target's own inode keeps every one of those, and it is what an
+editor does when it knows about links. It also gives up the guarantee: a failure part-way through an
+in-place write leaves the file half written under every name at once, where the staged replacement
+leaves the old contents intact under all of them. The requirement chose content safety, and this round
+did not overturn it -- so the *silence* is what got fixed instead. The owner is taken back where the hub
+is allowed to set it. A target reachable under more than one name is refused until the caller says it
+knows: the browser asks, names what will happen to the other names, and retries with the same captured
+contents and observation plus that one agreement. The link count is asked again at commit, because a
+link made while the body travelled is a name the caller was never told about. And the cost that cannot
+be avoided is now written where the requirement is, in both READMEs, and in decision 2a.
+
+**The focus the manager took away.** The menu handed the keyboard back to the row it was opened from,
+and then the action removed that row: the browser moved the focus to the document body, and a keyboard
+user started over from the top of the page. The rename now puts it on the row the entry has, and the
+delete on whichever row stands where the deleted one did -- measured before the action, because a
+removed row cannot say where it was -- and only when the focus is nowhere, so a user who moved it
+somewhere else keeps it.
+
+**The roles the tabs declared.** `role="tablist"` and `role="tab"` are a promise about behaviour: one
+stop in the tab order, arrows moving between tabs, and a panel that says which tab it is showing. None
+of the three was there. The strip now carries a roving tabindex, answers Left/Right/Home/End by moving
+the focus and selecting what it moved to, and names each tab so the panel can be labelled by the
+selected one -- the id scheme lives in `files/tabs.ts`, where the two components can agree on it.
+
+**And the residual that was not one.** The previous round recorded the command field as the one thing
+it could not measure: the field a program names itself, whose line break had been seen once and never
+reproduced. That disposition was wrong, and this round is what shows it -- though the first attempt at the
+measurement was wrong too, and the review of this round is what unpicked that. A *process* whose own name
+carries a line break cannot be made here at all: a copy of a system binary is killed by the platform (the
+pane is left dead), a symbolic link reports the name of the binary it resolves to, and a script reports
+its interpreter. So what the test measures is the value tmux reports for the command field when that
+value carries a line break -- the command string the pane was given -- which is the route a process name
+would have to reach the parser through in any case. tmux escapes the line break, so the record is never
+split and no fragment of that pane can be read as a record for another session. The separators are not
+escaped, so the record carries too many fields and is dropped whole: that pane contributes no summary,
+and no other session's summary is touched. Both are asserted now, and the count assertion is the one that
+fails if the escaping stops.
+
+**The three standing tasks** are closed rather than carried: 7.1 by a test, 7.2 as a recorded accepted
+item (a layout measure cannot be observed without a layout engine), and 15.9 by making the classification
+one place instead of three -- which also meant fixing the classifier, since `os.IsNotExist` and
+`os.IsPermission` see through a `*PathError` and nothing else, which is why the classification had been
+spread across the call sites in the first place.
+
+**The review of this round found four things**, and three of them were claims rather than code: the
+measurement above, described as a runnable file when the file never ran; `Delete`'s classifier, recorded
+as moved to one place when the edit had not applied to `Delete` at all -- leaving a recursive delete that
+meets a closed handle answering as a write failure, which is the split answer the old helper existed to
+prevent, and now fixed with a test that reaches `removeAll`; and the round's own account of that
+correction, in `tasks.md` and in `design.md`'s decision 8, which named an artefact that had not been
+edited. The fourth was the skip guard in the new test, keyed on a string that survives the failure it was
+meant to detect, so a platform where the file cannot run was measured as one where it did.

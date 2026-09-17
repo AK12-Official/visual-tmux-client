@@ -1,15 +1,66 @@
 <script setup lang="ts">
-import { isDirty, type OpenFile } from '../../files/tabs'
+// The tab strip. It declares itself a tablist, which is a promise about how it
+// behaves as well as about what it is: one stop in the tab order rather than one
+// per tab, the arrows moving between them, a way to close one without leaving the
+// keyboard, and every tab named so that the panel can say which one it is
+// showing.
+import { ref } from 'vue'
+
+import { isDirty, panelElementId, tabElementId, type OpenFile } from '../../files/tabs'
 
 defineProps<{ files: OpenFile[]; active: string | null }>()
 const emit = defineEmits<{
   (e: 'select', path: string): void
   (e: 'close', path: string): void
 }>()
+
+const root = ref<HTMLElement | null>(null)
+
+/** labels are the tab buttons rendered right now, in the order they appear. */
+function labels(): HTMLButtonElement[] {
+  const el = root.value
+  if (!el) return []
+  return Array.from(el.querySelectorAll<HTMLButtonElement>('.tabs__label'))
+}
+
+/**
+ * onKeydown answers the keys a tablist is expected to answer.
+ *
+ * The tab it measures from is the focus rather than the selection: those are the
+ * same thing whenever the focus is in the strip, because the active tab is the
+ * one in the tab order, and the focus is what the arrows should move. Moving it
+ * also selects, which is the pattern for tabs whose panels are already loaded --
+ * and every open file's editor is loaded, deliberately, so that switching away
+ * does not take its undo history with it. What is selected is read from the
+ * button that was focused, so a selection cannot drift from the focus.
+ */
+function onKeydown(event: KeyboardEvent) {
+  const found = labels()
+  const current = found.findIndex((tab) => tab === document.activeElement)
+  if (current < 0) return
+  const path = found[current].dataset.path
+  if (event.key === 'Delete') {
+    if (path !== undefined) emit('close', path)
+    return
+  }
+  const move: Record<string, number> = {
+    ArrowRight: current + 1,
+    ArrowLeft: current - 1,
+    Home: 0,
+    End: found.length - 1,
+  }
+  const to = move[event.key]
+  if (to === undefined) return
+  event.preventDefault()
+  const at = ((to % found.length) + found.length) % found.length
+  found[at].focus()
+  const next = found[at].dataset.path
+  if (next !== undefined) emit('select', next)
+}
 </script>
 
 <template>
-  <div class="tabs" role="tablist">
+  <div ref="root" class="tabs" role="tablist" @keydown="onKeydown">
     <div
       v-for="file in files"
       :key="file.path"
@@ -20,6 +71,10 @@ const emit = defineEmits<{
         class="tabs__label"
         type="button"
         role="tab"
+        :id="tabElementId(file.id)"
+        :data-path="file.path"
+        :tabindex="file.path === active ? 0 : -1"
+        :aria-controls="panelElementId"
         :aria-selected="file.path === active"
         :title="file.path"
         @click="emit('select', file.path)"
@@ -38,6 +93,7 @@ const emit = defineEmits<{
       <button
         class="tabs__close"
         type="button"
+        tabindex="-1"
         :aria-label="`Close ${file.name}`"
         @click="emit('close', file.path)"
       >×</button>

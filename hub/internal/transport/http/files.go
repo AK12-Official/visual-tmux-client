@@ -21,7 +21,8 @@ type FileService interface {
 	List(ctx context.Context, path string) (files.ListResult, error)
 	Read(ctx context.Context, path string) (files.ReadResult, error)
 	Write(
-		ctx context.Context, path string, body io.Reader, declaredSize int64, expected *files.ExpectedMtime,
+		ctx context.Context, path string, body io.Reader, declaredSize int64,
+		expected *files.ExpectedMtime, allowOtherNames bool,
 	) (files.WriteResult, error)
 	Create(ctx context.Context, path string, isDir bool) error
 	Rename(ctx context.Context, path, newPath string) error
@@ -55,6 +56,8 @@ func mapFileError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "conflict")
 	case errors.Is(err, files.ErrDirNotEmpty):
 		writeError(w, http.StatusConflict, "dir_not_empty")
+	case errors.Is(err, files.ErrHasOtherNames):
+		writeError(w, http.StatusConflict, "other_names")
 	case errors.Is(err, files.ErrFileTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, "file_too_large")
 	default:
@@ -211,6 +214,11 @@ func (s *handlerState) writeFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
+	allowOtherNames, ok := parseFlag(query.Get("allow_other_names"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_body")
+		return
+	}
 
 	// This route carries file content, so it gets its own bound rather than the
 	// global request limit -- raising that one would let every other endpoint be
@@ -220,7 +228,8 @@ func (s *handlerState) writeFile(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.MaxFileSize > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxFileSize)
 	}
-	result, err := s.files.Write(r.Context(), query.Get("path"), r.Body, declared, expected)
+	result, err := s.files.Write(
+		r.Context(), query.Get("path"), r.Body, declared, expected, allowOtherNames)
 	if err != nil {
 		var oversized *http.MaxBytesError
 		if errors.As(err, &oversized) {
@@ -355,6 +364,24 @@ func parseExpectedMtime(query url.Values) (*files.ExpectedMtime, bool) {
 		expected.Millis = *millis
 	}
 	return &expected, true
+}
+
+// parseFlag reads a query parameter that is either absent or "1".
+//
+// Absent means the caller did not ask for the thing the flag allows, which is
+// the same answer as an explicit "0"; the two values are the only ones it may
+// carry, because a flag with three states is a flag whose callers disagree about
+// what the others mean. A malformed one is refused rather than read as a zero,
+// which is what the rest of this file does with the parameters it parses.
+func parseFlag(value string) (bool, bool) {
+	switch value {
+	case "", "0":
+		return false, true
+	case "1":
+		return true, true
+	default:
+		return false, false
+	}
 }
 
 // parseRequiredInt64 parses a query parameter the request cannot do without.

@@ -28,8 +28,10 @@ import {
   anyDirty,
   beginSave,
   isDirty,
+  panelElementId,
   saveOpenFile,
   settleSave,
+  tabElementId,
   type OpenFile,
 } from '../../files/tabs'
 import {
@@ -60,6 +62,9 @@ const emit = defineEmits<{
 }>()
 
 const tree = reactive(createTreeState())
+// treeRef is the rendered tree, asked to put the keyboard back after an action
+// removes or renames the row it was on.
+const treeRef = ref<InstanceType<typeof FileTree> | null>(null)
 const current = ref('')
 const loading = ref(true)
 // failure takes over the panel, so it is only ever set when there is nothing
@@ -468,7 +473,11 @@ async function toggleDirectory(path: string) {
  * again at answer time would describe the tab as it now is -- and agreeing with
  * itself is what would mark the file at the new path saved by a write that named
  * the old one. See settleSave. */
-async function save(force = false, tabId: number | null = active.value?.id ?? null) {
+async function save(
+  force = false,
+  tabId: number | null = active.value?.id ?? null,
+  allowOtherNames = false,
+) {
   const tab = tabs.value.find((candidate) => candidate.id === tabId)
   if (!tab) return
 
@@ -500,7 +509,7 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
   const ticket = (saveTickets.get(tab.id) ?? 0) + 1
   saveTickets.set(tab.id, ticket)
 
-  const request = beginSave(tab, force)
+  const request = beginSave(tab, force, allowOtherNames)
   saving.begin(request.path)
   try {
     const stamp = await saveOpenFile(request)
@@ -543,7 +552,30 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
       const overwrite = window.confirm(
         `${tab.name} changed on disk since it was opened. Overwrite it with your version?`,
       )
-      if (overwrite) await save(true, tab.id)
+      // The agreement about other names travels with the retry: the user gave it
+      // for this write, and asking for it again on the way to the same write
+      // would be the manager forgetting an answer it already has.
+      if (overwrite) await save(true, tab.id, allowOtherNames)
+      return
+    }
+    if (err instanceof FileApiError && err.code === 'other_names') {
+      // The hub will not replace a file that is reachable under other names
+      // without being told that the user knows what that means: the replacement
+      // is a new file, so every other name keeps the contents it had, and the
+      // user is the only one who can decide to have it that way.
+      //
+      // The retry saves the tab as it stands when the answer arrives, with the
+      // agreement added -- not a replay of the request that was refused. That is
+      // deliberate: the first click meant "save this", and anything typed while
+      // the refused write travelled is part of what the user meant. The
+      // observation travels with it because the tab has not changed it, and it is
+      // the tab's own, so a save of the newest text is still checked against what
+      // the hub last reported.
+      const replace = window.confirm(
+        `${tab.name} is reachable under other names as well. Saving replaces this file, and ` +
+          `the other names keep the contents they have now. Save anyway?`,
+      )
+      if (replace) await save(force, tab.id, true)
       return
     }
     report(err, `Could not save ${tab.name}`)
@@ -825,6 +857,12 @@ function renameTarget(entry: Entry, path: string) {
       retargetTabs(path, target, name)
       return settleMutation(path, target)
     })
+    .then(() => {
+      // The row the menu gave the keyboard back to is the one that just changed
+      // its name, so the focus follows the entry it belongs to. Asked for by
+      // path, because the row that now carries it is a different element.
+      if (focusIsNowhere()) treeRef.value?.focusPath(target)
+    })
     .catch((err: unknown) => report(err, `Could not rename ${entry.name}`))
     .finally(() => renaming.end(path))
 }
@@ -876,6 +914,15 @@ async function deleteTarget(entry: Entry, path: string) {
   // that path are refused from then on and each retry of the delete adds another
   // waiter. A client where a write never answers is one where that write's tab
   // never stops being unsaved either; the way out of both is a reload.
+  // Where the keyboard should go when the row is gone: the entry that follows it
+  // in the listing, or the one before it when it is last. Taken now, because the
+  // row cannot say afterwards what stood beside it -- and taken with the
+  // directory it was measured in, because the wait below is unbounded and the
+  // user may have navigated somewhere else in the meantime. A row number in a
+  // listing the user has since opened is not a place they have ever been.
+  const neighbour = treeRef.value?.neighbourOf(path) ?? null
+  const listing = current.value
+
   deleting.begin(path)
   try {
     await saving.idle(path)
@@ -915,6 +962,16 @@ async function deleteTarget(entry: Entry, path: string) {
     report(err, `Could not delete ${entry.name}`)
   } finally {
     deleting.end(path)
+    // The confirmation took the focus and the entry is gone, so the row that
+    // stands where it did is what gets it. Left alone when the focus is somewhere
+    // else -- that is the user having moved it on purpose -- and when the tree is
+    // showing a different directory than the one this was measured in, which is
+    // the same thing: a listing they opened while the delete waited for a write.
+    if (current.value === listing && focusIsNowhere()) {
+      if (neighbour === null || !treeRef.value?.focusPath(neighbour)) {
+        treeRef.value?.focusFirstRow()
+      }
+    }
   }
 }
 
@@ -1016,6 +1073,18 @@ function anchorFor(event: MouseEvent, opener: HTMLElement | null): { x: number; 
   return { x: box.left + 8, y: box.bottom }
 }
 
+/** focusIsNowhere reports whether the focus is on nothing in particular, which
+ * is where removing the element that held it leaves it: the browser moves it to
+ * the document body, and a keyboard user starts over from there.
+ *
+ * It is the condition for putting it back, rather than an unconditional restore:
+ * a focus that is somewhere else is one the user moved on purpose, and a manager
+ * that took it back would be worse than the gap it closes. */
+function focusIsNowhere(): boolean {
+  const active = document.activeElement
+  return active === null || active === document.body || active === document.documentElement
+}
+
 /** closeMenu dismisses the menu, and hands the keyboard back to the row it was
  * opened from.
  *
@@ -1081,6 +1150,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
             </button>
           </p>
           <FileTree
+            ref="treeRef"
             :path="current"
             :state="tree"
             :current="current"
@@ -1116,7 +1186,20 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
             <span v-if="isDirty(active)" class="fm__dirty" role="status">unsaved changes</span>
           </div>
 
-          <div class="fm__content">
+          <!--
+            The panel the tab strip's tabs label: role="tabpanel" and the id of
+            the tab that is selected, which is the other half of the tablist
+            contract the strip declares. It is a tab stop of its own because it
+            scrolls -- a scrollable region has to be reachable without a pointer
+            -- and because the editor inside it is reached through it.
+          -->
+          <div
+            :id="panelElementId"
+            class="fm__content"
+            role="tabpanel"
+            tabindex="0"
+            :aria-labelledby="active ? tabElementId(active.id) : undefined"
+          >
             <template v-if="active">
               <ImagePreview
                 v-if="preview === 'image'"

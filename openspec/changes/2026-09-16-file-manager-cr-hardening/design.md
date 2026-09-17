@@ -230,6 +230,29 @@ opaque decimal string beside the millisecond number, and is compared only when p
 hub that sends only milliseconds still works, with the weaker comparison; so does a client
 that sends only milliseconds.
 
+### 2a. What a replacement keeps, and what it cannot
+
+The write stages the body in a sibling and renames it over the target, which is what makes a failed or
+interrupted write leave the old contents alone. It is also what makes the replacement a *new file*: the
+inode the target had is unlinked, and everything that belonged to it rather than to its contents goes
+with it. The permission bits are carried over, and so is the owner where `takeOwner` is allowed to set
+it -- the ordinary case of a file the hub's user already owns needs nothing, and a hub running as root
+can give another account's file back to it. What cannot be carried is everything else the inode held:
+a hard link to the file now points at the contents it had before the save, and ACLs and extended
+attributes are the empty set a new file has.
+
+*The alternative was considered and refused.* Writing through the target's own inode would keep all of
+it, and it is what an editor does when it knows about links. It also loses the guarantee the
+specification requires: a failure part-way through an in-place write leaves the file half written under
+*every* name it has at once, where the staged replacement leaves the old contents intact under all of
+them. Between a silent metadata loss and a possible content loss the requirement prevents the second
+-- which is what the staged replacement is for -- and this change did not overturn that choice, so the
+metadata loss is the one accepted. What it did instead is make the first one visible where it can be:
+the owner is given back where the hub may, a target reachable under more than one name is refused until
+the caller agrees to it (the browser asks, and says what will happen to the other names), the link count
+is re-checked at commit because a link made while the body travels is a name the caller was never told
+about, and the ACL and extended-attribute cost is written into the requirement, both READMEs and here.
+
 ### 3. The whole file decides whether it is text, and only regular files can be read
 
 A prefix is a guess of exactly the kind the classification exists to avoid. The scan is
@@ -484,32 +507,39 @@ rather than an assumption: widening that test from one route to all of them is w
 working-directory route is deliberately answered rather than refused. The limits are carried as
 configured, because there is nothing for a hidden override to protect.
 
-### 8. The pane protocol's unbreakable field is tmux's to keep, and is measured
+### 8. The pane protocol's unbreakable field is tmux's to keep, and its value is measured
 
 `ParsePanes` splits records on newlines, and its doc comment said a field carrying one could split a
 record and forge one for another session -- naming executable names and argv as the way in. Measured
-against a real tmux, the names cannot carry the terminator: a session name and a window name containing a
-newline are refused when they are set ("invalid session name", "invalid window name"), and `select-pane
--T` leaves a title containing one as it was -- silently, which is why the test reads the title back rather
-than checking a status. So the parse is sound, and the guarantee is tmux's rather than the parser's, which
-is the part that has to be written down: the field count is validation of shape and not escaping, and a
-reader who takes it for a defence will not go looking for one.
+against a real tmux, the names cannot carry the terminator: a session name and a window name containing
+a newline are refused when they are set ("invalid session name", "invalid window name"), and `select-pane
+-T` leaves a title containing one as it was -- silently, which is why the test reads the title back
+rather than checking a status. So the parse is sound, and the guarantee is tmux's rather than the
+parser's, which is the part that has to be written down: the field count is validation of shape and not
+escaping, and a reader who takes it for a defence will not go looking for one.
 
-**What a break would do was worth measuring rather than assuming, and the first correction got it wrong.**
-It said a break drops the pane's own record and lets the tail take its place. That is one of two outcomes.
-A break *before* the last field leaves too few fields to parse, so the pane's record goes and the tail --
-with the separators a forger writes into it and the fields that follow it in the real record -- is read
-instead, naming whichever session the fragment starts with. A break in the *last* field leaves the head
-with all nine fields, so the pane is read with its command truncated and the tail is an extra record: a
-forgery that costs the pane nothing. Both are pinned by `TestALineBreakInAFieldWouldNotBeDetected`.
+The command field is the one a program names itself, and it is the field tmux is never asked to set, so
+it is the one that had to be measured. The first attempt to measure it produced a claim that was wrong
+in both directions, and the review of this round is what unpicked it. A *process* whose own name carries
+a line break cannot be produced on this machine at all -- a copy of a system binary is killed by the
+platform, a symbolic link reports the name of the binary it resolves to, and a script reports its
+interpreter -- but that is not what the test ended up measuring: the copy never ran, the pane was left
+dead, and what tmux reported was the *command string* it had been given. That value is what the round
+measured, and it is worth having: it is the route any process name would reach the parser through.
 
-*The measurement has a limit, recorded here rather than smoothed over:* the command field is the one a
-program names itself, and the only field no test covers. What tmux reports for it was seen to escape a
-line break once, which later attempts could not reproduce, and a process whose own name carries one could
-not be produced on this machine at all -- a copy of a system binary under such a name does not run. That
-tmux escapes control bytes on its way out is real behaviour (it is why the field separator in that code
-is printable), so the observation stands as the likely answer rather than being dismissed.
+So the comment, the test and this decision say three things now, each of them checked. The line break is
+escaped -- where the name had one byte the value has three, two backslashes and an `n` -- so the record
+is never split, and no fragment of a pane can be read as a record for another session. The separators are
+not escaped, so a record whose value carries them has too many fields and is dropped whole: that pane
+contributes no summary, and no other session's summary is touched. And whether a *live process* whose
+name carries a line break would be reported the same way is not measured, because no such process can be
+made here. On Linux, where a copy of a binary does run, the test would exercise that route instead -- and
+what it would assert there is only the half that holds either way: that no more records come back than
+there are panes. Whether the record is dropped, or the escape has the same shape, is this platform's
+answer and not a promise about that one.
 
+- **[Pre-existing, named not fixed] Closing a tab leaves the keyboard on the document body.** → *The strip's `Delete` closes the focused tab, and the button that does it with a pointer is out of the tab order; either way the element the focus was on is gone, and the focus falls to the body. The tree's rename and delete restore it because this round had to touch them for the same reason; the tab strip's close is the same defect class and a different component, and it is named here rather than fixed in passing.*
+- **[Pre-existing, named not fixed] The service's other methods classify where they raise, not at their return.** → *`Write` and `Delete` classify everything they return through one deferred call, which is what closed the finding that three write-path call sites could each be reverted unnoticed. `List`, `Read`, `Create` and `Rename` still call the classifier at each site that can raise an error, and a call dropped from one of them would turn a not-found read into a reported server fault with nothing failing -- a reviewer demonstrated exactly that by deleting two of them and watching the suites stay green. Closing it is the same shape as the fix above (a named return and one defer per method); it is not this change's to do, and it is named so that the next reader of that comment does not take "one place" for the whole service.*
 ## Risks / Trade-offs
 
 - **[Risk] The commit-time identity check adds a refusal that did not exist**, so a write that

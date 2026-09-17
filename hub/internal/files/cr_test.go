@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,7 +38,7 @@ func TestAForcedWriteDoesNotRecreateARenamedFile(t *testing.T) {
 		},
 	}
 
-	if _, err := svc.Write(context.Background(), original, body, 6, nil); !errors.Is(err, ErrNotFound) {
+	if _, err := svc.Write(context.Background(), original, body, 6, nil, false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected a forced write to refuse a target that is gone, got: %v", err)
 	}
 	if _, err := os.Stat(original); !os.IsNotExist(err) {
@@ -70,7 +71,7 @@ func TestAForcedWriteRefusesAFileReplacedDuringTheTransfer(t *testing.T) {
 		},
 	}
 
-	if _, err := svc.Write(context.Background(), file, body, 6, nil); !errors.Is(err, ErrConflict) {
+	if _, err := svc.Write(context.Background(), file, body, 6, nil, false); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected a conflict, got: %v", err)
 	}
 	if got := readFile(t, file); got != "something else" {
@@ -91,7 +92,7 @@ func TestAWriteRefusesANameTakenWhileItWasBeingWritten(t *testing.T) {
 		race:  func() { mustWrite(t, file, "someone else's") },
 	}
 
-	if _, err := svc.Write(context.Background(), file, body, 7, nil); !errors.Is(err, ErrConflict) {
+	if _, err := svc.Write(context.Background(), file, body, 7, nil, false); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected a conflict, got: %v", err)
 	}
 	if got := readFile(t, file); got != "someone else's" {
@@ -105,7 +106,7 @@ func TestAWriteStillCreatesAFileThatStaysAbsent(t *testing.T) {
 	file := filepath.Join(sandbox(t), "new.txt")
 	svc := mustService(t, Options{})
 
-	result, err := svc.Write(context.Background(), file, strings.NewReader("created"), 7, nil)
+	result, err := svc.Write(context.Background(), file, strings.NewReader("created"), 7, nil, false)
 	if err != nil {
 		t.Fatalf("creating a new file failed: %v", err)
 	}
@@ -130,14 +131,14 @@ func TestAWriteComparesModificationTimesAtFullPrecision(t *testing.T) {
 	file := filepath.Join(dir, "a.txt")
 	svc := mustService(t, Options{})
 
-	first, err := svc.Write(context.Background(), file, strings.NewReader("one"), 3, nil)
+	first, err := svc.Write(context.Background(), file, strings.NewReader("one"), 3, nil, false)
 	if err != nil {
 		t.Fatalf("the first write failed: %v", err)
 	}
 
 	drifted := first.MtimeNanos + 1
 	_, err = svc.Write(context.Background(), file, strings.NewReader("two"), 3,
-		&ExpectedMtime{Millis: first.Mtime, Nanos: &drifted})
+		&ExpectedMtime{Millis: first.Mtime, Nanos: &drifted}, false)
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected a conflict for an observation one nanosecond stale, got: %v", err)
 	}
@@ -145,7 +146,7 @@ func TestAWriteComparesModificationTimesAtFullPrecision(t *testing.T) {
 	// And the time the write actually reported still saves without a spurious
 	// conflict, which is what makes the value worth returning.
 	if _, err := svc.Write(context.Background(), file, strings.NewReader("two"), 3,
-		&ExpectedMtime{Millis: first.Mtime, Nanos: &first.MtimeNanos}); err != nil {
+		&ExpectedMtime{Millis: first.Mtime, Nanos: &first.MtimeNanos}, false); err != nil {
 		t.Fatalf("the next save was refused: %v", err)
 	}
 }
@@ -371,7 +372,7 @@ func TestAWriteRefusesANameTakenByADanglingLink(t *testing.T) {
 		},
 	}
 
-	if _, err := svc.Write(context.Background(), file, body, 7, nil); !errors.Is(err, ErrConflict) {
+	if _, err := svc.Write(context.Background(), file, body, 7, nil, false); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected a conflict, got: %v", err)
 	}
 	info, err := os.Lstat(file)
@@ -418,7 +419,7 @@ func TestAWriteInFlightDoesNotMakeAListingLookTruncated(t *testing.T) {
 			during = &inner
 		},
 	}
-	if _, err := svc.Write(ctx, filepath.Join(dir, "a.txt"), body, int64(len("replacement")), nil); err != nil {
+	if _, err := svc.Write(ctx, filepath.Join(dir, "a.txt"), body, int64(len("replacement")), nil, false); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if during == nil {
@@ -429,5 +430,211 @@ func TestAWriteInFlightDoesNotMakeAListingLookTruncated(t *testing.T) {
 	}
 	if len(during.Entries) != 3 {
 		t.Errorf("expected the three entries, got %v", names(*during))
+	}
+}
+
+// unreadBody is a body that reports whether anything took a byte from it. It is
+// how a test tells a refusal that happened before the transfer from one that
+// happened at the commit: both leave the file alone, and only the first leaves
+// the bytes unsent.
+type unreadBody struct{ read bool }
+
+func (r *unreadBody) Read(p []byte) (int, error) {
+	r.read = true
+	return 0, io.EOF
+}
+
+// A replacement replaces the inode, so a target reachable under more than one
+// name loses the others: the entry the caller wrote is the new file, and every
+// other name keeps the contents it had. That is not a thing to do without saying
+// so -- the user asked to edit one name and would silently be given two different
+// files -- so it is refused until the caller agrees, which is what the browser
+// sends once the user has confirmed.
+func TestAWriteRefusesATargetReachableUnderOtherNames(t *testing.T) {
+	dir := sandbox(t)
+	edited := filepath.Join(dir, "config")
+	other := filepath.Join(dir, "config.backup")
+	mustWrite(t, edited, "old")
+	if err := os.Link(edited, other); err != nil {
+		t.Fatalf("linking: %v", err)
+	}
+
+	svc := mustService(t, Options{})
+	ctx := context.Background()
+
+	// The body is one nothing can read, so a check that ran after the transfer
+	// would answer invalid-body instead -- which is what makes this assert where
+	// the refusal happened and not merely that it happened. Refusing before the
+	// upload is the difference between a linked target costing a round trip and
+	// costing the whole file.
+	body := &unreadBody{}
+	_, err := svc.Write(ctx, edited, body, 3, nil, false)
+	if !errors.Is(err, ErrHasOtherNames) {
+		t.Fatalf("expected a target with other names to be refused, got: %v", err)
+	}
+	if body.read {
+		t.Error("the body was read before the target was refused")
+	}
+	if got := readFile(t, edited); got != "old" {
+		t.Errorf("the refused write changed the file: %q", got)
+	}
+	if got := readFile(t, other); got != "old" {
+		t.Errorf("the refused write changed the other name: %q", got)
+	}
+	if residue := stagingResidue(t, dir); len(residue) != 0 {
+		t.Errorf("a refused write left a staging file behind: %v", residue)
+	}
+
+	// The caller that has agreed gets the write, and the shape it agreed to: the
+	// name it edited carries the new contents and the other name still carries
+	// the old ones. Asserted rather than assumed, because this is the cost the
+	// confirmation names, and a later change that preserved the links instead
+	// would make the wording of that confirmation false.
+	if _, err := svc.Write(ctx, edited, strings.NewReader("new"), 3, nil, true); err != nil {
+		t.Fatalf("the agreed write failed: %v", err)
+	}
+	if got := readFile(t, edited); got != "new" {
+		t.Errorf("the written name holds %q", got)
+	}
+	if got := readFile(t, other); got != "old" {
+		t.Errorf("the other name holds %q, and the confirmation promised it the old contents", got)
+	}
+}
+
+// The answer can change while the body travels, and the one that matters is the
+// one at the moment of replacement: a link made during the upload is a name the
+// caller was never told about, so the commit refuses it exactly as the check
+// before the transfer would have.
+func TestAWriteRefusesANameLinkedWhileTheBodyTravelled(t *testing.T) {
+	dir := sandbox(t)
+	file := filepath.Join(dir, "a.txt")
+	other := filepath.Join(dir, "a.backup")
+	mustWrite(t, file, "first")
+
+	svc := mustService(t, Options{})
+	body := &raceReader{
+		inner: strings.NewReader("edited"),
+		race: func() {
+			if err := os.Link(file, other); err != nil {
+				t.Errorf("linking during the write failed: %v", err)
+			}
+		},
+	}
+
+	if _, err := svc.Write(context.Background(), file, body, 6, nil, false); !errors.Is(err, ErrHasOtherNames) {
+		t.Fatalf("expected the commit to refuse a target linked in flight, got: %v", err)
+	}
+	if got := readFile(t, file); got != "first" {
+		t.Errorf("the refused write changed the file: %q", got)
+	}
+	if residue := stagingResidue(t, dir); len(residue) != 0 {
+		t.Errorf("a refused write left a staging file behind: %v", residue)
+	}
+}
+
+// What a replacement keeps, and what it cannot. The mode comes across, and a
+// file with one name is written without asking anything.
+func TestAReplacementKeepsTheModeAndWritesAnUnlinkedFileWithoutAsking(t *testing.T) {
+	dir := sandbox(t)
+	file := filepath.Join(dir, "script.sh")
+	mustWrite(t, file, "#!/bin/sh\n")
+	if err := os.Chmod(file, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := mustService(t, Options{})
+	const replacement = "#!/bin/sh\necho hi\n"
+	if _, err := svc.Write(
+		context.Background(), file, strings.NewReader(replacement), int64(len(replacement)), nil, false,
+	); err != nil {
+		t.Fatalf("a file with one name must be writable without agreement: %v", err)
+	}
+	info, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Errorf("the replacement's mode is %v, want 0755", info.Mode().Perm())
+	}
+}
+
+// takeOwner's compare and its chown are reachable without root, which the first
+// version of the test above claimed was not true: an ordinary user may move a file
+// to a *group* they belong to, and a replacement of such a file has to keep it.
+// Nothing but the chown can have put that group there -- a staging file is created
+// with its directory's group, so a replacement that let takeOwner be dropped would
+// come back in the directory's group -- which is what makes this a test of the
+// path rather than of the filesystem.
+func TestAReplacementKeepsAGroupTheHubMaySet(t *testing.T) {
+	dir := sandbox(t)
+	file := filepath.Join(dir, "a.txt")
+	mustWrite(t, file, "first")
+
+	info, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("no group to compare on this platform")
+	}
+	groups, err := os.Getgroups()
+	if err != nil {
+		t.Skipf("cannot list this process's groups: %v", err)
+	}
+	wanted := -1
+	for _, group := range groups {
+		if group != int(stat.Gid) {
+			wanted = group
+			break
+		}
+	}
+	if wanted < 0 {
+		t.Skip("this process belongs to no other group")
+	}
+	if err := os.Chown(file, -1, wanted); err != nil {
+		t.Skipf("cannot move the file to that group here: %v", err)
+	}
+
+	svc := mustService(t, Options{})
+	const replacement = "second"
+	if _, err := svc.Write(context.Background(), file,
+		strings.NewReader(replacement), int64(len(replacement)), nil, false); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	after, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok = after.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("no group to compare on this platform")
+	}
+	if int(stat.Gid) != wanted {
+		t.Errorf("the replacement is in group %d, want %d", stat.Gid, wanted)
+	}
+}
+
+// The same refusal through a configured root, where the stat that answers the
+// question goes through the handle rather than the path. Same rule, different
+// call, and the rooted branch is not what the tests above exercise: they run
+// unrooted, which is the other half of this check.
+func TestARootedWriteRefusesATargetWithOtherNames(t *testing.T) {
+	root := sandbox(t)
+	edited := filepath.Join(root, "config")
+	other := filepath.Join(root, "config.backup")
+	mustWrite(t, edited, "old")
+	if err := os.Link(edited, other); err != nil {
+		t.Fatalf("linking: %v", err)
+	}
+
+	svc := mustRootedService(t, root)
+	if _, err := svc.Write(context.Background(), edited,
+		strings.NewReader("new"), 3, nil, false); !errors.Is(err, ErrHasOtherNames) {
+		t.Fatalf("expected a rooted target with other names to be refused, got: %v", err)
+	}
+	if got := readFile(t, edited); got != "old" {
+		t.Errorf("the refused write changed the file: %q", got)
 	}
 }

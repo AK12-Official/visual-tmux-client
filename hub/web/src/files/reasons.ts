@@ -25,6 +25,12 @@ export const REASONS: Record<string, string> = {
   invalid_body: 'the request did not match the file it described',
   invalid_request: 'the request was not one the hub could read',
   dir_not_empty: 'the directory still contains something',
+  // Reached without the confirmation the manager offers: it answers this one
+  // with a question rather than a message. The words are here anyway, because the
+  // table is checked against the codes the hub can answer with, and a code with
+  // no entry is one the manager would show as a bare identifier whenever it
+  // reached a message rather than a question.
+  other_names: 'other names for the same file keep the contents they have',
   write_failed: 'the hub could not complete the write',
   mtime_unavailable: 'the hub did not say when the file last changed',
 }

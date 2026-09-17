@@ -58,6 +58,29 @@ export interface OpenFile {
   binary: Classification
 }
 
+/**
+ * panelElementId is the DOM id of the element the open files are shown in.
+ *
+ * One panel, whose contents are the selected file's, rather than one per tab:
+ * the manager renders a single viewer and swaps what is in it. Every tab names
+ * it, and it is labelled by the tab that is selected, so the association reads in
+ * both directions.
+ */
+export const panelElementId = 'file-panel'
+
+/**
+ * tabElementId is the DOM id of an editing session's tab.
+ *
+ * The tab and the panel it labels are rendered by two components -- the strip is
+ * the editor's, the panel is the manager's -- so the association between them is
+ * a name the two have to agree on, and this is where that name is written down.
+ * The session id rather than the path, because a rename moves the path and must
+ * not move the association: the panel is still the panel the tab points at.
+ */
+export function tabElementId(id: number): string {
+  return `file-tab-${id}`
+}
+
 /** isDirty reports whether a file differs from what was last read or saved. */
 export function isDirty(file: OpenFile): boolean {
   return file.text !== file.saved
@@ -88,6 +111,18 @@ export interface SaveRequest {
   text: string
   /** expected is what the write is compared against, or null to force it. */
   expected: Stamp | null
+  /**
+   * allowOtherNames is the user's agreement that a target reachable under more
+   * than one name may be replaced, which leaves those other names holding the
+   * contents they had.
+   *
+   * It is part of the request because it is part of what the write asks for --
+   * the hub refuses such a target without it -- and a request is still everything
+   * one save is sent with, captured together. The manager's retry after the
+   * refusal is a save of the tab as it then stands, with this set; see
+   * FileManagerOverlay for why that is not a replay.
+   */
+  allowOtherNames: boolean
 }
 
 /**
@@ -97,12 +132,13 @@ export interface SaveRequest {
  * observed modification time, which is the only thing that asks the hub to
  * overwrite regardless.
  */
-export function beginSave(file: OpenFile, force = false): SaveRequest {
+export function beginSave(file: OpenFile, force = false, allowOtherNames = false): SaveRequest {
   return {
     id: file.id,
     path: file.path,
     text: file.text,
     expected: force ? null : file.stamp,
+    allowOtherNames,
   }
 }
 
@@ -113,7 +149,7 @@ export function beginSave(file: OpenFile, force = false): SaveRequest {
  * client that assumed the current time would do -- dates the file behind itself
  * and makes the very next save look like a conflict. */
 export async function saveOpenFile(request: SaveRequest): Promise<Stamp | null> {
-  return writeFile(request.path, request.text, request.expected)
+  return writeFile(request.path, request.text, request.expected, request.allowOtherNames)
 }
 
 /** applySaved folds a successful save back into the file's state.

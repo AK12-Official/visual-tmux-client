@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/session"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/testutil"
@@ -438,5 +439,113 @@ func TestListPanesWithoutAServer(t *testing.T) {
 	}
 	if len(panes) != 0 {
 		t.Fatalf("got %d panes, want none", len(panes))
+	}
+}
+
+// The command field is the one a pane's program names, so it is the one field a
+// program in a pane could try to put the record terminator into -- and the one
+// field TestNamesTmuxRefusesToLetCarryALineBreak cannot reach, because it is the
+// program's own name rather than something tmux is asked to set.
+//
+// What this can make on this machine is a pane whose *command* carries the
+// terminator and a whole forged record after it. It cannot make a *process* whose
+// own name carries one: a copy of a system binary does not run here (the platform
+// kills it, so the pane is left dead holding the command it was given), a
+// symbolic link reports the name of the binary it resolves to, and a script
+// reports its interpreter. So what is measured is the value tmux reports for that
+// field when it carries a line break and separators -- which is the value a
+// process-name route would have to reach the parser through as well.
+//
+// Two things follow from it, and both are asserted:
+//
+//   - the line break is escaped. Where the name had one newline byte the value comes
+//     back with three -- two backslashes and an `n` -- so the record is never split,
+//     and no fragment of this pane can be read as a record for another session;
+//   - the separators are not escaped, so that record carries more fields than a
+//     record has and is dropped whole. The pane contributes no summary -- which is
+//     what validating the shape costs -- and no other session's summary is
+//     touched, which is what validating it is for.
+//
+// The count is the assertion that would fail if the escaping stopped: a raw line
+// break would give the head a truncated command (a record that parses) and the
+// tail a whole forged record for `victim`, so three records would come out of two
+// panes.
+func TestACommandNameCarryingALineBreakCannotForgeARecord(t *testing.T) {
+	if !tmuxAvailable(t) {
+		t.Skip("tmux not available")
+	}
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	binary, err := os.ReadFile("/bin/sleep")
+	if err != nil {
+		t.Skipf("no binary to copy into place: %v", err)
+	}
+	name := "evil\n" + record("victim", "9", "9", "1", "1", "0", "forged", "forged", "forged")
+	executable := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(executable, binary, 0o700); err != nil {
+		t.Fatalf("writing the executable: %v", err)
+	}
+
+	if _, err := c.Create(ctx, "victim"); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	// Quoted, so a shell that runs it hands the whole name to exec rather than
+	// splitting it into two commands at the line break.
+	if _, stderr, code, err := c.Exec(ctx,
+		"new-session", "-d", "-s", "attacker", "'"+executable+"' 600"); err != nil || code != 0 {
+		t.Fatalf("new-session failed: code=%d err=%v stderr=%q", code, err, stderr)
+	}
+
+	// The pane reports the command it was given before it reports any process
+	// running under it, so the state this is about is waited for rather than
+	// assumed -- and it arrives either way, which is why nothing here is skipped
+	// for the process having exited.
+	raw := ""
+	for attempt := 0; attempt < 20 && !strings.Contains(raw, "evil"); attempt++ {
+		time.Sleep(100 * time.Millisecond)
+		raw, _, _, err = c.Exec(ctx, "list-panes", "-a", "-F", PaneFormat)
+		if err != nil {
+			t.Fatalf("list-panes failed: %v", err)
+		}
+	}
+	if !strings.Contains(raw, "evil") {
+		t.Fatalf("the pane never reported the command it was given: %q", raw)
+	}
+	if !strings.Contains(raw, `evil\\nvictim`) {
+		t.Errorf("the line break in the command was not escaped, so a record could have been split: %q", raw)
+	}
+
+	paneIDs, _, _, err := c.Exec(ctx, "list-panes", "-a", "-F", "#{pane_id}")
+	if err != nil {
+		t.Fatalf("counting the panes: %v", err)
+	}
+	want := 0
+	for _, line := range strings.Split(paneIDs, "\n") {
+		if strings.TrimSpace(line) != "" {
+			want++
+		}
+	}
+	panes := ParsePanes(raw)
+	if len(panes) > want {
+		t.Fatalf("tmux has %d panes and the parse produced %d records: one was forged", want, len(panes))
+	}
+
+	// And the session the forged record named is untouched: one record for it, with
+	// its own indexes, so the fragment never reaches a summary. This is the half
+	// that matters -- it could otherwise displace what the user is shown for a
+	// session that has nothing to do with the pane it came from.
+	victims := 0
+	for _, p := range panes {
+		if p.Session != "victim" {
+			continue
+		}
+		victims++
+		if p.WindowIndex != 0 || p.PaneIndex != 0 {
+			t.Errorf("a fragment of another pane's command was read as a record: %+v", p)
+		}
+	}
+	if victims != 1 {
+		t.Errorf("got %d records for the victim session, want one: %+v", victims, panes)
 	}
 }

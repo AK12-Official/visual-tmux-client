@@ -70,14 +70,32 @@ var PaneFormat = strings.Join([]string{
 // measured against tmux, and a version that stopped holding it would fail that
 // test rather than quietly mis-attribute a summary.
 //
-// The command field is the one a program names itself, and it is the one thing
-// here that no test covers: what tmux reports for it was seen to escape a line
-// break once, which later attempts could not reproduce, and a process whose own
-// name carries one could not be produced on this machine at all. That tmux
-// escapes control bytes on its way out is a real behaviour -- it is why the
-// separator in this file is printable, which the delimiter test pins -- so the
-// observation is recorded as the likely answer rather than dismissed. It is the
-// residual this comment exists to state.
+// The command field is the one a program names itself, so it is the one field a
+// program in a pane could try to put the record terminator into -- and the one
+// field TestNamesTmuxRefusesToLetCarryALineBreak cannot reach, because it is the
+// program's own name rather than something tmux is asked to set.
+//
+// What a *process* name carrying a line break would do here is not measured: a
+// process with one cannot be produced on this machine. A copy of a system binary
+// does not run -- the platform kills it, and the pane is left dead holding the
+// command it was given -- a symbolic link reports the name of the binary it
+// resolves to, and a script reports its interpreter rather than its own name. On
+// Linux a copy does run, and the field would then carry whatever tmux prints for
+// that process; that is the case this comment cannot speak for.
+//
+// What is measured is the value tmux reports for that field when the value itself
+// carries a line break, which is the route a process name would have to reach the
+// parser through in any case: TestACommandNameCarryingALineBreakCannotForgeARecord
+// builds one and asks a real server. Two things come back, and both are asserted
+// there. The line break is escaped -- where the name had one byte the value has
+// three, two backslashes and an `n` -- so the record is never split, and no
+// fragment of that pane can be read as a record for another session. And the
+// separators are *not* escaped, so the record carries more fields than a record
+// has and is dropped whole: that pane contributes no summary, which is what
+// validating the shape costs, and it costs no other session's summary, which is
+// what validating it is for. The count is the assertion that fails if the escape
+// stops: a raw line break would give the head a truncated command and the tail a
+// whole forged record for the session it names.
 func ParsePanes(stdout string) []session.Pane {
 	out := make([]session.Pane, 0)
 	for _, line := range strings.Split(stdout, "\n") {

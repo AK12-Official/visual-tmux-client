@@ -23,7 +23,9 @@ type mockFileService struct {
 	startFn  func(candidate string) (string, bool)
 	listFn   func(path string) (files.ListResult, error)
 	readFn   func(path string) (files.ReadResult, error)
-	writeFn  func(path string, body io.Reader, size int64, mtime *files.ExpectedMtime) (files.WriteResult, error)
+	writeFn  func(
+		path string, body io.Reader, size int64, mtime *files.ExpectedMtime, allowOtherNames bool,
+	) (files.WriteResult, error)
 	createFn func(path string, isDir bool) error
 	renameFn func(path, newPath string) error
 	deleteFn func(path string, recursive bool) error
@@ -55,10 +57,11 @@ func (m *mockFileService) Read(ctx context.Context, path string) (files.ReadResu
 }
 
 func (m *mockFileService) Write(
-	ctx context.Context, path string, body io.Reader, size int64, mtime *files.ExpectedMtime,
+	ctx context.Context, path string, body io.Reader, size int64,
+	mtime *files.ExpectedMtime, allowOtherNames bool,
 ) (files.WriteResult, error) {
 	if m.writeFn != nil {
-		return m.writeFn(path, body, size, mtime)
+		return m.writeFn(path, body, size, mtime, allowOtherNames)
 	}
 	return files.WriteResult{}, nil
 }
@@ -188,6 +191,7 @@ func TestMapFileErrorTranslatesTheWholeVocabulary(t *testing.T) {
 		{"not found", files.ErrNotFound, http.StatusNotFound, "not_found"},
 		{"conflict", files.ErrConflict, http.StatusConflict, "conflict"},
 		{"directory not empty", files.ErrDirNotEmpty, http.StatusConflict, "dir_not_empty"},
+		{"target has other names", files.ErrHasOtherNames, http.StatusConflict, "other_names"},
 		{"file too large", files.ErrFileTooLarge, http.StatusRequestEntityTooLarge, "file_too_large"},
 		{"write failed", files.ErrWriteFailed, http.StatusInternalServerError, "write_failed"},
 		{"unrecognised", fmt.Errorf("something else"), http.StatusInternalServerError, "write_failed"},
@@ -236,7 +240,7 @@ func TestFileRoutesAnswerADisabledManagerWithoutReachingTheService(t *testing.T)
 			mark("read")
 			return files.ReadResult{}, nil
 		},
-		writeFn: func(string, io.Reader, int64, *files.ExpectedMtime) (files.WriteResult, error) {
+		writeFn: func(string, io.Reader, int64, *files.ExpectedMtime, bool) (files.WriteResult, error) {
 			mark("write")
 			return files.WriteResult{}, nil
 		},
@@ -375,7 +379,7 @@ func TestReadReportsWhetherTheContentsAreBinary(t *testing.T) {
 // limit rather than the 64 KiB limit every other route uses.
 func TestWriteRouteBoundsTheBodyByTheFileLimit(t *testing.T) {
 	const limit = 16
-	write := func(_ string, body io.Reader, _ int64, _ *files.ExpectedMtime) (files.WriteResult, error) {
+	write := func(_ string, body io.Reader, _ int64, _ *files.ExpectedMtime, _ bool) (files.WriteResult, error) {
 		if _, err := io.ReadAll(body); err != nil {
 			return files.WriteResult{}, err
 		}
@@ -438,7 +442,7 @@ func TestWriteRouteRequiresAWellFormedDeclaredSize(t *testing.T) {
 // overwrite, so it has to reach the service as nil rather than as zero.
 func TestWriteRoutePassesAnAbsentExpectedMtimeThrough(t *testing.T) {
 	var seen *files.ExpectedMtime
-	write := func(_ string, _ io.Reader, _ int64, mtime *files.ExpectedMtime) (files.WriteResult, error) {
+	write := func(_ string, _ io.Reader, _ int64, mtime *files.ExpectedMtime, _ bool) (files.WriteResult, error) {
 		seen = mtime
 		return files.WriteResult{}, nil
 	}
@@ -466,7 +470,7 @@ func TestWriteRoutePassesAnAbsentExpectedMtimeThrough(t *testing.T) {
 // different jobs: one is displayable, the other is comparable.
 func TestWriteRouteCarriesTheExactModificationTime(t *testing.T) {
 	var seen *files.ExpectedMtime
-	write := func(_ string, _ io.Reader, _ int64, mtime *files.ExpectedMtime) (files.WriteResult, error) {
+	write := func(_ string, _ io.Reader, _ int64, mtime *files.ExpectedMtime, _ bool) (files.WriteResult, error) {
 		seen = mtime
 		return files.WriteResult{}, nil
 	}
@@ -495,6 +499,54 @@ func TestWriteRouteCarriesTheExactModificationTime(t *testing.T) {
 		"/api/hosts/local/files/write?path=/tmp/a&size=1&expected_mtime_nanos=abc", "x")
 	if malformed.Code != http.StatusBadRequest {
 		t.Errorf("expected a malformed exact time to be refused, got %d", malformed.Code)
+	}
+}
+
+// Replacing a file replaces the inode, so a target reachable under other names
+// loses them: the caller has to agree to that, and this is where the agreement
+// travels. A value that is neither of the two the flag may carry is refused
+// rather than read as one of them -- a flag with three meanings is three
+// callers disagreeing about the other two.
+func TestWriteRouteCarriesTheAgreementAboutOtherNames(t *testing.T) {
+	var seen []bool
+	svc := &mockFileService{
+		writeFn: func(
+			_ string, body io.Reader, _ int64, _ *files.ExpectedMtime, allowOtherNames bool,
+		) (files.WriteResult, error) {
+			if _, err := io.ReadAll(body); err != nil {
+				return files.WriteResult{}, err
+			}
+			seen = append(seen, allowOtherNames)
+			return files.WriteResult{}, nil
+		},
+	}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+
+	for _, tc := range []struct {
+		query string
+		want  bool
+	}{
+		{"", false},
+		{"&allow_other_names=0", false},
+		{"&allow_other_names=1", true},
+	} {
+		rec := authedPut(t, router, "/api/hosts/local/files/write?path=/tmp/a&size=1"+tc.query, "x")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%q: expected 200, got %d", tc.query, rec.Code)
+		}
+		if got := seen[len(seen)-1]; got != tc.want {
+			t.Errorf("%q: the service was told allowOtherNames=%v", tc.query, got)
+		}
+	}
+
+	// An empty value is the absent flag, which is how every other optional
+	// parameter on these routes reads it; anything that is not one of the two
+	// values is refused.
+	for _, bad := range []string{"true", "2", "-1", "yes"} {
+		rec := authedPut(t, router, "/api/hosts/local/files/write?path=/tmp/a&size=1&allow_other_names="+bad, "x")
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%q: expected a refusal, got %d", bad, rec.Code)
+		}
 	}
 }
 

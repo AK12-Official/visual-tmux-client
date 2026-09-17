@@ -335,6 +335,12 @@ export async function downloadFile(path: string): Promise<Blob> {
  * writeFile replaces a file's contents and returns the modification time the hub
  * reports afterwards, or null when it reported none.
  *
+ * allowOtherNames is the user's agreement that a target reachable under more than
+ * one name may be replaced anyway. The hub refuses such a target without it,
+ * because the replacement is a new file and every other name keeps the contents
+ * it had -- which is a thing to be told about rather than to discover. See the
+ * save flow in FileManagerOverlay.
+ *
  * Pass the stamp last observed to have the hub refuse a write that lost a race,
  * or null to force the overwrite. Both precisions of the stamp are sent: the hub
  * compares against the exact one when it has it, which is what keeps two edits
@@ -345,6 +351,7 @@ export async function writeFile(
   path: string,
   body: string,
   expected: Stamp | null,
+  allowOtherNames = false,
 ): Promise<Stamp | null> {
   const query = new URLSearchParams({
     path,
@@ -355,6 +362,10 @@ export async function writeFile(
     // Sent as the string it arrived as, never re-encoded through a number.
     if (expected.nanos !== null) query.set('expected_mtime_nanos', expected.nanos)
   }
+  // The hub refuses a target reachable under other names until it is told the
+  // caller knows: replacing the file replaces the inode, so those other names
+  // keep the contents they had. It is sent only when the user has confirmed.
+  if (allowOtherNames) query.set('allow_other_names', '1')
 
   const res = await request(`${BASE}/write?${query.toString()}`, {
     method: 'PUT',

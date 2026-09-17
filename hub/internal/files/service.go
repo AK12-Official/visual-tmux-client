@@ -560,6 +560,63 @@ func isPartialRune(b []byte) bool {
 	return true
 }
 
+// writeTarget resolves the path a write names and applies every check that can be
+// made before a byte of the body is transferred, so that a refusal costs the
+// caller a round trip rather than an upload. It returns the target and what was
+// found there -- nil for a name that was free -- or the refusal that stopped it.
+//
+// Each check is here for the reason it is stated at:
+//
+//   - the path must resolve inside the boundary, and a path it cannot stat is
+//     classified rather than reported as a server fault;
+//   - a directory is not a file to write;
+//   - a name held by a link whose target is gone is not a name to write over: the
+//     rename that commits the write would replace the link, destroying where it
+//     pointed without saying so, and the caller asked to write a file rather than
+//     to remove a link. Reading it fails on its own, so nothing else can act on
+//     it either, and "no such target" is what is true of it;
+//   - an observed time that does not match is a conflict, and one supplied for a
+//     file that does not exist is a not-found: a caller that believes it is
+//     editing an existing file must not be handed a new one;
+//   - a target reachable under more than one name is refused unless the caller has
+//     agreed, because the replacement writes the name it was given and leaves the
+//     others holding the contents they had.
+func (s *Service) writeTarget(
+	path string, expected *ExpectedMtime, allowOtherNames bool,
+) (Confined, os.FileInfo, error) {
+	resolved, err := s.roots.Resolve(path, ModeCreate)
+	if err != nil {
+		return Confined{}, nil, err
+	}
+	target := s.roots.Confine(resolved)
+
+	existing, statErr := stat(target)
+	if statErr != nil {
+		if !os.IsNotExist(statErr) {
+			// Returned as it is: Write's own return classifies everything that
+			// leaves it, which is the one place that has to be right. See Write.
+			return Confined{}, nil, statErr
+		}
+		if info, linkErr := lstat(target); linkErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return Confined{}, nil, fmt.Errorf("%w: %s is a link whose target does not exist", ErrNotFound, path)
+		}
+		if expected != nil {
+			return Confined{}, nil, fmt.Errorf("%w: %s", ErrNotFound, path)
+		}
+		return target, nil, nil
+	}
+	if existing.IsDir() {
+		return Confined{}, nil, fmt.Errorf("%w: %s is a directory", ErrInvalidPath, path)
+	}
+	if expected != nil && !expected.matches(existing) {
+		return Confined{}, nil, fmt.Errorf("%w: %s changed since it was read", ErrConflict, path)
+	}
+	if err := linkedError(path, existing, allowOtherNames); err != nil {
+		return Confined{}, nil, err
+	}
+	return target, existing, nil
+}
+
 // Write replaces a file's contents and reports what it produced.
 //
 // expected is the modification time the caller last observed. A mismatch is a
@@ -567,54 +624,55 @@ func isPartialRune(b []byte) bool {
 // what the browser sends once the user has confirmed. A non-nil expected against
 // a file that does not exist is a not-found rather than a create: a caller that
 // believes it is editing an existing file must not be handed a new one.
+//
+// allowOtherNames is agreement to a replacement whose target is reachable under
+// more than one name. Replacing a file replaces the inode, so a target with
+// other names loses them: the entry the caller edited is written, and every
+// other name keeps the contents it had. That is not a thing to do without
+// saying so, and the caller is the only one who can say it -- so a linked target
+// is refused until this is set, and the browser sets it once the user has
+// confirmed.
 func (s *Service) Write(
-	ctx context.Context, path string, body io.Reader, declaredSize int64, expected *ExpectedMtime,
-) (WriteResult, error) {
-	resolved, err := s.roots.Resolve(path, ModeCreate)
+	ctx context.Context, path string, body io.Reader, declaredSize int64,
+	expected *ExpectedMtime, allowOtherNames bool,
+) (result WriteResult, err error) {
+	// Every error this returns is classified here, once, rather than at each
+	// place one can be raised. A handle closed by a shutdown can be met at any of
+	// them -- and the two that matter are inside windows of two adjacent syscalls,
+	// where no test can put it -- so a rule that has to be remembered at each site
+	// is a rule that can be dropped at one of them without anything noticing.
+	defer func() {
+		if err != nil {
+			err = classifyPathError(path, err)
+		}
+	}()
+
+	target, existing, err := s.writeTarget(path, expected, allowOtherNames)
 	if err != nil {
 		return WriteResult{}, err
 	}
 
-	target := s.roots.Confine(resolved)
-	existing, statErr := stat(target)
-	exists := statErr == nil
-	if statErr != nil && !os.IsNotExist(statErr) {
-		return WriteResult{}, classifyPathError(path, statErr)
-	}
-	if exists && existing.IsDir() {
-		return WriteResult{}, fmt.Errorf("%w: %s is a directory", ErrInvalidPath, path)
-	}
-	if !exists {
-		// A name held by a link whose target is gone is not a name to write over.
-		// The rename that commits the write would replace the link, destroying
-		// where it pointed without saying so; the caller asked to write a file,
-		// not to remove a link. Reading it fails on its own, so nothing else can
-		// act on it either, and "no such target" is what is true of it.
-		if info, linkErr := lstat(target); linkErr == nil && info.Mode()&os.ModeSymlink != 0 {
-			return WriteResult{}, fmt.Errorf("%w: %s is a link whose target does not exist", ErrNotFound, path)
-		}
-	}
-	if expected != nil {
-		if !exists {
-			return WriteResult{}, fmt.Errorf("%w: %s", ErrNotFound, path)
-		}
-		if !expected.matches(existing) {
-			return WriteResult{}, fmt.Errorf("%w: %s changed since it was read", ErrConflict, path)
-		}
-	}
-
-	// The replacement carries the target's permission bits. Staging through a
-	// fresh file would otherwise reset them: a temporary file is created without
-	// any of them, so renaming it over a 0644 file would quietly make it private
-	// and over an executable script would strip the bit that lets it run.
+	// The replacement carries the target's permission bits and, where the hub may
+	// give them back, its owner. Staging through a fresh file would otherwise
+	// reset them: a temporary file is created without any of them, so renaming it
+	// over a 0644 file would quietly make it private and over an executable script
+	// would strip the bit that lets it run. The owner is taken back by takeOwner,
+	// which also says what happens where the hub may not.
 	//
-	// Only the permission bits, deliberately. The staging file is owned by the
-	// hub's user, so the replacement is too, and carrying setuid or setgid across
-	// would not preserve a capability -- it would hand one to whoever just wrote
-	// the file. Dropping them is what a plain shell redirect does, and the cost is
-	// a chmod the owner can reapply.
-	opts := writeOptions{expected: expected, display: path}
-	if exists {
+	// Only those two, deliberately. Setuid and setgid are not carried across: the
+	// replacement is a file the writer just wrote, so preserving them would hand a
+	// capability to whoever wrote it rather than keep one for whoever held it.
+	// Dropping them is what a plain shell redirect does, and the cost is a chmod
+	// the owner can reapply.
+	//
+	// Everything else the file carried goes with the inode it belonged to: the
+	// replacement is a new file, so its ACLs and extended attributes are the empty
+	// set a new file has. That is a consequence of *replacing* rather than
+	// rewriting, and replacing is what makes a failed write leave the target
+	// intact -- the property the specification requires. It states this cost where
+	// it states the requirement, and both READMEs say the same in operator's words.
+	opts := writeOptions{expected: expected, display: path, allowOtherNames: allowOtherNames}
+	if existing != nil {
 		// What the target was when this write began, whether or not the caller
 		// supplied a time to compare it against. See confirmUnchanged.
 		opts.origin = existing
@@ -650,6 +708,11 @@ type writeOptions struct {
 	expected *ExpectedMtime
 	// display is the caller's own spelling of the path, for error messages.
 	display string
+	// allowOtherNames is the caller's agreement that a target reachable under
+	// more than one name may be replaced, which leaves those other names holding
+	// the contents they had. It is carried this far because the answer is asked
+	// again at commit: a link can be made while the body travels.
+	allowOtherNames bool
 }
 
 // writeAtomically stages the body in a sibling of the target and renames it
@@ -673,7 +736,7 @@ func (s *Service) writeAtomically(
 	}
 	stage, staged, err := s.createStaged(target.dir(), createMode)
 	if err != nil {
-		return WriteResult{}, stageFailure(opts.display, err)
+		return WriteResult{}, stagingFailure(opts.display, err)
 	}
 	defer s.unmarkStaging(staged.abs)
 
@@ -696,6 +759,14 @@ func (s *Service) writeAtomically(
 			_ = stage.Close() //nolint:errcheck // the chmod error is the one worth reporting
 			return WriteResult{}, fmt.Errorf("%w: chmod: %w", ErrWriteFailed, err)
 		}
+		// And the owner, where the hub may give it back. A replacement is a file
+		// the hub created, so it belongs to the hub's user unless this succeeds --
+		// which it does only for an owner the hub already is, or one it may adopt.
+		// See takeOwner for what that leaves, and why it is not an error.
+		if err := takeOwner(stage, opts.origin); err != nil {
+			_ = stage.Close() //nolint:errcheck // the stat error is the one worth reporting
+			return WriteResult{}, fmt.Errorf("%w: owner: %w", ErrWriteFailed, err)
+		}
 	}
 	if err := stage.Sync(); err != nil {
 		_ = stage.Close() //nolint:errcheck // the sync error is the one worth reporting
@@ -716,7 +787,7 @@ func (s *Service) writeAtomically(
 	}
 
 	if err := renameAt(staged, target); err != nil {
-		return WriteResult{}, writeFailure(target.abs, err)
+		return WriteResult{}, fmt.Errorf("%w: %w", ErrWriteFailed, err)
 	}
 	committed = true
 
@@ -726,7 +797,7 @@ func (s *Service) writeAtomically(
 // confirmUnchanged re-applies, immediately before the target is replaced, every
 // check that makes a write safe to land.
 //
-// Three things can have gone wrong while the body was travelling, and each is
+// Four things can have gone wrong while the body was travelling, and each is
 // refused rather than resolved:
 //
 //   - the target is gone, or is no longer the file this write started against.
@@ -740,6 +811,12 @@ func (s *Service) writeAtomically(
 //   - the name was free when the write began and no longer is, which is the same
 //     hazard from the other side: a create that lands on a file created in the
 //     meantime replaces something its author never agreed to lose.
+//   - the target has gained another name, which is a name the caller was never
+//     told about and would lose by the replacement. Asked last, after the
+//     observed time, so that a file which both changed and is linked is answered
+//     as a conflict first -- the browser asks about conflicts and about other
+//     names with two different questions, and asking them in the order the answers
+//     were captured in is what keeps one retry from dropping the other's.
 //
 // A nil expected modification time means the caller forced the overwrite, so it
 // is compared against nothing. The origin check is not optional in the same way:
@@ -770,39 +847,38 @@ func confirmUnchanged(target Confined, opts writeOptions) error {
 	if opts.expected != nil && !opts.expected.matches(current) {
 		return fmt.Errorf("%w: %s changed while it was being written", ErrConflict, opts.display)
 	}
-	return nil
+	return linkedError(opts.display, current, opts.allowOtherNames)
 }
 
-// writeFailure reports a write or removal that could not be completed. A handle
-// closed by a shutdown is the one case that is not a write failure: it is the
-// same cause the closed set reports, and it is reported the same way here so that
-// one cause does not answer differently depending on which route it reached.
-func writeFailure(display string, err error) error {
-	if closed := closedRootError(display, err); closed != nil {
-		return closed
+// linkedError is the refusal for a target that is reachable under more than one
+// name, or nil when there is nothing to refuse.
+//
+// It is asked twice on the way to a replacement and both times in the same words:
+// once before the body is transferred, so that a linked target costs a round trip
+// rather than an upload, and once at commit, because a link made while the body
+// travelled is a name the caller was never told about.
+func linkedError(display string, info os.FileInfo, allowOtherNames bool) error {
+	if allowOtherNames {
+		return nil
+	}
+	other := otherNames(info)
+	if other == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: %s is also reachable as %d other name(s)", ErrHasOtherNames, display, other)
+}
+
+// stagingFailure says why a staging file could not be created.
+//
+// The classification is the caller's -- every error leaving Write is classified
+// once, at its return -- and what is here is the one thing the classifier cannot
+// say: a name too long is a path the caller chose, and the staging prefix is what
+// tipped it over, so the message names the staging file rather than the path.
+func stagingFailure(display string, err error) error {
+	if errors.Is(err, syscall.ENAMETOOLONG) {
+		return fmt.Errorf("%w: %s leaves no room for a staging file", ErrInvalidPath, display)
 	}
 	return fmt.Errorf("%w: %w", ErrWriteFailed, err)
-}
-
-// stageFailure reports why a staging file could not be created. A target whose
-// directory is missing, or is not writable, is the caller's situation rather
-// than a server fault, so it is reported the way the other operations report it
-// -- otherwise a write into a deleted directory answers 500 where a create into
-// the same directory answers 404.
-//
-// A name too long is the same: the caller chose a path near the limit, and the
-// staging prefix is what tipped it over, so it is their path to shorten.
-func stageFailure(display string, err error) error {
-	switch {
-	case os.IsNotExist(err):
-		return fmt.Errorf("%w: %s", ErrNotFound, display)
-	case os.IsPermission(err):
-		return fmt.Errorf("%w: %s", ErrPermissionDenied, display)
-	case errors.Is(err, syscall.ENAMETOOLONG):
-		return fmt.Errorf("%w: %s leaves no room for a staging file", ErrInvalidPath, display)
-	default:
-		return writeFailure(display, err)
-	}
 }
 
 // copyBody checks the body against both the declared length and the configured
@@ -957,7 +1033,17 @@ func (s *Service) entryTarget(path string) (Confined, error) {
 
 // Delete removes an entry. A directory that still contains something is refused
 // unless the caller asked for it to go recursively.
-func (s *Service) Delete(ctx context.Context, path string, recursive bool) error {
+func (s *Service) Delete(ctx context.Context, path string, recursive bool) (err error) {
+	// Classified once, for the reason Write is: a handle closed by a shutdown can
+	// be met at any of the places this can fail -- including the window between
+	// the check that a directory is empty and the removal of it -- and a rule that
+	// has to be remembered at each of them is a rule that can be dropped at one.
+	defer func() {
+		if err != nil {
+			err = classifyPathError(path, err)
+		}
+	}()
+
 	target, err := s.entryTarget(path)
 	if err != nil {
 		return err
@@ -965,25 +1051,25 @@ func (s *Service) Delete(ctx context.Context, path string, recursive bool) error
 
 	info, err := lstat(target)
 	if err != nil {
-		return classifyPathError(path, err)
+		return err
 	}
 	if !info.IsDir() {
-		return classifyPathError(path, remove(target))
+		return remove(target)
 	}
 	if !recursive {
 		// One entry is all it takes to know, and reading more would make the cost
 		// of refusing a directory the size of the directory. See dirHasEntries.
 		hasEntries, err := dirHasEntries(target)
 		if err != nil {
-			return classifyPathError(path, err)
+			return err
 		}
 		if hasEntries {
 			return fmt.Errorf("%w: %s", ErrDirNotEmpty, path)
 		}
-		return classifyPathError(path, remove(target))
+		return remove(target)
 	}
 	if err := removeAll(target); err != nil {
-		return writeFailure(path, err)
+		return fmt.Errorf("%w: %w", ErrWriteFailed, err)
 	}
 	return nil
 }

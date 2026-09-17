@@ -98,7 +98,7 @@ func TestARootedListingStillHidesAStagingFile(t *testing.T) {
 		},
 	}
 	if _, err := svc.Write(ctx, filepath.Join(root, "a.txt"), body,
-		int64(len("replacement")), nil); err != nil {
+		int64(len("replacement")), nil, false); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if during == nil {
@@ -431,14 +431,14 @@ func TestRootedWriteCreatesAndThenReplacesWithItsOwnStamp(t *testing.T) {
 	ctx := context.Background()
 	file := filepath.Join(root, "written.txt")
 
-	created, err := svc.Write(ctx, file, strings.NewReader("one"), 3, nil)
+	created, err := svc.Write(ctx, file, strings.NewReader("one"), 3, nil, false)
 	if err != nil {
 		t.Fatalf("creating a rooted file failed: %v", err)
 	}
 	// The stamp the write returned is what the next save is compared against,
 	// which is the property the whole optimistic flow rests on.
 	replaced, err := svc.Write(ctx, file, strings.NewReader("two"), 3,
-		&ExpectedMtime{Millis: created.Mtime, Nanos: &created.MtimeNanos})
+		&ExpectedMtime{Millis: created.Mtime, Nanos: &created.MtimeNanos}, false)
 	if err != nil {
 		t.Fatalf("the consecutive save was refused: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestRootedWriteCreatesAndThenReplacesWithItsOwnStamp(t *testing.T) {
 	// overwriting it.
 	stale := created.MtimeNanos - 1
 	if _, err := svc.Write(ctx, file, strings.NewReader("three"), 5,
-		&ExpectedMtime{Millis: created.Mtime, Nanos: &stale}); !errors.Is(err, ErrConflict) {
+		&ExpectedMtime{Millis: created.Mtime, Nanos: &stale}, false); !errors.Is(err, ErrConflict) {
 		t.Errorf("expected a conflict, got: %v", err)
 	}
 }

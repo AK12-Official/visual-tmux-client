@@ -254,6 +254,164 @@ test('a save is recorded once it is the answer to what the tab holds', async () 
   wrapper.unmount()
 })
 
+// Replacing a file replaces the inode, so a target reachable under other names
+// loses them: every other name keeps the contents it had. The hub refuses that
+// until the caller says the user knows, and this is where the user is asked. The
+// retry has to be the same write -- the same captured contents against the same
+// observation -- with the agreement added, or answering the question would write
+// something the user did not ask for.
+test('a save refused for other names asks, and the retry saves what the tab holds', async () => {
+  // The first write is held open, so the user can type while it travels -- which
+  // is the state the retry has to be right about.
+  const firstWrite = deferred()
+  let writes = 0
+  const calls = hubFetch({
+    write: () => {
+      writes += 1
+      if (writes === 1) return firstWrite.respond()
+      return json({ mtime: 2000, mtime_nanos: '2000000000' })
+    },
+  })
+  const wrapper = await mountManager()
+  await openFile(wrapper, 'a.txt')
+  await type('A')
+
+  await (await saveButton(wrapper)).trigger('click')
+  await flush(2)
+  await type('B')
+
+  const asked: string[] = []
+  const original = window.confirm
+  window.confirm = (message?: string) => {
+    asked.push(String(message))
+    return true
+  }
+  try {
+    firstWrite.release(
+      new Response(JSON.stringify({ error: 'other_names' }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    await flush(3)
+  } finally {
+    window.confirm = original
+  }
+
+  assert.equal(asked.length, 1, 'the user was not asked before the other names were dropped')
+  assert.match(asked[0], /other names/)
+
+  const sent = calls.filter((call) => call.url.includes('/files/write'))
+  assert.equal(sent.length, 2, 'the save was not retried after the user agreed')
+  const first = new URL(sent[0].url, 'http://hub')
+  const retry = new URL(sent[1].url, 'http://hub')
+  assert.equal(first.searchParams.has('allow_other_names'), false)
+  assert.equal(retry.searchParams.get('allow_other_names'), '1')
+  assert.equal(retry.searchParams.get('expected_mtime'), first.searchParams.get('expected_mtime'))
+  // What the retry writes is what the editor holds when the answer arrives -- the
+  // keystrokes typed while the refused write travelled are part of it -- and the
+  // observation it is checked against is the one the tab still holds. It is a save
+  // of the tab as it stands with the agreement added, not a replay of the request
+  // that was refused.
+  assert.equal(sent[1].body, 'helloAB', 'the retry did not carry what the editor holds')
+  assert.equal(wrapper.find('.fm__dirty').exists(), false, 'the agreed save was not recorded')
+  wrapper.unmount()
+})
+
+// A linked file can also have changed on disk since it was read, and then the two
+// questions are asked one after the other. The second retry has to carry what the
+// first answer was: asking again for an agreement the user has already given is
+// the manager forgetting an answer, and the write it eventually sends has to be
+// one all of those answers describe.
+test('a linked file that also conflicted keeps both answers through the retries', async () => {
+  let writes = 0
+  const calls = hubFetch({
+    write: () => {
+      writes += 1
+      if (writes === 1) {
+        return new Response(JSON.stringify({ error: 'other_names' }), {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (writes === 2) {
+        return new Response(JSON.stringify({ error: 'conflict' }), {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return json({ mtime: 2000, mtime_nanos: '2000000000' })
+    },
+  })
+  const wrapper = await mountManager()
+  await openFile(wrapper, 'a.txt')
+  await type()
+
+  const asked: string[] = []
+  const original = window.confirm
+  window.confirm = (message?: string) => {
+    asked.push(String(message))
+    return true
+  }
+  try {
+    await (await saveButton(wrapper)).trigger('click')
+    await flush(2)
+  } finally {
+    window.confirm = original
+  }
+
+  assert.equal(asked.length, 2, `expected both questions, got ${JSON.stringify(asked)}`)
+  assert.match(asked[0], /other names/)
+  assert.match(asked[1], /changed on disk/)
+
+  const sent = calls.filter((call) => call.url.includes('/files/write'))
+  assert.equal(sent.length, 3, 'expected a retry for each answer')
+  const last = new URL(sent[2].url, 'http://hub')
+  assert.equal(last.searchParams.get('allow_other_names'), '1', 'the second retry forgot the first answer')
+  assert.equal(last.searchParams.has('expected_mtime'), false, 'the overwrite was not forced')
+  assert.equal(wrapper.find('.fm__dirty').exists(), false, 'the agreed save was not recorded')
+  wrapper.unmount()
+})
+
+test('a save refused for other names is not retried when the user declines', async () => {
+  let writes = 0
+  const calls = hubFetch({
+    write: () => {
+      writes += 1
+      return new Response(JSON.stringify({ error: 'other_names' }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    },
+  })
+  const wrapper = await mountManager()
+  await openFile(wrapper, 'a.txt')
+  await type()
+
+  let asked = 0
+  const original = window.confirm
+  window.confirm = () => {
+    asked += 1
+    return false
+  }
+  try {
+    await (await saveButton(wrapper)).trigger('click')
+    await flush(2)
+  } finally {
+    window.confirm = original
+  }
+
+  assert.equal(asked, 1, 'the user was not asked')
+  assert.equal(calls.filter((call) => call.url.includes('/files/write')).length, 1)
+  assert.equal(writes, 1)
+  assert.equal(
+    wrapper.find('.fm__dirty').exists(),
+    true,
+    'a declined save must leave the tab modified',
+  )
+  wrapper.unmount()
+})
+
 test('an answer that crossed a rename is not recorded as a save', async () => {
   const write = deferred()
   const rename = deferred()
@@ -1084,6 +1242,279 @@ test('the context menu takes the focus, walks its items, and gives it back', asy
   await flush(2)
   assert.equal(wrapper.find('.menu').exists(), false, 'Escape did not close the menu')
   assert.equal(document.activeElement, label.element, 'the focus did not go back to the row')
+  wrapper.unmount()
+})
+
+// The menu hands the keyboard back to the row it was opened from, and a rename
+// or a delete takes that row away by removing or replacing the element: the
+// browser puts the focus on the document body, which is where a keyboard user has
+// to start over from. Both actions put it back in the tree, the rename on the row
+// the entry now has and the delete on whichever row stands where it did.
+test('a rename and a delete leave the keyboard in the tree', async () => {
+  resetEditors()
+  setToken('tok')
+  hubFetch({
+    // All three names are listed so that the rows exist for the clicks and for
+    // the row the rename produces; a real hub would list whichever one exists.
+    list: (path) =>
+      json({
+        path,
+        entries: [
+          { name: 'a.txt', is_dir: false, size: 5, mtime: 1000 },
+          { name: 'b.txt', is_dir: false, size: 5, mtime: 1000 },
+          { name: 'z.txt', is_dir: false, size: 5, mtime: 1000 },
+        ],
+        truncated: false,
+      }),
+  })
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work' },
+    attachTo: document.body,
+  })
+  await flush()
+
+  const label = () => document.activeElement as HTMLElement | null
+  const focusedPath = () => label()?.dataset?.path
+
+  await renameViaMenu(wrapper, 'a.txt', 'z.txt')
+  await flush(2)
+  assert.equal(
+    focusedPath(),
+    '/srv/work/z.txt',
+    `the focus did not follow the renamed entry: ${String(document.activeElement)}`,
+  )
+
+  // The delete puts it on the entry that follows the one removed, or on the one
+  // before it when that was last -- a path, not a row number, so it means the
+  // same thing in a listing that has been re-read since.
+  await deleteViaMenu(wrapper, 'z.txt')
+  await flush(2)
+  assert.equal(
+    focusedPath(),
+    '/srv/work/b.txt',
+    `the focus did not land beside the deleted entry: ${String(document.activeElement)}`,
+  )
+  wrapper.unmount()
+})
+
+// The delete waits for the writes already travelling for the entry, and that wait
+// is unbounded -- there is no timeout anywhere in this client. So the user can
+// open another directory while it waits, and the row that stands where the
+// deleted one did is a row of *that* listing: a place they have never been, which
+// the next Space or Enter would act on. Where the focus goes is decided by the
+// listing it was measured in.
+test('a delete does not move the keyboard into a listing the user opened', async () => {
+  const write = deferred()
+  hubFetch({
+    write: write.respond,
+    list: (path) =>
+      path === '/srv/work'
+        ? json({
+            path,
+            entries: [
+              { name: 'a.txt', is_dir: false, size: 5, mtime: 1000 },
+              { name: 'sub', is_dir: true, size: 0, mtime: 1000 },
+            ],
+            truncated: false,
+          })
+        : json({
+            path,
+            entries: [{ name: 'x.txt', is_dir: false, size: 5, mtime: 1000 }],
+            truncated: false,
+          }),
+  })
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work' },
+    attachTo: document.body,
+  })
+  await flush()
+
+  // A save of a.txt is travelling, so the delete of it is held waiting.
+  await openFile(wrapper, 'a.txt')
+  await type()
+  await (await saveButton(wrapper)).trigger('click')
+  await flush(2)
+  await deleteViaMenu(wrapper, 'a.txt')
+  await flush(2)
+
+  // While it waits, the user opens the subdirectory -- which destroys the row the
+  // focus was on, and is exactly the navigation the manager must not fight.
+  await row(wrapper, 'sub').find('.tree__label').trigger('click')
+  await flush(2)
+  assert.equal(wrapper.find('.tree__label').text(), 'x.txt', 'the listing did not change')
+
+  write.release(json({ mtime: 2000, mtime_nanos: '2000000000' }))
+  await flush(4)
+
+  const active = document.activeElement as HTMLElement | null
+  assert.equal(
+    active?.classList.contains('tree__label'),
+    false,
+    `the focus was moved onto a row of a listing the user had opened: ${String(active?.textContent)}`,
+  )
+  wrapper.unmount()
+})
+
+// The strip declares itself a tablist, and that is a promise about behaviour as
+// well as about names: a list of tabs is one stop in the tab order rather than
+// one per tab with its close button beside it, the arrows move between them, and
+// the panel says which tab it is showing. Without it the roles describe a widget
+// that does not exist: a user who tabs into the list and then presses an arrow --
+// which is what the pattern says to do -- is stuck on the tab the focus landed
+// on, and has to walk out of the list and back in to reach another.
+test('the editor tabs answer the keys a tablist is expected to answer', async () => {
+  resetEditors()
+  setToken('tok')
+  hubFetch()
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work' },
+    attachTo: document.body,
+  })
+  await flush()
+
+  await openFile(wrapper, 'a.txt')
+  await openFile(wrapper, 'b.txt')
+
+  let tabs = wrapper.findAll('.tabs__label')
+  assert.equal(tabs.length, 2)
+  // Roving tabindex: the selected tab is the one the keyboard lands on, and the
+  // other is reached from it.
+  assert.equal(tabs[0].attributes('tabindex'), '-1')
+  assert.equal(tabs[1].attributes('tabindex'), '0')
+
+  // The panel and the tab name each other, using ids the two components share.
+  const panel = wrapper.find('.fm__content')
+  assert.equal(panel.attributes('role'), 'tabpanel')
+  assert.equal(panel.attributes('aria-labelledby'), tabs[1].attributes('id'))
+  assert.ok(panel.attributes('id'), 'the panel has no id for a tab to point at')
+  assert.equal(tabs[0].attributes('aria-controls'), panel.attributes('id'))
+  assert.equal(tabs[1].attributes('aria-controls'), panel.attributes('id'))
+
+  // Keys go to whatever holds the focus, which is how a user presses them.
+  const press = async (key: string) => {
+    const held = document.activeElement
+    assert.ok(held instanceof HTMLElement, 'nothing held the focus to press a key on')
+    held.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
+    await flush(2)
+  }
+
+  tabs[1].element.focus()
+  await press('ArrowRight')
+  tabs = wrapper.findAll('.tabs__label')
+  assert.equal(document.activeElement, tabs[0].element, 'ArrowRight did not wrap to the first tab')
+  assert.equal(tabs[0].attributes('aria-selected'), 'true', 'the focus moved without selecting')
+
+  await press('End')
+  tabs = wrapper.findAll('.tabs__label')
+  assert.equal(document.activeElement, tabs[1].element)
+  assert.equal(tabs[1].attributes('aria-selected'), 'true')
+  assert.equal(
+    wrapper.find('.fm__content').attributes('aria-labelledby'),
+    tabs[1].attributes('id'),
+    'the panel still names the tab that is no longer selected',
+  )
+
+  await press('Home')
+  tabs = wrapper.findAll('.tabs__label')
+  assert.equal(document.activeElement, tabs[0].element)
+
+  // Nothing else in the strip is a stop: with ten files open a list of tabs is
+  // still one stop, and a strip of close buttons to walk past is what the role
+  // exists to avoid. Closing is Delete on the tab itself instead.
+  for (const close of wrapper.findAll('.tabs__close')) {
+    assert.equal(close.attributes('tabindex'), '-1', 'a close button is in the tab order')
+  }
+  await press('Delete')
+  await flush(2)
+  assert.equal(wrapper.findAll('.tabs__tab').length, 1, 'Delete did not close the focused tab')
+  wrapper.unmount()
+})
+
+// What follows a directory in a flat listing is its first child, and deleting the
+// directory takes that child with it. So the row that stands where the directory
+// did is the next one *outside* it -- not the row at the same index, and not the
+// top of the listing, which is what a search that ignored depth would produce.
+test('deleting a directory puts the focus outside what it contained', async () => {
+  resetEditors()
+  setToken('tok')
+  hubFetch({
+    list: (path) =>
+      path === '/srv/work'
+        ? json({
+            path,
+            entries: [
+              { name: 'a.txt', is_dir: false, size: 5, mtime: 1000 },
+              { name: 'd', is_dir: true, size: 0, mtime: 1000 },
+              { name: 'z.txt', is_dir: false, size: 5, mtime: 1000 },
+            ],
+            truncated: false,
+          })
+        : json({
+            path,
+            entries: [{ name: 'inner.txt', is_dir: false, size: 5, mtime: 1000 }],
+            truncated: false,
+          }),
+  })
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work' },
+    attachTo: document.body,
+  })
+  await flush()
+
+  // Opened, so its child is rendered between it and the file that follows.
+  await row(wrapper, 'd').find('.tree__caret').trigger('click')
+  await flush(2)
+  assert.ok(row(wrapper, 'inner.txt'), 'the directory did not open')
+
+  await deleteViaMenu(wrapper, 'd')
+  await flush(2)
+
+  const focused = document.activeElement as HTMLElement | null
+  assert.equal(
+    focused?.dataset?.path,
+    '/srv/work/z.txt',
+    `the focus did not land outside the deleted directory: ${String(focused?.textContent)}`,
+  )
+  wrapper.unmount()
+})
+
+// The editor is mounted per editing session, and a rename keeps the session: an
+// editor keyed by path would be destroyed and rebuilt under the new name, taking
+// the undo history with it -- and the history a user reaches for is the one
+// belonging to the file they just worked on. The other half of that rule, that a
+// file switched away from keeps its editor, has its own test; this is the half a
+// rename covers.
+test('a rename keeps the editor that is holding the file', async () => {
+  resetEditors()
+  setToken('tok')
+  hubFetch({
+    list: (path) =>
+      json({
+        path,
+        entries: [
+          { name: 'a.txt', is_dir: false, size: 5, mtime: 1000 },
+          { name: 'z.txt', is_dir: false, size: 5, mtime: 1000 },
+        ],
+        truncated: false,
+      }),
+  })
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work' },
+    attachTo: document.body,
+  })
+  await flush()
+
+  await openFile(wrapper, 'a.txt')
+  await type(' typed')
+  const built = instances.length
+
+  await renameViaMenu(wrapper, 'a.txt', 'z.txt')
+  await flush(2)
+
+  assert.equal(instances.length, built, 'the rename built another editor')
+  assert.equal(instances[0].destroyed, false, 'the rename destroyed the editor')
+  assert.equal(instances[0].doc, 'hello typed', 'the rename lost what had been typed into it')
+  assert.match(wrapper.find('.tabs__name').text(), /z\.txt/, 'the tab did not follow the rename')
   wrapper.unmount()
 })
 

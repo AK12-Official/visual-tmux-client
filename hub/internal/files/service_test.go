@@ -147,46 +147,53 @@ func TestClosingAServiceReleasesItsRootHandles(t *testing.T) {
 	}
 }
 
-// One cause, one answer. An operation that was handed its handle just before the
-// hub closed the set fails with a closed handle, and that is the same situation
-// the closed-set check reports -- so the write path reports it the way the read
-// path does, rather than answering `write_failed` for what a read beside it
-// answers `path_not_allowed`.
+// A handle closed by a shutdown is one cause, and it has to be answered the same
+// way wherever it is met. The classification is now in one place -- the return of
+// Write and of Delete -- rather than at each site that can raise an error, which
+// is what made the previous version of this test weak: the sites that matter sit
+// inside windows of two adjacent syscalls, where no test can put a closed handle,
+// so reverting any one of them left the suite green.
 //
-// This pins the classification each path uses, not the paths themselves: reaching
-// a route's own call with a closed handle needs the close to land in an
-// adjacent-syscall gap, which no test can drive. See tasks.md 15.9.
-func TestAClosedHandleIsNotReportedAsAWriteFailure(t *testing.T) {
-	root := sandbox(t)
-	mustWrite(t, filepath.Join(root, "a.txt"), testBody)
-
-	set, err := NewRootSet([]string{root})
-	if err != nil {
+// An operation on a directory that cannot be written reaches the classifier
+// deterministically instead, for both of the public methods that have one, and
+// losing either changes what it answers: without it the error is the generic
+// write failure, which the transport reports as a server fault rather than as a
+// refusal. This test is what the review of the round that added them used to find
+// that Delete's had never been applied.
+func TestAnOperationOnAnUnwritableDirectoryIsAPermissionRefusal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a directory that has no write permission")
+	}
+	dir := sandbox(t)
+	locked := filepath.Join(dir, "locked")
+	mustMkdir(t, locked)
+	mustWrite(t, filepath.Join(locked, "a.txt"), "first")
+	// Everything the test needs is made before the directory is locked: nothing
+	// can be created inside it afterwards, which is the point.
+	tree := filepath.Join(locked, "tree")
+	mustMkdir(t, tree)
+	mustWrite(t, filepath.Join(tree, "f.txt"), "nested")
+	if err := os.Chmod(locked, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	handle := set.handles[0]
-	set.Close()
+	t.Cleanup(func() {
+		_ = os.Chmod(locked, 0o700) //nolint:errcheck // cleanup, and the sandbox goes away anyway
+	})
 
-	// What an operation with a handle from before the close sees.
-	_, closedErr := handle.OpenFile("a.txt", os.O_RDONLY, 0)
-	if closedErr == nil {
-		t.Fatal("expected a closed handle to refuse")
+	svc := mustService(t, Options{})
+	_, err := svc.Write(context.Background(), filepath.Join(locked, "a.txt"),
+		strings.NewReader("edited"), 6, nil, false)
+	if !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("a write that cannot be staged is not a permission refusal: %v", err)
 	}
 
-	routes := map[string]error{
-		"classifyPathError": classifyPathError("a.txt", closedErr),
-		"stageFailure":      stageFailure("a.txt", closedErr),
-		"writeFailure":      writeFailure("a.txt", closedErr),
-	}
-	for name, got := range routes {
-		if !errors.Is(got, ErrPathNotAllowed) {
-			t.Errorf("%s reported a closed handle as: %v", name, got)
-		}
-	}
-	// And a cause that is not a close is still a write failure, so the mapping
-	// above is not simply swallowing everything.
-	if got := writeFailure("a.txt", errors.New("disk on fire")); !errors.Is(got, ErrWriteFailed) {
-		t.Errorf("an ordinary write failure was reported as: %v", got)
+	// And the delete half, on the path where its classification is easiest to
+	// lose: a tree removed recursively goes through removeAll, which is a call
+	// site answering for itself rather than an error that was already classified,
+	// and it has to answer the same way as the single-entry path beside it.
+	delErr := svc.Delete(context.Background(), tree, true)
+	if !errors.Is(delErr, ErrPermissionDenied) {
+		t.Fatalf("a recursive delete that cannot be performed is not a permission refusal: %v", delErr)
 	}
 }
 
@@ -306,7 +313,7 @@ func TestWriteRefusesAConflictAndLeavesTheFileAlone(t *testing.T) {
 
 	stale := int64(1) // long before the file was written
 	_, err := svc.Write(context.Background(), file, strings.NewReader("replacement"), 11,
-		&ExpectedMtime{Millis: stale})
+		&ExpectedMtime{Millis: stale}, false)
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected a conflict, got: %v", err)
 	}
@@ -321,7 +328,7 @@ func TestWriteWithoutAnExpectedMtimeOverwrites(t *testing.T) {
 	mustWrite(t, file, "original")
 	svc := mustService(t, Options{})
 
-	if _, err := svc.Write(context.Background(), file, strings.NewReader("replacement"), 11, nil); err != nil {
+	if _, err := svc.Write(context.Background(), file, strings.NewReader("replacement"), 11, nil, false); err != nil {
 		t.Fatalf("a forced overwrite must succeed: %v", err)
 	}
 	if got := readFile(t, file); got != "replacement" {
@@ -343,7 +350,7 @@ func TestWriteKeepsTheTargetsPermissionBits(t *testing.T) {
 
 	replacement := "#!/bin/sh\necho hi\n"
 	size := int64(len(replacement))
-	if _, err := svc.Write(context.Background(), file, strings.NewReader(replacement), size, nil); err != nil {
+	if _, err := svc.Write(context.Background(), file, strings.NewReader(replacement), size, nil, false); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -380,7 +387,7 @@ func TestWriteCreatesANewFileWithTheSameModeAsADirectCreate(t *testing.T) {
 
 	file := filepath.Join(dir, "new.txt")
 	size := int64(len(testBody))
-	if _, err := svc.Write(context.Background(), file, strings.NewReader(testBody), size, nil); err != nil {
+	if _, err := svc.Write(context.Background(), file, strings.NewReader(testBody), size, nil, false); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -402,7 +409,7 @@ func TestWriteReturnsAnMtimeThatMakesTheNextSaveSucceed(t *testing.T) {
 	mustWrite(t, file, "original")
 	svc := mustService(t, Options{})
 
-	first, err := svc.Write(context.Background(), file, strings.NewReader("one"), 3, nil)
+	first, err := svc.Write(context.Background(), file, strings.NewReader("one"), 3, nil, false)
 	if err != nil {
 		t.Fatalf("first write failed: %v", err)
 	}
@@ -419,7 +426,7 @@ func TestWriteReturnsAnMtimeThatMakesTheNextSaveSucceed(t *testing.T) {
 		t.Errorf("write reported %d ns but the file has %d", first.MtimeNanos, info.ModTime().UnixNano())
 	}
 	if _, err := svc.Write(context.Background(), file, strings.NewReader("two"), 3,
-		&ExpectedMtime{Millis: first.Mtime, Nanos: &first.MtimeNanos}); err != nil {
+		&ExpectedMtime{Millis: first.Mtime, Nanos: &first.MtimeNanos}, false); err != nil {
 		t.Fatalf("the second save was refused as a conflict: %v", err)
 	}
 	if got := readFile(t, file); got != "two" {
@@ -433,7 +440,7 @@ func TestWriteRefusesAMissingFileWhenAnMtimeWasExpected(t *testing.T) {
 	svc := mustService(t, Options{})
 
 	observed := int64(1)
-	_, err := svc.Write(context.Background(), file, strings.NewReader("x"), 1, &ExpectedMtime{Millis: observed})
+	_, err := svc.Write(context.Background(), file, strings.NewReader("x"), 1, &ExpectedMtime{Millis: observed}, false)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected not-found, got: %v", err)
 	}
@@ -448,7 +455,7 @@ func TestWriteRefusesABodyThatDoesNotMatchItsDeclaredLength(t *testing.T) {
 	mustWrite(t, file, "original")
 	svc := mustService(t, Options{})
 
-	_, err := svc.Write(context.Background(), file, strings.NewReader("short"), 500, nil)
+	_, err := svc.Write(context.Background(), file, strings.NewReader("short"), 500, nil, false)
 	if !errors.Is(err, ErrInvalidBody) {
 		t.Fatalf("expected an invalid-body error, got: %v", err)
 	}
@@ -465,7 +472,7 @@ func TestWriteRefusesABodyOverTheSizeLimit(t *testing.T) {
 	file := filepath.Join(dir, "a.txt")
 	svc := mustService(t, Options{MaxFileSize: 8})
 
-	_, err := svc.Write(context.Background(), file, strings.NewReader("x"), 64, nil)
+	_, err := svc.Write(context.Background(), file, strings.NewReader("x"), 64, nil, false)
 	if !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("expected a too-large error, got: %v", err)
 	}
@@ -483,7 +490,7 @@ func TestWriteLeavesTheOriginalWhenTheBodyFailsMidStream(t *testing.T) {
 	svc := mustService(t, Options{})
 
 	const partial, declared = 64 << 10, 128 << 10
-	_, err := svc.Write(context.Background(), file, &failingReader{remaining: partial}, declared, nil)
+	_, err := svc.Write(context.Background(), file, &failingReader{remaining: partial}, declared, nil, false)
 	if !errors.Is(err, ErrWriteFailed) {
 		t.Fatalf("expected a write failure, got: %v", err)
 	}
@@ -725,13 +732,13 @@ func TestWriteRefusesWhenTheTargetChangesDuringTheTransfer(t *testing.T) {
 	body := &raceReader{
 		inner: strings.NewReader(stale),
 		race: func() {
-			if _, err := svc.Write(ctx, file, strings.NewReader(winner), int64(len(winner)), nil); err != nil {
+			if _, err := svc.Write(ctx, file, strings.NewReader(winner), int64(len(winner)), nil, false); err != nil {
 				t.Errorf("the competing write failed: %v", err)
 			}
 		},
 	}
 
-	_, err := svc.Write(ctx, file, body, int64(len(stale)), &ExpectedMtime{Millis: observed})
+	_, err := svc.Write(ctx, file, body, int64(len(stale)), &ExpectedMtime{Millis: observed}, false)
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected the write to lose the race, got: %v", err)
 	}
@@ -779,7 +786,7 @@ func TestListHidesAStagingFileOnlyWhileItIsBeingWritten(t *testing.T) {
 			during = names(inner)
 		},
 	}
-	if _, err := svc.Write(ctx, filepath.Join(dir, "a.txt"), body, int64(len("replacement")), nil); err != nil {
+	if _, err := svc.Write(ctx, filepath.Join(dir, "a.txt"), body, int64(len("replacement")), nil, false); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if during == nil {
@@ -814,7 +821,7 @@ func TestWriteIntoAMissingDirectoryReportsNotFound(t *testing.T) {
 	svc := mustService(t, Options{})
 
 	target := filepath.Join(dir, "gone", "a.txt")
-	_, err := svc.Write(context.Background(), target, strings.NewReader(testBody), int64(len(testBody)), nil)
+	_, err := svc.Write(context.Background(), target, strings.NewReader(testBody), int64(len(testBody)), nil, false)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected not_found for a write into a missing directory, got: %v", err)
 	}
@@ -1192,7 +1199,7 @@ func TestWriteKeepsPermissionBitsAndDropsTheSpecialOnes(t *testing.T) {
 
 	replacement := "#!/bin/sh\necho hi\n"
 	size := int64(len(replacement))
-	if _, err := svc.Write(context.Background(), file, strings.NewReader(replacement), size, nil); err != nil {
+	if _, err := svc.Write(context.Background(), file, strings.NewReader(replacement), size, nil, false); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -1369,7 +1376,7 @@ func TestTheStagingRecordIsEmptiedOnEveryPath(t *testing.T) {
 	}
 
 	// A write that commits.
-	if _, err := svc.Write(ctx, file, strings.NewReader("new"), 3, nil); err != nil {
+	if _, err := svc.Write(ctx, file, strings.NewReader("new"), 3, nil, false); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if got := recorded(); got != 0 {
@@ -1377,7 +1384,7 @@ func TestTheStagingRecordIsEmptiedOnEveryPath(t *testing.T) {
 	}
 
 	// A body that does not match its declared length.
-	if _, err := svc.Write(ctx, file, strings.NewReader("new"), 99, nil); !errors.Is(err, ErrInvalidBody) {
+	if _, err := svc.Write(ctx, file, strings.NewReader("new"), 99, nil, false); !errors.Is(err, ErrInvalidBody) {
 		t.Fatalf("expected an invalid body, got: %v", err)
 	}
 	if got := recorded(); got != 0 {
@@ -1398,12 +1405,12 @@ func TestTheStagingRecordIsEmptiedOnEveryPath(t *testing.T) {
 	body := &raceReader{
 		inner: strings.NewReader("stale"),
 		race: func() {
-			if _, err := svc.Write(ctx, file, strings.NewReader(winner), int64(len(winner)), nil); err != nil {
+			if _, err := svc.Write(ctx, file, strings.NewReader(winner), int64(len(winner)), nil, false); err != nil {
 				t.Errorf("the competing write failed: %v", err)
 			}
 		},
 	}
-	if _, err := svc.Write(ctx, file, body, 5, &ExpectedMtime{Millis: observed}); !errors.Is(err, ErrConflict) {
+	if _, err := svc.Write(ctx, file, body, 5, &ExpectedMtime{Millis: observed}, false); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected a conflict, got: %v", err)
 	}
 	if got := recorded(); got != 0 {
@@ -1462,7 +1469,7 @@ func TestAStagingFileIsPrivateUntilItIsComplete(t *testing.T) {
 			}
 		},
 	}
-	if _, err := svc.Write(context.Background(), file, body, int64(len("replacement")), nil); err != nil {
+	if _, err := svc.Write(context.Background(), file, body, int64(len("replacement")), nil, false); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if len(observed) == 0 {
@@ -1509,7 +1516,7 @@ func TestWriteRefusesALinkWhoseTargetDoesNotExist(t *testing.T) {
 	svc := mustService(t, Options{})
 
 	size := int64(len(testBody))
-	_, err := svc.Write(context.Background(), link, strings.NewReader(testBody), size, nil)
+	_, err := svc.Write(context.Background(), link, strings.NewReader(testBody), size, nil, false)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected the link's missing target to be reported, got: %v", err)
 	}

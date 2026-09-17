@@ -3,6 +3,7 @@ package files
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -315,10 +316,15 @@ func isBlocked(path string) bool {
 // hub is shutting down and this request outlived it -- as the answer the closed
 // set itself gives, or nil when the error is something else.
 //
-// It is separate from the switch in classifyPathError because not every failure
-// is classified there: the write path and the recursive delete report their own,
-// and one cause answering `path_not_allowed` on a read and `write_failed` on the
-// write beside it is worse than either answer on its own.
+// It is separate from the switch in classifyPathError because it answers a
+// question about *why* -- is this a shutdown, rather than a path -- and because it
+// is the part of that switch a caller may want on its own. It has one caller, the
+// switch below. `Write` and `Delete` reach it from a deferred call at their
+// return, so nothing they can fail at needs a rule of its own -- the other methods
+// of this service classify where they raise, which design.md records as a
+// pre-existing gap. One cause answering `path_not_allowed` on a read and
+// `write_failed` on the write beside it is worse than either answer on its own,
+// which is why those two defer rather than repeating the rule.
 func closedRootError(path string, err error) error {
 	if err == nil || !errors.Is(err, os.ErrClosed) {
 		return nil
@@ -332,9 +338,16 @@ func classifyPathError(path string, err error) error {
 		return closed
 	}
 	switch {
-	case os.IsNotExist(err):
+	// errors.Is rather than os.IsNotExist and os.IsPermission, which is what
+	// this used to be. Those two see through a *PathError and nothing else, so
+	// they cannot classify an error that was wrapped on its way here -- which is
+	// exactly the shape a caller's own wrapping produces, and the reason the
+	// write path used to classify at each site that could raise one instead of at
+	// its own return. The modern predicates see both: a wrapped ENOENT is an
+	// ENOENT.
+	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("%w: %s", ErrNotFound, path)
-	case os.IsPermission(err):
+	case errors.Is(err, fs.ErrPermission):
 		return fmt.Errorf("%w: %s", ErrPermissionDenied, path)
 	// A path that runs through a file rather than a directory, one whose links
 	// lead in a circle, one whose links changed while they were being read, and

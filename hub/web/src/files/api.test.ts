@@ -153,6 +153,28 @@ test('writeFile declares a byte length rather than a character count', async () 
   })
 })
 
+// The hub refuses a target reachable under other names unless the caller says it
+// knows what that means, so the flag travels only when the user has agreed: a
+// request that always carried it would make the refusal unreachable, and one that
+// never carried it would make the agreement impossible.
+test('writeFile carries the agreement about other names only when it is given', async () => {
+  await withoutStorage(async () => {
+    const calls = mockFetch(jsonResponse({ mtime: 5 }))
+
+    await writeFile('/home/user/a.txt', 'x', stamp(1))
+    const without = new URL(calls[0].url, 'http://localhost')
+    assert.equal(without.searchParams.has('allow_other_names'), false)
+
+    await writeFile('/home/user/a.txt', 'x', stamp(1), true)
+    const with_ = new URL(calls[1].url, 'http://localhost')
+    assert.equal(with_.searchParams.get('allow_other_names'), '1')
+    // And it is the only thing that differs between the two calls: the flag adds
+    // an agreement to a request, rather than changing what that request says.
+    assert.equal(with_.searchParams.get('size'), without.searchParams.get('size'))
+    assert.equal(with_.searchParams.get('expected_mtime'), without.searchParams.get('expected_mtime'))
+  })
+})
+
 // Omitting the observed mtime is what asks the hub for a forced overwrite, so it
 // must be absent rather than sent as zero.
 test('writeFile omits expected_mtime when there is nothing to compare', async () => {

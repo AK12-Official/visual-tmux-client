@@ -243,6 +243,14 @@ Immediately before replacing the target the hub SHALL re-check that the target i
 
 Modification times SHALL be conveyed as integer milliseconds since the Unix epoch, which a JSON client can hold exactly. When the filesystem records finer precision than that, the hub SHALL convey the exact modification time alongside it as an opaque value the caller carries back unchanged, and SHALL compare against that exact value when the caller supplies one, so that two changes inside a single millisecond are two changes rather than one. A caller that supplies only milliseconds SHALL be compared against milliseconds. A successful write SHALL return the target's resulting modification time at both precisions, so the caller can continue editing without re-reading the file.
 
+A replacement replaces the file rather than writing through it, and that has costs the specification
+states where it states the requirement. What is carried over is the target's permission bits and, where
+the hub may set it, its owner. What is not is everything else the file carried that belongs to the inode
+it lived in: a replaced file has the empty set of access control entries and extended attributes that a
+new file has. And a target reachable under more than one name SHALL be refused unless the caller has
+agreed to the replacement, because the entry the caller named is the one that is written while every
+other name keeps the contents it had -- which is a thing to be told, not to discover.
+
 #### Scenario: Write with a matching modification time
 
 - **WHEN** a caller writes a file supplying the modification time it last observed, and the file is unchanged
@@ -297,6 +305,26 @@ Modification times SHALL be conveyed as integer milliseconds since the Unix epoc
 
 - **WHEN** a caller writes a body larger than the configured per-file limit
 - **THEN** the hub refuses with a too-large error and leaves the target unchanged
+
+#### Scenario: A target reachable under other names
+
+- **WHEN** a caller writes a file that is reachable under more than one name, without having said it knows what a replacement means for the others
+- **THEN** the hub refuses with a distinct error and leaves every name as it was
+
+#### Scenario: A target whose other names the caller agreed about
+
+- **WHEN** the caller writes that file having agreed
+- **THEN** the entry it named holds the new contents, and every other name still holds the contents it had
+
+#### Scenario: A name linked to the target while the body travelled
+
+- **WHEN** another name is linked to the target after the write began and before it is committed
+- **THEN** the hub refuses the write and leaves the file as it was
+
+#### Scenario: A replacement keeps what can be kept
+
+- **WHEN** a caller writes an existing file that has one name
+- **THEN** the replacement carries its permission bits, and its owner where the hub is allowed to set it
 
 ### Requirement: Session working directory
 
