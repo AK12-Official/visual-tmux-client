@@ -3,9 +3,11 @@ package files
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -48,7 +50,27 @@ const tooManyLinksMessage = "EvalSymlinks: too many links"
 // operators who want containment anyway, and not as the thing that keeps a
 // token holder out.
 type RootSet struct {
+	// mu guards handles and closed, which Close writes while operations may still
+	// be reading them through Confine.
+	//
+	// Close is not a test's business any more: the hub calls it from Shutdown, and
+	// Shutdown's HTTP phase can return with a handler still running -- a read
+	// streaming a large body, or a listing that has not finished describing its
+	// entries -- because that phase is bounded by a context and the force-close
+	// that follows it closes connections without stopping handlers. Unsynchronized,
+	// a reader that got past the closed check could index a slice the closer had
+	// already emptied, which is a panic rather than a refusal. The test that races
+	// them is what holds this.
+	mu sync.RWMutex
+	// roots are the canonical roots, written only by NewRootSet.
 	roots []string
+	// handles are the open descriptors the roots are acted through, parallel to
+	// roots. Acting through a handle is what closes the window between
+	// authorizing a path and performing the operation on it: see Confined.
+	handles []*os.Root
+	// closed records that Close has run, so that a set still in use refuses
+	// rather than behaving as though it had no boundary.
+	closed bool
 }
 
 // NewRootSet canonicalizes each configured root. A root that cannot be resolved
@@ -75,7 +97,39 @@ func NewRootSet(roots []string) (*RootSet, error) {
 		}
 		set.roots = append(set.roots, resolved)
 	}
+	handles, err := openRoots(set.roots)
+	if err != nil {
+		return nil, fmt.Errorf("open root: %w", err)
+	}
+	set.handles = handles
 	return set, nil
+}
+
+// Close releases the handles the roots are acted through, which is what the hub
+// does at the end of its lifetime: each handle is a file descriptor, and a hub
+// stopped and started again inside one process would otherwise leak one per root
+// per run -- and a descriptor held on a mount point also keeps the mount from
+// being released.
+//
+// Safe to call more than once, and safe to call while operations are in flight.
+// A Confine that loses that race refuses. One that got a handle just before hands
+// it to an operation which either begins its syscall before the close -- and
+// completes against a descriptor os.Root keeps alive for it, since a close is
+// refcounted -- or begins it after, and is refused with fs.ErrClosed. Neither of
+// them acts outside the boundary, and neither is why the lock is here: the lock
+// is for the two fields themselves, which an unsynchronized reader could read
+// half-updated and index a slice that has been emptied. See mu.
+func (s *RootSet) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, handle := range s.handles {
+		_ = handle.Close() //nolint:errcheck // nothing can be done about a descriptor that will not close
+	}
+	// The roots stay and a flag records the close, rather than the handles being
+	// emptied under them: a set that forgot its roots would look unrestricted, and
+	// every later operation would run with no boundary at all.
+	s.handles = nil
+	s.closed = true
 }
 
 // Unrestricted reports whether no roots are configured.
@@ -134,16 +188,10 @@ func (s *RootSet) Resolve(path string, mode Mode) (string, error) {
 	return resolved, nil
 }
 
-// contains reports whether resolved lies inside one of the roots. It compares
-// path elements rather than string prefixes, so a root of /tmp/x/root does not
-// appear to contain /tmp/x/root-backup.
+// contains reports whether resolved lies inside one of the roots.
 func (s *RootSet) contains(resolved string) bool {
 	for _, root := range s.roots {
-		rel, err := filepath.Rel(root, resolved)
-		if err != nil {
-			continue
-		}
-		if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
+		if _, ok := relativeTo(root, resolved); ok {
 			return true
 		}
 	}
@@ -264,12 +312,42 @@ func isBlocked(path string) bool {
 	return false
 }
 
+// closedRootError reports a handle that was closed underneath an operation -- the
+// hub is shutting down and this request outlived it -- as the answer the closed
+// set itself gives, or nil when the error is something else.
+//
+// It is separate from the switch in classifyPathError because it answers a
+// question about *why* -- is this a shutdown, rather than a path -- and because it
+// is the part of that switch a caller may want on its own. It has one caller, the
+// switch below. `Write` and `Delete` reach it from a deferred call at their
+// return, so nothing they can fail at needs a rule of its own -- the other methods
+// of this service classify where they raise, which design.md records as a
+// pre-existing gap. One cause answering `path_not_allowed` on a read and
+// `write_failed` on the write beside it is worse than either answer on its own,
+// which is why those two defer rather than repeating the rule.
+func closedRootError(path string, err error) error {
+	if err == nil || !errors.Is(err, os.ErrClosed) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s: the root set is closed", ErrPathNotAllowed, path)
+}
+
 // classifyPathError turns a filesystem error into the service's vocabulary.
 func classifyPathError(path string, err error) error {
+	if closed := closedRootError(path, err); closed != nil {
+		return closed
+	}
 	switch {
-	case os.IsNotExist(err):
+	// errors.Is rather than os.IsNotExist and os.IsPermission, which is what
+	// this used to be. Those two see through a *PathError and nothing else, so
+	// they cannot classify an error that was wrapped on its way here -- which is
+	// exactly the shape a caller's own wrapping produces, and the reason the
+	// write path used to classify at each site that could raise one instead of at
+	// its own return. The modern predicates see both: a wrapped ENOENT is an
+	// ENOENT.
+	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("%w: %s", ErrNotFound, path)
-	case os.IsPermission(err):
+	case errors.Is(err, fs.ErrPermission):
 		return fmt.Errorf("%w: %s", ErrPermissionDenied, path)
 	// A path that runs through a file rather than a directory, one whose links
 	// lead in a circle, one whose links changed while they were being read, and

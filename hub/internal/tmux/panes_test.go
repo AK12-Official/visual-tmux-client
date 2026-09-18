@@ -9,14 +9,19 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/session"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/testutil"
 )
 
-// record joins fields the way tmux's -F output does.
+// record frames fields the way PaneFormat asks tmux to emit them.
 func record(fields ...string) string {
-	return strings.Join(fields, paneFieldSep)
+	var out strings.Builder
+	for _, field := range fields {
+		fmt.Fprintf(&out, "%d:%s", len(field), field)
+	}
+	return out.String()
 }
 
 // fakeTmux points a Client at a script instead of a real tmux, so the command a
@@ -137,18 +142,23 @@ func TestParsePanesReadsDeadPanes(t *testing.T) {
 	}
 }
 
-// A title containing the field separator makes a record ambiguous. Dropping it is
-// the point: guessing would display a title under the window-name label as fact.
-func TestParsePanesDropsRecordsWithExtraFields(t *testing.T) {
-	bad := record("demo", "0", "0", "1", "1", "0", "zsh", "title"+paneFieldSep+"embedded", "nvim")
-	good := record("keep", "0", "0", "1", "1", "0", "zsh", "", "bash")
+// Record syntax inside a field is data. This is the property the old delimiter
+// format did not have: a newline plus enough separators could become a second
+// pane attributed to another session.
+func TestParsePanesKeepsRecordSyntaxInsideFields(t *testing.T) {
+	forged := "note\nvictim|vtc-pane|9|vtc-pane|9|vtc-pane|1"
+	one := record("demo\nsession", "0", "0", "1", "1", "0", "zsh", forged, "cmd\nnext")
+	two := record("keep", "0", "0", "1", "1", "0", "bash", "", "bash")
 
-	got := ParsePanes(bad + "\n" + good)
-	if len(got) != 1 {
-		t.Fatalf("got %d panes, want only the well-formed record", len(got))
+	got := ParsePanes(one + "\n" + two + "\n")
+	if len(got) != 2 {
+		t.Fatalf("got %d panes, want the two framed records: %+v", len(got), got)
 	}
-	if got[0].Session != "keep" {
-		t.Errorf("kept session = %q, want keep", got[0].Session)
+	if got[0].Session != "demo\nsession" || got[0].Title != forged || got[0].CurrentCommand != "cmd\nnext" {
+		t.Errorf("framed fields changed: %+v", got[0])
+	}
+	if got[1].Session != "keep" {
+		t.Errorf("second session = %q, want keep", got[1].Session)
 	}
 }
 
@@ -193,23 +203,19 @@ func TestParsePanesTreatsUnparseableIndexesAsZero(t *testing.T) {
 
 // The format string and the parser must agree, or every record is silently dropped.
 func TestPaneFormatFieldCountMatchesParser(t *testing.T) {
-	fields := strings.Split(PaneFormat, paneFieldSep)
-	if len(fields) != paneFieldCount {
-		t.Fatalf("PaneFormat emits %d fields, parser expects %d", len(fields), paneFieldCount)
+	if got := strings.Count(PaneFormat, "#{n:"); got != paneFieldCount {
+		t.Fatalf("PaneFormat emits %d lengths, parser expects %d", got, paneFieldCount)
 	}
 }
 
-// tmux versions used by Ubuntu CI escape control bytes in command output.
-// Pin the wire format to printable bytes, independently of record(), so a
-// regression to a control-character separator fails even on newer local tmux.
-func TestPaneFormatUsesPrintableDelimiter(t *testing.T) {
+// The framing syntax itself is printable; field contents need no escaping.
+func TestPaneFormatUsesPrintableFraming(t *testing.T) {
 	for _, r := range PaneFormat {
 		if r < ' ' || r > '~' {
 			t.Fatalf("PaneFormat contains non-printable ASCII: %q", PaneFormat)
 		}
 	}
-	const line = `panes|vtc-pane|0|vtc-pane|1|vtc-pane|1|vtc-pane|1|vtc-pane|0|vtc-pane|bash` +
-		`|vtc-pane|编辑器 | literal \037|vtc-pane|bash`
+	line := record("panes", "0", "1", "1", "1", "0", "bash", `编辑器 | literal \037`, "bash")
 	panes := ParsePanes(line)
 	if len(panes) != 1 || panes[0].Title != `编辑器 | literal \037` || panes[0].PaneIndex != 1 {
 		t.Fatalf("printable wire record parsed incorrectly: %+v", panes)
@@ -222,15 +228,15 @@ func TestPaneFormatUsesPrintableDelimiter(t *testing.T) {
 // count, the parser's own fixture and every rendering test still green. The
 // order is therefore pinned literally, next to the parser that depends on it.
 func TestPaneFormatFieldOrderIsPinnedToTheParser(t *testing.T) {
-	const want = "#{session_name}" + paneFieldSep +
-		"#{window_index}" + paneFieldSep +
-		"#{pane_index}" + paneFieldSep +
-		"#{window_active}" + paneFieldSep +
-		"#{pane_active}" + paneFieldSep +
-		"#{pane_dead}" + paneFieldSep +
-		"#{window_name}" + paneFieldSep +
-		"#{pane_title}" + paneFieldSep +
-		"#{pane_current_command}"
+	want := framedPaneField("session_name") +
+		framedPaneField("window_index") +
+		framedPaneField("pane_index") +
+		framedPaneField("window_active") +
+		framedPaneField("pane_active") +
+		framedPaneField("pane_dead") +
+		framedPaneField("window_name") +
+		framedPaneField("pane_title") +
+		framedPaneField("pane_current_command")
 	if PaneFormat != want {
 		t.Fatalf("PaneFormat =\n  %q\nwant\n  %q\n(reordering it also reorders ParsePanes's "+
 			"field indexing)", PaneFormat, want)
@@ -328,5 +334,83 @@ func TestListPanesWithoutAServer(t *testing.T) {
 	}
 	if len(panes) != 0 {
 		t.Fatalf("got %d panes, want none", len(panes))
+	}
+}
+
+// Linux permits a process name containing a newline and record-looking text.
+// Length framing must return one pane for it, not a forged pane for victim.
+func TestACommandNameCarryingALineBreakCannotForgeARecord(t *testing.T) {
+	if !tmuxAvailable(t) {
+		t.Skip("tmux not available")
+	}
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	binary, err := os.ReadFile("/bin/sleep")
+	if err != nil {
+		t.Skipf("no binary to copy into place: %v", err)
+	}
+	name := "evil\n" + record("victim", "9", "9", "1", "1", "0", "forged", "forged", "forged")
+	executable := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(executable, binary, 0o700); err != nil {
+		t.Fatalf("writing the executable: %v", err)
+	}
+
+	if _, err := c.Create(ctx, "victim"); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	// Quoted, so a shell that runs it hands the whole name to exec rather than
+	// splitting it into two commands at the line break.
+	if _, stderr, code, err := c.Exec(ctx,
+		"new-session", "-d", "-s", "attacker", "'"+executable+"' 600"); err != nil || code != 0 {
+		t.Fatalf("new-session failed: code=%d err=%v stderr=%q", code, err, stderr)
+	}
+
+	// The pane reports the command it was given before it reports any process
+	// running under it, so the state this is about is waited for rather than
+	// assumed -- and it arrives either way, which is why nothing here is skipped
+	// for the process having exited.
+	raw := ""
+	for attempt := 0; attempt < 20 && !strings.Contains(raw, "evil"); attempt++ {
+		time.Sleep(100 * time.Millisecond)
+		raw, _, _, err = c.Exec(ctx, "list-panes", "-a", "-F", PaneFormat)
+		if err != nil {
+			t.Fatalf("list-panes failed: %v", err)
+		}
+	}
+	if !strings.Contains(raw, "evil") {
+		t.Fatalf("the pane never reported the command it was given: %q", raw)
+	}
+	paneIDs, _, _, err := c.Exec(ctx, "list-panes", "-a", "-F", "#{pane_id}")
+	if err != nil {
+		t.Fatalf("counting the panes: %v", err)
+	}
+	want := 0
+	for _, line := range strings.Split(paneIDs, "\n") {
+		if strings.TrimSpace(line) != "" {
+			want++
+		}
+	}
+	panes := ParsePanes(raw)
+	if len(panes) != want {
+		t.Fatalf("tmux has %d panes and the parse produced %d records: %+v", want, len(panes), panes)
+	}
+
+	// And the session the forged record named is untouched: one record for it, with
+	// its own indexes, so the fragment never reaches a summary. This is the half
+	// that matters -- it could otherwise displace what the user is shown for a
+	// session that has nothing to do with the pane it came from.
+	victims := 0
+	for _, p := range panes {
+		if p.Session != "victim" {
+			continue
+		}
+		victims++
+		if p.WindowIndex != 0 || p.PaneIndex != 0 {
+			t.Errorf("a fragment of another pane's command was read as a record: %+v", p)
+		}
+	}
+	if victims != 1 {
+		t.Errorf("got %d records for the victim session, want one: %+v", victims, panes)
 	}
 }

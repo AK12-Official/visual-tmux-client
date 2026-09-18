@@ -2,6 +2,7 @@ package files
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"syscall"
 	"unicode/utf8"
@@ -64,9 +66,20 @@ type Service struct {
 }
 
 // NewService constructs a Service.
+//
+// A missing root set becomes an empty one rather than staying nil, because every
+// method here goes through it: a nil one would be a service that panics on the
+// first call rather than a service with no boundary, and that is not a state this
+// type offers. The composition root never takes this branch -- it always builds a
+// set, empty when the configuration names no roots -- so this is for a caller
+// that constructs a Service directly.
 func NewService(opts Options) *Service {
+	roots := opts.Roots
+	if roots == nil {
+		roots, _ = NewRootSet(nil) //nolint:errcheck // a set with no roots has nothing to resolve
+	}
 	return &Service{
-		roots:         opts.Roots,
+		roots:         roots,
 		maxFileSize:   opts.MaxFileSize,
 		maxDirEntries: opts.MaxDirEntries,
 		enabled:       opts.Enabled,
@@ -82,29 +95,33 @@ func NewService(opts Options) *Service {
 //
 // The name comes from the system's random source rather than a counter, so it
 // cannot be predicted and pre-created to interfere with a write.
-func (s *Service) createStaged(dir string, mode os.FileMode) (*os.File, error) {
+func (s *Service) createStaged(dir Confined, mode os.FileMode) (*os.File, Confined, error) {
 	s.stagingMu.Lock()
 	defer s.stagingMu.Unlock()
 
 	for range stagingNameAttempts {
 		var suffix [8]byte
 		if _, err := rand.Read(suffix[:]); err != nil {
-			return nil, err
+			return nil, Confined{}, err
 		}
-		name := filepath.Join(dir, tempFilePrefix+hex.EncodeToString(suffix[:]))
-		stage, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, mode)
+		stage := dir.join(tempFilePrefix + hex.EncodeToString(suffix[:]))
+		file, err := openFile(stage, os.O_RDWR|os.O_CREATE|os.O_EXCL, mode)
 		if err == nil {
 			if s.staging == nil {
 				s.staging = make(map[string]struct{})
 			}
-			s.staging[name] = struct{}{}
-			return stage, nil
+			// Keyed by the canonical absolute path rather than by whatever form
+			// the syscall was given, because a listing looks the record up by the
+			// path *it* resolved: the two have to be the same string for a
+			// staging file to stay hidden while it is being written.
+			s.staging[stage.abs] = struct{}{}
+			return file, stage, nil
 		}
 		if !os.IsExist(err) {
-			return nil, err
+			return nil, Confined{}, err
 		}
 	}
-	return nil, fmt.Errorf("%w: no free staging name in %s", ErrWriteFailed, dir)
+	return nil, Confined{}, fmt.Errorf("%w: no free staging name in %s", ErrWriteFailed, dir.abs)
 }
 
 // unmarkStaging forgets a staging file, which is what makes it an ordinary
@@ -128,6 +145,22 @@ func (s *Service) isStaging(path string) bool {
 // reads the filesystem on behalf of a capability that is turned off.
 func (s *Service) Enabled() bool {
 	return s.enabled
+}
+
+// Close gives back the descriptors the configured roots are held through.
+//
+// A hub holds one per root for its lifetime, so this is the end of that
+// lifetime: after it, every operation is refused rather than performed without
+// the handle. Nothing forces a process to call it -- the operating system
+// reclaims the descriptors at exit -- but a hub that is stopped and started
+// again in one process, or embedded in a program that outlives it, would leak
+// one per root per run, and a leaked descriptor on a mount point is also what
+// keeps the mount from being released.
+//
+// Safe to call more than once, including while requests are in flight. See
+// RootSet.Close.
+func (s *Service) Close() {
+	s.roots.Close()
 }
 
 // StartDirectory returns the directory a browser should open the file manager
@@ -161,7 +194,18 @@ func (s *Service) List(ctx context.Context, path string) (ListResult, error) {
 		return ListResult{}, err
 	}
 
-	info, err := os.Stat(resolved)
+	// Opened before it is asked what it is, so that the kind of thing this
+	// listing will read comes from the descriptor rather than from a stat taken
+	// beforehand -- the descriptor is what the reads will use either way.
+	dir, err := openDir(s.roots.Confine(resolved))
+	if err != nil {
+		return ListResult{}, classifyPathError(path, err)
+	}
+	defer func() {
+		_ = dir.Close() //nolint:errcheck // the listing has already been read
+	}()
+
+	info, err := dir.Stat()
 	if err != nil {
 		return ListResult{}, classifyPathError(path, err)
 	}
@@ -169,52 +213,157 @@ func (s *Service) List(ctx context.Context, path string) (ListResult, error) {
 		return ListResult{}, fmt.Errorf("%w: %s is not a directory", ErrInvalidPath, path)
 	}
 
-	children, err := os.ReadDir(resolved)
+	// A staging file belongs to a write that is in flight, and the listing is
+	// exactly where a user would otherwise watch it appear and vanish. Only a
+	// file this service is writing right now is omitted: recognising one by its
+	// name instead would hide a file the user named that way, and put it beyond
+	// the only interface that could remove it.
+	//
+	// The record is keyed by the path a write resolved, and the lookup by the
+	// path a listing resolved. Both come from the same resolver, so they agree --
+	// except across two spellings that differ only in case on a case-insensitive
+	// volume, where a listing can still catch the file. That costs a transient
+	// entry in a listing nobody asked for twice; closing it needs the directory's
+	// identity rather than its name.
+	//
+	// The skip is applied as the directory is read rather than to the result, so
+	// that the bound counts entries the caller will be shown. Filtering
+	// afterwards would count a staging file against the bound, and a directory
+	// holding exactly as many entries as the bound permits would report itself
+	// truncated -- while showing all of them -- for as long as a write to it was
+	// in flight.
+	target := s.roots.Confine(resolved)
+	children, cut, err := readListing(ctx, dir, s.maxDirEntries, func(name string) bool {
+		return s.isStaging(target.join(name).abs)
+	})
 	if err != nil {
 		return ListResult{}, classifyPathError(path, err)
 	}
 
-	dirs, plain := make([]Entry, 0, len(children)), make([]Entry, 0, len(children))
+	// Describing an entry can be work: a symbolic link is resolved through the
+	// guard and then stat'd, and there may be as many of those as the bound
+	// allows. Nothing below is worth finishing once the caller has gone.
+	entries := make([]Entry, 0, len(children))
 	for _, child := range children {
-		// A staging file belongs to a write that is in flight, and the listing is
-		// exactly where a user would otherwise watch it appear and vanish. Only a
-		// file this service is writing right now is omitted: recognising one by
-		// its name instead would hide a file the user named that way, and put it
-		// beyond the only interface that could remove it.
-		//
-		// The record is keyed by the path a write resolved, and the lookup by the
-		// path a listing resolved. Both come from the same resolver, so they agree
-		// -- except across two spellings that differ only in case on a
-		// case-insensitive volume, where a listing can still catch the file. That
-		// costs a transient entry in a listing nobody asked for twice; closing it
-		// needs the directory's identity rather than its name.
-		if s.isStaging(filepath.Join(resolved, child.Name())) {
-			continue
+		if err := ctx.Err(); err != nil {
+			return ListResult{}, err
 		}
-		entry := Entry{Name: child.Name()}
-		if child.IsDir() {
-			entry.IsDir = true
-			dirs = append(dirs, entry)
-			continue
-		}
-		// An entry that cannot be stat'd still exists, so it is reported without
-		// its size rather than taking the whole listing down.
-		if childInfo, statErr := child.Info(); statErr == nil {
-			entry.Size = childInfo.Size()
-			entry.Mtime = childInfo.ModTime().UnixMilli()
-		}
-		plain = append(plain, entry)
+		entries = append(entries, s.entryFor(target, child))
 	}
 
-	// os.ReadDir sorts by name, so grouping is all that is left to do and each
-	// group is already ordered.
-	entries := append(dirs, plain...)
-	result := ListResult{Path: resolved, Truncated: len(entries) > s.maxDirEntries}
-	if result.Truncated {
+	// The order is imposed here rather than taken from the reader. Reading in
+	// batches to bound a listing's cost means the entries arrive in whatever
+	// order the directory stores them, which is no order a caller can use.
+	slices.SortStableFunc(entries, compareEntries)
+
+	// At most one entry past the bound, which is what the flag was decided by.
+	if len(entries) > s.maxDirEntries {
 		entries = entries[:s.maxDirEntries]
 	}
-	result.Entries = entries
-	return result, nil
+	return ListResult{Path: resolved, Entries: entries, Truncated: cut}, nil
+}
+
+// compareEntries orders a listing: directories before files, then by name.
+func compareEntries(a, b Entry) int {
+	if a.IsDir != b.IsDir {
+		if a.IsDir {
+			return -1
+		}
+		return 1
+	}
+	return cmp.Compare(a.Name, b.Name)
+}
+
+// readListing reads a directory until one entry past the listing bound has been
+// kept, and reports whether it stopped with entries left unread.
+//
+// Stopping there is the whole point. os.ReadDir reads and sorts the entire
+// directory before its caller can apply any bound, so a directory holding a
+// hundred thousand entries costs a hundred thousand entries' worth of memory and
+// blocks for as long as reading them takes -- to produce a listing that is then
+// cut to the configured maximum. Reading in batches caps that cost at the bound
+// itself, and leaves somewhere to notice that the caller has gone away.
+//
+// An entry left unread is not an error: it is what the truncated flag is for.
+//
+// skip is applied as entries arrive rather than to the result, so the bound
+// counts what the caller will actually be shown. The entries it removes are the
+// ones a write in flight has staged, of which there are as many as there are
+// concurrent writes -- so a directory cannot be inflated into an unbounded read
+// by naming files the way this service names its staging files.
+func readListing(
+	ctx context.Context, dir *os.File, limit int, skip func(name string) bool,
+) ([]os.DirEntry, bool, error) {
+	// One entry past the bound is all it takes to know there are more, and
+	// reading exactly that many is what makes the bound the bound.
+	want := limit + 1
+	entries := make([]os.DirEntry, 0, want)
+	for len(entries) < want {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		// A short batch is not the end of the directory -- the kernel fills what
+		// the buffer holds -- so the loop keeps going until either the bound or
+		// io.EOF says to stop.
+		batch, err := dir.ReadDir(want - len(entries))
+		for _, entry := range batch {
+			if !skip(entry.Name()) {
+				entries = append(entries, entry)
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return entries, false, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	return entries, true, nil
+}
+
+// entryFor describes one child of the directory it was read from.
+func (s *Service) entryFor(dir Confined, child os.DirEntry) Entry {
+	entry := Entry{Name: child.Name()}
+
+	info, err := s.childInfo(dir, child)
+	if err != nil {
+		// An entry that cannot be described still exists, so it is reported
+		// without its size rather than taking the whole listing down.
+		return entry
+	}
+	entry.IsDir = info.IsDir()
+	// A directory reports no size: the size of a directory inode is meaningless
+	// to a browser, and obtaining one would not change that.
+	if !entry.IsDir {
+		entry.Size = info.Size()
+		entry.Mtime = info.ModTime().UnixMilli()
+	}
+	return entry
+}
+
+// childInfo describes a directory child, following a symbolic link to what it
+// points at when the boundary permits one.
+//
+// Following matters because this is where "is it a directory" is decided, and a
+// reader that does not follow reports a link to a directory as a file. The
+// browser offers the first for expanding and the second for opening, so the
+// wrong answer produces an entry that invites a click and then refuses it --
+// which is how a symlinked working directory, an entirely ordinary arrangement,
+// becomes unbrowsable.
+//
+// The link is resolved through the guard rather than with a bare stat, so a link
+// leading outside every configured root is described as the link it is instead
+// of answering with the size and modification time of a path the caller may not
+// name.
+func (s *Service) childInfo(dir Confined, child os.DirEntry) (os.FileInfo, error) {
+	if child.Type()&os.ModeSymlink == 0 {
+		return child.Info()
+	}
+	target, err := s.roots.Resolve(dir.join(child.Name()).abs, ModeRead)
+	if err != nil {
+		return nil, err
+	}
+	return stat(s.roots.Confine(target))
 }
 
 // Read opens a file for streaming and reports its size and modification time.
@@ -226,7 +375,7 @@ func (s *Service) Read(ctx context.Context, path string) (ReadResult, error) {
 		return ReadResult{}, err
 	}
 
-	file, err := os.Open(resolved)
+	file, err := openDir(s.roots.Confine(resolved))
 	if err != nil {
 		return ReadResult{}, classifyPathError(path, err)
 	}
@@ -239,34 +388,52 @@ func (s *Service) Read(ctx context.Context, path string) (ReadResult, error) {
 		_ = file.Close() //nolint:errcheck // the stat error is the one worth reporting
 		return ReadResult{}, classifyPathError(path, err)
 	}
-	if info.IsDir() {
+	if err := readableKind(path, info, s.maxFileSize); err != nil {
 		_ = file.Close() //nolint:errcheck // the kind error is the one worth reporting
-		return ReadResult{}, fmt.Errorf("%w: %s is a directory", ErrInvalidPath, path)
-	}
-	if info.Size() > s.maxFileSize {
-		_ = file.Close() //nolint:errcheck // the size error is the one worth reporting
-		return ReadResult{}, fmt.Errorf("%w: %s is %d bytes, over the %d byte limit",
-			ErrFileTooLarge, path, info.Size(), s.maxFileSize)
+		return ReadResult{}, err
 	}
 
-	binary, err := looksBinary(file, info.Size())
+	binary, err := looksBinary(ctx, file, info.Size())
 	if err != nil {
 		_ = file.Close() //nolint:errcheck // the sample error is the one worth reporting
 		return ReadResult{}, classifyPathError(path, err)
 	}
 
 	return ReadResult{
-		File:   file,
-		Size:   info.Size(),
-		Mtime:  info.ModTime().UnixMilli(),
-		Binary: binary,
+		File:       file,
+		Size:       info.Size(),
+		Mtime:      info.ModTime().UnixMilli(),
+		MtimeNanos: info.ModTime().UnixNano(),
+		Binary:     binary,
 	}, nil
 }
 
-// sniffBytes bounds how much of a file is examined to decide whether it is text.
-// A prefix is enough: a file that is text throughout starts as text, and every
-// format the browser would otherwise mangle declares itself early.
-const sniffBytes = 8192
+// readableKind reports why a file may not be read, if it may not.
+//
+// Only regular files are readable. The kind matters as much as the size: a named
+// pipe, a socket, or a device is not a file with contents that a browser could
+// show, and reading one is a different operation with different consequences. A
+// pipe would block a request goroutine until a writer appeared -- which, for a
+// pipe nothing is writing to, is never -- and a device answers with whatever it
+// produces rather than with what it holds.
+func readableKind(path string, info os.FileInfo, maxFileSize int64) error {
+	if info.IsDir() {
+		return fmt.Errorf("%w: %s is a directory", ErrInvalidPath, path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: %s is not a regular file", ErrInvalidPath, path)
+	}
+	if info.Size() > maxFileSize {
+		return fmt.Errorf("%w: %s is %d bytes, over the %d byte limit",
+			ErrFileTooLarge, path, info.Size(), maxFileSize)
+	}
+	return nil
+}
+
+// scanChunk bounds how much of a file is held in memory at a time while
+// deciding whether its contents are text. It is a working-set bound rather than
+// a decision bound: the whole file is examined either way.
+const scanChunk = 32 * 1024
 
 // looksBinary reports whether a file's contents are not text.
 //
@@ -275,46 +442,90 @@ const sniffBytes = 8192
 // than leaving the browser to guess from the file's name -- a name is a guess,
 // and a wrong guess either mojibakes a file or refuses to open a log.
 //
-// The sample is read with ReadAt, which does not move the file offset, so the
-// caller still streams the whole file from the beginning.
-func looksBinary(file *os.File, size int64) (bool, error) {
+// The whole file decides, not a prefix of it. A prefix is a guess of the same
+// kind: text that turns binary further in is ordinary -- a log with a binary
+// record appended, a source file with an embedded blob -- and a reader told the
+// file is text decodes the rest of it into replacement characters, which the
+// next save writes back over the bytes that were there. Scanning costs
+// little more than the sample it replaces: a binary file is refuted by its first
+// decisive byte, and most have one in the first few kilobytes, so only a file
+// that stays text to its end is read to its end -- which is exactly the file
+// whose classification has to be right before it is offered as editable.
+//
+// Reading uses ReadAt, which does not move the file offset, so the caller still
+// streams the whole file from the beginning.
+func looksBinary(ctx context.Context, file *os.File, size int64) (bool, error) {
 	if size == 0 {
 		return false, nil
 	}
-	n := min(int64(sniffBytes), size)
-	sample := make([]byte, n)
-	read, err := file.ReadAt(sample, 0)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return false, err
+	buf := make([]byte, scanChunk)
+	var scan textScan
+	for offset := int64(0); offset < size; {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		read, err := file.ReadAt(buf[:min(int64(len(buf)), size-offset)], offset)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return false, err
+		}
+		if read == 0 {
+			// The file is shorter than it said it was. What is there has been
+			// examined, and it is the whole of it.
+			break
+		}
+		offset += int64(read)
+		if scan.decidedBy(buf[:read]) {
+			return true, nil
+		}
 	}
-	// A sample shorter than the file stopped at the bound rather than at the end,
-	// which is the case that can end inside a rune.
-	return binarySample(sample[:read], size <= int64(sniffBytes)), nil
+	// Bytes still held back at the end of the file were a rune the end of the
+	// file cut in half. No encoding produces those, so they are not text.
+	return len(scan.carry) > 0, nil
 }
 
-// binarySample classifies a sample. A NUL byte is decisive -- no text encoding
-// the browser can read contains one -- and anything that is not valid UTF-8 is
-// treated as binary, since that is what the browser would decode into
-// replacement characters and then save back over the original bytes.
+// textScan classifies a file's contents as they are read, one chunk at a time.
 //
-// complete says whether the sample is the whole file. It matters because a
-// sample that stopped at the sniff bound can end inside a rune, and that is not
-// the same thing as bytes that are not UTF-8 at all.
-func binarySample(sample []byte, complete bool) bool {
+// It exists because a decision about a whole file has to survive being reached
+// in pieces. A multi-byte character can straddle a chunk boundary, and the two
+// chunks around it are neither of them valid UTF-8 on their own -- the first
+// ends inside a rune, the second begins with its continuation bytes. A scanner
+// that judged each chunk alone would call perfectly ordinary text binary at
+// whichever boundary it happened to land on, and the position of that boundary
+// is a buffer size rather than anything about the file.
+type textScan struct {
+	// carry is the tail of the last chunk that could be a rune cut in half,
+	// held back to be decided against the bytes that follow it.
+	carry []byte
+}
+
+// decidedBy reports whether a chunk proves the contents are not text, holding
+// back a trailing rune that the chunk may have cut in half.
+//
+// A NUL byte is decisive -- no text encoding the browser can read contains one
+// -- and so is a byte sequence that is not valid UTF-8, since that is what the
+// browser would decode into replacement characters and then save back over the
+// original bytes.
+func (s *textScan) decidedBy(chunk []byte) bool {
+	sample := chunk
+	if len(s.carry) > 0 {
+		sample = append(append([]byte{}, s.carry...), chunk...)
+		s.carry = nil
+	}
 	if bytes.IndexByte(sample, 0) >= 0 {
 		return true
 	}
 	if utf8.Valid(sample) {
 		return false
 	}
-	if complete {
-		return true
-	}
-	// Only a truncated rune is tolerated: the bytes after the last complete rune
-	// have to be the start of a valid encoding, not merely short enough that what
-	// precedes them happens to parse.
-	for drop := 1; drop <= 3 && drop <= len(sample); drop++ {
-		if utf8.Valid(sample[:len(sample)-drop]) && isPartialRune(sample[len(sample)-drop:]) {
+	// Invalid as it stands, which is either the answer or a consequence of where
+	// this chunk ended. Only a truncated rune is tolerated: everything before it
+	// must be valid, and the bytes after the last complete rune must be the start
+	// of a valid encoding rather than merely short enough that what precedes them
+	// happens to parse.
+	for drop := 1; drop < utf8.UTFMax && drop <= len(sample); drop++ {
+		tail := sample[len(sample)-drop:]
+		if utf8.Valid(sample[:len(sample)-drop]) && isPartialRune(tail) {
+			s.carry = append([]byte{}, tail...)
 			return false
 		}
 	}
@@ -349,85 +560,197 @@ func isPartialRune(b []byte) bool {
 	return true
 }
 
-// Write replaces a file's contents and returns the resulting modification time.
+// writeTarget resolves the path a write names and applies every check that can be
+// made before a byte of the body is transferred, so that a refusal costs the
+// caller a round trip rather than an upload. It returns the target, what was
+// found there, and a metadata-only descriptor pinning that inode -- or nil for a
+// name that was free -- or the refusal that stopped it.
 //
-// expectedMtime is the value the caller last observed. A mismatch is a conflict
-// and nothing is written; a nil expectedMtime forces the overwrite, which is
-// what the browser sends once the user has confirmed. A non-nil expectedMtime
-// against a file that does not exist is a not-found rather than a create: a
-// caller that believes it is editing an existing file must not be handed a new
-// one.
-func (s *Service) Write(
-	ctx context.Context, path string, body io.Reader, declaredSize int64, expectedMtime *int64,
-) (int64, error) {
+// Each check is here for the reason it is stated at:
+//
+//   - the path must resolve inside the boundary, and a path it cannot stat is
+//     classified rather than reported as a server fault;
+//   - a directory is not a file to write, and neither is anything else that is not
+//     a regular file: a named pipe, a socket or a device would not be written, it
+//     would be *replaced* by the staged regular file, and the node would be gone;
+//   - a name held by a link whose target is gone is not a name to write over: the
+//     rename that commits the write would replace the link, destroying where it
+//     pointed without saying so, and the caller asked to write a file rather than
+//     to remove a link. Reading it fails on its own, so nothing else can act on
+//     it either, and "no such target" is what is true of it;
+//   - an observed time that does not match is a conflict, and one supplied for a
+//     file that does not exist is a not-found: a caller that believes it is
+//     editing an existing file must not be handed a new one;
+//   - a target reachable under more than one name is refused unless the caller has
+//     agreed, because the replacement writes the name it was given and leaves the
+//     others holding the contents they had.
+func (s *Service) writeTarget(
+	path string, expected *ExpectedMtime, allowOtherNames bool,
+) (Confined, os.FileInfo, *os.File, error) {
 	resolved, err := s.roots.Resolve(path, ModeCreate)
 	if err != nil {
-		return 0, err
+		return Confined{}, nil, nil, err
+	}
+	target := s.roots.Confine(resolved)
+
+	// A final dangling link survives canonicalization as the entry itself. Check it
+	// before the metadata-only open: Linux O_PATH|O_NOFOLLOW can successfully pin
+	// the link rather than answer not-found, while the write contract reports the
+	// missing target and never replaces the link.
+	if info, linkErr := lstat(target); linkErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return Confined{}, nil, nil,
+			fmt.Errorf("%w: %s is a link whose target does not exist", ErrNotFound, path)
 	}
 
-	existing, statErr := os.Stat(resolved)
-	exists := statErr == nil
-	if statErr != nil && !os.IsNotExist(statErr) {
-		return 0, classifyPathError(path, statErr)
-	}
-	if exists && existing.IsDir() {
-		return 0, fmt.Errorf("%w: %s is a directory", ErrInvalidPath, path)
-	}
-	if !exists {
-		// A name held by a link whose target is gone is not a name to write over.
-		// The rename that commits the write would replace the link, destroying
-		// where it pointed without saying so; the caller asked to write a file,
-		// not to remove a link. Reading it fails on its own, so nothing else can
-		// act on it either, and "no such target" is what is true of it.
-		if info, linkErr := os.Lstat(resolved); linkErr == nil && info.Mode()&os.ModeSymlink != 0 {
-			return 0, fmt.Errorf("%w: %s is a link whose target does not exist", ErrNotFound, path)
+	pinned, openErr := pinMetadata(target)
+	if openErr != nil {
+		if !os.IsNotExist(openErr) {
+			// Returned as it is: Write's own return classifies everything that
+			// leaves it, which is the one place that has to be right. See Write.
+			return Confined{}, nil, nil, openErr
 		}
+		if expected != nil {
+			return Confined{}, nil, nil, fmt.Errorf("%w: %s", ErrNotFound, path)
+		}
+		return target, nil, nil, nil
 	}
-	if expectedMtime != nil {
-		if !exists {
-			return 0, fmt.Errorf("%w: %s", ErrNotFound, path)
+	existing, err := pinned.Stat()
+	if err != nil {
+		_ = pinned.Close() //nolint:errcheck // the stat error is the one worth reporting
+		return Confined{}, nil, nil, err
+	}
+	if existing.IsDir() {
+		_ = pinned.Close() //nolint:errcheck // the kind error is the one worth reporting
+		return Confined{}, nil, nil, fmt.Errorf("%w: %s is a directory", ErrInvalidPath, path)
+	}
+	if !existing.Mode().IsRegular() {
+		// The same rule the read path applies to the same kinds -- a named pipe, a
+		// socket, a device -- and here it means more than refusing to read one:
+		// the staged file is a *regular* file, so the rename would replace a pipe
+		// with a file and the node would be gone. A caller asking to write contents
+		// has not agreed to that, which is the same refusal the dangling link above
+		// gets: what the name holds is not a file with contents.
+		_ = pinned.Close() //nolint:errcheck // the kind error is the one worth reporting
+		return Confined{}, nil, nil, fmt.Errorf("%w: %s is not a regular file", ErrInvalidPath, path)
+	}
+	if expected != nil && !expected.matches(existing) {
+		_ = pinned.Close() //nolint:errcheck // the conflict is the one worth reporting
+		return Confined{}, nil, nil, fmt.Errorf("%w: %s changed since it was read", ErrConflict, path)
+	}
+	if err := linkedError(path, existing, allowOtherNames); err != nil {
+		_ = pinned.Close() //nolint:errcheck // the refusal is the one worth reporting
+		return Confined{}, nil, nil, err
+	}
+	return target, existing, pinned, nil
+}
+
+// Write replaces a file's contents and reports what it produced.
+//
+// expected is the modification time the caller last observed. A mismatch is a
+// conflict and nothing is written; a nil expected forces the overwrite, which is
+// what the browser sends once the user has confirmed. A non-nil expected against
+// a file that does not exist is a not-found rather than a create: a caller that
+// believes it is editing an existing file must not be handed a new one.
+//
+// allowOtherNames is agreement to a replacement whose target is reachable under
+// more than one name. Replacing a file replaces the inode, so a target with
+// other names loses them: the entry the caller edited is written, and every
+// other name keeps the contents it had. That is not a thing to do without
+// saying so, and the caller is the only one who can say it -- so a linked target
+// is refused until this is set, and the browser sets it once the user has
+// confirmed.
+func (s *Service) Write(
+	ctx context.Context, path string, body io.Reader, declaredSize int64,
+	expected *ExpectedMtime, allowOtherNames bool,
+) (result WriteResult, err error) {
+	// Every error this returns is classified here, once, rather than at each
+	// place one can be raised. A handle closed by a shutdown can be met at any of
+	// them -- and the two that matter are inside windows of two adjacent syscalls,
+	// where no test can put it -- so a rule that has to be remembered at each site
+	// is a rule that can be dropped at one of them without anything noticing.
+	defer func() {
+		if err != nil {
+			err = classifyPathError(path, err)
 		}
-		if existing.ModTime().UnixMilli() != *expectedMtime {
-			return 0, fmt.Errorf("%w: %s changed since it was read", ErrConflict, path)
-		}
+	}()
+
+	target, existing, pinned, err := s.writeTarget(path, expected, allowOtherNames)
+	if err != nil {
+		return WriteResult{}, err
+	}
+	if pinned != nil {
+		defer func() {
+			_ = pinned.Close() //nolint:errcheck // the write result is the one worth reporting
+		}()
 	}
 
-	// The replacement carries the target's permission bits. Staging through a
-	// fresh file would otherwise reset them: a temporary file is created without
-	// any of them, so renaming it over a 0644 file would quietly make it private
-	// and over an executable script would strip the bit that lets it run.
+	// The replacement carries the target's permission bits and, where the hub may
+	// give them back, its owner. Staging through a fresh file would otherwise
+	// reset them: a temporary file is created without any of them, so renaming it
+	// over a 0644 file would quietly make it private and over an executable script
+	// would strip the bit that lets it run. The owner is taken back by takeOwner,
+	// which also says what happens where the hub may not.
 	//
-	// Only the permission bits, deliberately. The staging file is owned by the
-	// hub's user, so the replacement is too, and carrying setuid or setgid across
-	// would not preserve a capability -- it would hand one to whoever just wrote
-	// the file. Dropping them is what a plain shell redirect does, and the cost is
-	// a chmod the owner can reapply.
-	opts := writeOptions{expectedMtime: expectedMtime, display: path}
-	if exists {
-		opts.mode = existing.Mode().Perm()
+	// Only those two, deliberately. Setuid and setgid are not carried across: the
+	// replacement is a file the writer just wrote, so preserving them would hand a
+	// capability to whoever wrote it rather than keep one for whoever held it.
+	// Dropping them is what a plain shell redirect does, and the cost is a chmod
+	// the owner can reapply.
+	//
+	// Everything else the file carried goes with the inode it belonged to: the
+	// replacement is a new file, so its ACLs and extended attributes are the empty
+	// set a new file has. That is a consequence of *replacing* rather than
+	// rewriting, and replacing is what makes a failed write leave the target
+	// intact -- the property the specification requires. It states this cost where
+	// it states the requirement, and both READMEs say the same in operator's words.
+	opts := writeOptions{expected: expected, display: path, allowOtherNames: allowOtherNames}
+	if existing != nil {
+		// What the target was when this write began, whether or not the caller
+		// supplied a time to compare it against. See confirmUnchanged.
+		//
+		// No mode is set for this case: a replacement's staging file is private
+		// while it is incomplete, and the mode the file ends up with is the
+		// target's, read at commit. See writeOptions.mode.
+		opts.origin = existing
 		opts.preserve = true
 	} else {
 		opts.mode = os.FileMode(createFileMode)
 	}
 
-	return s.writeAtomically(ctx, resolved, body, declaredSize, opts)
+	return s.writeAtomically(ctx, target, body, declaredSize, opts)
 }
 
 // writeOptions carries what the staging path needs beyond the body itself.
 type writeOptions struct {
-	// mode is what the file ends up with: the target's permission bits when it is
-	// replacing one, the documented default when it is creating one.
+	// mode is the mode the staging file is *created* with. For a new file that is
+	// the mode it ends up with, applied at creation so that the umask governs it
+	// as it governs any other new file. For a replacement it is the private
+	// staging mode, and the target's own mode is applied later, from the metadata
+	// read at commit -- see writeAtomically.
 	mode os.FileMode
 	// preserve says mode describes an existing file rather than a new one. An
 	// existing mode is a value to keep, so it is applied with chmod -- which the
 	// umask does not reduce. A new file's mode is a default, so creation applies
 	// it and lets the umask decide.
 	preserve bool
-	// expectedMtime is the modification time the caller last observed, re-checked
-	// immediately before the target is replaced.
-	expectedMtime *int64
+	// origin is the target as this write found it, or nil when the name was free.
+	// It is what the target is checked against immediately before it is replaced,
+	// so that a write against an entry that has since been moved, removed, or
+	// taken by something else is refused rather than landing on whatever now
+	// answers to that name.
+	origin os.FileInfo
+	// expected is the modification time the caller last observed, re-checked
+	// immediately before the target is replaced. A nil one forces the overwrite
+	// and is compared against nothing -- the origin check is what still has to
+	// hold.
+	expected *ExpectedMtime
 	// display is the caller's own spelling of the path, for error messages.
 	display string
+	// allowOtherNames is the caller's agreement that a target reachable under
+	// more than one name may be replaced, which leaves those other names holding
+	// the contents they had. It is carried this far because the answer is asked
+	// again at commit: a link can be made while the body travels.
+	allowOtherNames bool
 }
 
 // writeAtomically stages the body in a sibling of the target and renames it
@@ -435,8 +758,8 @@ type writeOptions struct {
 // leaves the target exactly as it was, which is the property a plain truncate
 // and write cannot offer.
 func (s *Service) writeAtomically(
-	ctx context.Context, target string, body io.Reader, declaredSize int64, opts writeOptions,
-) (int64, error) {
+	ctx context.Context, target Confined, body io.Reader, declaredSize int64, opts writeOptions,
+) (WriteResult, error) {
 	// A new file is created with the mode it will keep, so the umask governs it
 	// exactly as it would govern a file created directly. The cost is that an
 	// unfinished copy of a *new* file carries whatever that mode allows, in a
@@ -449,93 +772,167 @@ func (s *Service) writeAtomically(
 	if opts.preserve {
 		createMode = stagingMode
 	}
-	stage, err := s.createStaged(filepath.Dir(target), createMode)
+	stage, staged, err := s.createStaged(target.dir(), createMode)
 	if err != nil {
-		return 0, stageFailure(opts.display, err)
+		return WriteResult{}, stagingFailure(opts.display, err)
 	}
-	defer s.unmarkStaging(stage.Name())
+	defer s.unmarkStaging(staged.abs)
 
 	committed := false
 	defer func() {
 		if !committed {
-			_ = os.Remove(stage.Name()) //nolint:errcheck // best effort on a failure path
+			_ = remove(staged) //nolint:errcheck // best effort on a failure path
 		}
 	}()
 
 	if err := s.copyBody(ctx, stage, body, declaredSize); err != nil {
 		_ = stage.Close() //nolint:errcheck // the copy error is the one worth reporting
-		return 0, err
+		return WriteResult{}, err
 	}
-	// A replacement keeps the target's mode exactly, which the umask must not
-	// reduce -- so it is set here, after the body and before the sync, rather than
-	// at creation.
+	// The target is checked here for two reasons, and the second is why this is not
+	// simply moved down to the rename. It is the metadata the replacement keeps,
+	// read *now* rather than when the write began -- an upload can take minutes, and
+	// a chmod or a chown during it touches the ctime and not the modification time,
+	// so nothing else here would notice, and applying what was captured at the
+	// start would restore permissions an administrator had just tightened. It is
+	// also an early refusal: what it finds is refused before the metadata is
+	// applied to a staging file that would then be thrown away.
+	current, err := confirmUnchanged(target, opts)
+	if err != nil {
+		_ = stage.Close() //nolint:errcheck // the refusal is the one worth reporting
+		return WriteResult{}, err
+	}
+
+	// The mode is set with chmod rather than at creation, because the umask must
+	// not reduce a value that is being kept; the owner is given back by takeOwner
+	// where the hub may, and not being allowed to is not an error there.
 	if opts.preserve {
-		if err := stage.Chmod(opts.mode); err != nil {
+		if err := stage.Chmod(current.Mode().Perm()); err != nil {
 			_ = stage.Close() //nolint:errcheck // the chmod error is the one worth reporting
-			return 0, fmt.Errorf("%w: chmod: %w", ErrWriteFailed, err)
+			return WriteResult{}, fmt.Errorf("%w: chmod: %w", ErrWriteFailed, err)
+		}
+		if err := takeOwner(stage, current); err != nil {
+			_ = stage.Close() //nolint:errcheck // the stat error is the one worth reporting
+			return WriteResult{}, fmt.Errorf("%w: owner: %w", ErrWriteFailed, err)
 		}
 	}
 	if err := stage.Sync(); err != nil {
 		_ = stage.Close() //nolint:errcheck // the sync error is the one worth reporting
-		return 0, fmt.Errorf("%w: sync: %w", ErrWriteFailed, err)
+		return WriteResult{}, fmt.Errorf("%w: sync: %w", ErrWriteFailed, err)
 	}
 	if err := stage.Close(); err != nil {
-		return 0, fmt.Errorf("%w: close: %w", ErrWriteFailed, err)
+		return WriteResult{}, fmt.Errorf("%w: close: %w", ErrWriteFailed, err)
 	}
 
-	// The caller's observed modification time is checked again here, and this is
-	// the check that makes the write optimistic. The first one happened before
-	// the body was transferred, which for a large file is as long as the request
-	// lasts: a second writer landing inside that window would be overwritten
-	// without either writer being told. What remains is the gap between this stat
-	// and the rename below, two adjacent syscalls rather than a whole upload.
-	if err := confirmUnchanged(target, opts.display, opts.expectedMtime); err != nil {
-		return 0, err
+	// And checked once more, immediately before the replacement, which is what
+	// makes the write optimistic: the first check happened before the body was
+	// transferred -- for a large file, as long as the request lasts -- and the one
+	// above is followed by a chmod, a chown, an fsync of the whole body and a
+	// close, which on a 256 MiB replacement measured tens of milliseconds. A second
+	// writer landing in any of that would be overwritten without either writer
+	// being told. What remains is the gap between this check and the rename below,
+	// two adjacent syscalls rather than a whole upload.
+	if _, err := confirmUnchanged(target, opts); err != nil {
+		return WriteResult{}, err
 	}
 
-	if err := os.Rename(stage.Name(), target); err != nil {
-		return 0, fmt.Errorf("%w: %w", ErrWriteFailed, err)
+	if err := renameAt(staged, target); err != nil {
+		return WriteResult{}, fmt.Errorf("%w: %w", ErrWriteFailed, err)
 	}
 	committed = true
 
-	return mtimeOf(target)
+	return stampOf(target)
 }
 
-// confirmUnchanged re-applies the observed-modification-time check. A nil
-// expected time is a forced overwrite and has nothing to confirm.
-func confirmUnchanged(target, display string, expectedMtime *int64) error {
-	if expectedMtime == nil {
+// confirmUnchanged re-applies, immediately before the target is replaced, every
+// check that makes a write safe to land.
+//
+// Four things can have gone wrong while the body was travelling, and each is
+// refused rather than resolved:
+//
+//   - the target is gone, or is no longer the file this write started against.
+//     A forced overwrite used to skip this, on the reasoning that the user had
+//     already agreed to replace whatever was there -- but agreeing to replace a
+//     file is not agreeing to recreate one that has since been moved or removed.
+//     A rename landing in this window is the case that matters: the entry comes
+//     back at its old name, holding the edit, while the tab that asked to save it
+//     has followed the file to the new name and is told the save succeeded.
+//   - the target changed, when the caller said what it last observed.
+//   - the name was free when the write began and no longer is, which is the same
+//     hazard from the other side: a create that lands on a file created in the
+//     meantime replaces something its author never agreed to lose.
+//   - the target has gained another name, which is a name the caller was never
+//     told about and would lose by the replacement. Asked last, after the
+//     observed time, so that a file which both changed and is linked is answered
+//     as a conflict first -- the browser asks about conflicts and about other
+//     names with two different questions, and asking them in the order the answers
+//     were captured in is what keeps one retry from dropping the other's.
+//
+// A nil expected modification time means the caller forced the overwrite, so it
+// is compared against nothing. The origin check is not optional in the same way:
+// it asks what the path is, not what the caller expected it to be.
+//
+// What it observed is returned, because it is also the metadata the replacement
+// keeps: read here rather than at the start of the write, so that a mode or an
+// owner changed during the upload is the one that survives. See writeAtomically.
+func confirmUnchanged(target Confined, opts writeOptions) (os.FileInfo, error) {
+	if opts.origin == nil {
+		// The name was free when the write began, so it is still free only if
+		// nothing has taken it.
+		//
+		// Lstat rather than Stat, because a name taken by a link whose target is
+		// gone is taken. Stat follows the link, finds nothing where it points,
+		// and reports the name as free -- so the write would replace the link,
+		// which is the shape the check at the start of Write exists to refuse.
+		if _, err := lstat(target); os.IsNotExist(err) {
+			return nil, nil
+		} else if err != nil {
+			return nil, classifyPathError(opts.display, err)
+		}
+		return nil, fmt.Errorf("%w: %s was created while it was being written", ErrConflict, opts.display)
+	}
+	current, err := stat(target)
+	if err != nil {
+		return nil, classifyPathError(opts.display, err)
+	}
+	if !os.SameFile(opts.origin, current) {
+		return nil, fmt.Errorf("%w: %s was replaced while it was being written", ErrConflict, opts.display)
+	}
+	if opts.expected != nil && !opts.expected.matches(current) {
+		return nil, fmt.Errorf("%w: %s changed while it was being written", ErrConflict, opts.display)
+	}
+	return current, linkedError(opts.display, current, opts.allowOtherNames)
+}
+
+// linkedError is the refusal for a target that is reachable under more than one
+// name, or nil when there is nothing to refuse.
+//
+// It is asked twice on the way to a replacement and both times in the same words:
+// once before the body is transferred, so that a linked target costs a round trip
+// rather than an upload, and once at commit, because a link made while the body
+// travelled is a name the caller was never told about.
+func linkedError(display string, info os.FileInfo, allowOtherNames bool) error {
+	if allowOtherNames {
 		return nil
 	}
-	info, err := os.Stat(target)
-	if err != nil {
-		return classifyPathError(display, err)
+	other := otherNames(info)
+	if other == 0 {
+		return nil
 	}
-	if info.ModTime().UnixMilli() != *expectedMtime {
-		return fmt.Errorf("%w: %s changed while it was being written", ErrConflict, display)
-	}
-	return nil
+	return fmt.Errorf("%w: %s is also reachable as %d other name(s)", ErrHasOtherNames, display, other)
 }
 
-// stageFailure reports why a staging file could not be created. A target whose
-// directory is missing, or is not writable, is the caller's situation rather
-// than a server fault, so it is reported the way the other operations report it
-// -- otherwise a write into a deleted directory answers 500 where a create into
-// the same directory answers 404.
+// stagingFailure says why a staging file could not be created.
 //
-// A name too long is the same: the caller chose a path near the limit, and the
-// staging prefix is what tipped it over, so it is their path to shorten.
-func stageFailure(display string, err error) error {
-	switch {
-	case os.IsNotExist(err):
-		return fmt.Errorf("%w: %s", ErrNotFound, display)
-	case os.IsPermission(err):
-		return fmt.Errorf("%w: %s", ErrPermissionDenied, display)
-	case errors.Is(err, syscall.ENAMETOOLONG):
+// The classification is the caller's -- every error leaving Write is classified
+// once, at its return -- and what is here is the one thing the classifier cannot
+// say: a name too long is a path the caller chose, and the staging prefix is what
+// tipped it over, so the message names the staging file rather than the path.
+func stagingFailure(display string, err error) error {
+	if errors.Is(err, syscall.ENAMETOOLONG) {
 		return fmt.Errorf("%w: %s leaves no room for a staging file", ErrInvalidPath, display)
-	default:
-		return fmt.Errorf("%w: %w", ErrWriteFailed, err)
 	}
+	return fmt.Errorf("%w: %w", ErrWriteFailed, err)
 }
 
 // copyBody checks the body against both the declared length and the configured
@@ -570,9 +967,9 @@ func (s *Service) Create(ctx context.Context, path string, isDir bool) error {
 	if err != nil {
 		return err
 	}
+	target := s.roots.Confine(resolved)
 
-	parent := filepath.Dir(resolved)
-	if info, statErr := os.Stat(parent); statErr != nil {
+	if info, statErr := stat(target.dir()); statErr != nil {
 		return classifyPathError(filepath.Dir(path), statErr)
 	} else if !info.IsDir() {
 		return fmt.Errorf("%w: %s is not a directory", ErrInvalidPath, filepath.Dir(path))
@@ -580,19 +977,19 @@ func (s *Service) Create(ctx context.Context, path string, isDir bool) error {
 
 	// Lstat, so that a dangling symlink counts as an existing entry rather than
 	// as a free name to create over.
-	if _, err := os.Lstat(resolved); err == nil {
+	if _, err := lstat(target); err == nil {
 		return fmt.Errorf("%w: %s already exists", ErrConflict, path)
 	} else if !os.IsNotExist(err) {
 		return classifyPathError(path, err)
 	}
 
 	if isDir {
-		if err := os.Mkdir(resolved, createDirMode); err != nil {
+		if err := mkdir(target, createDirMode); err != nil {
 			return classifyPathError(path, err)
 		}
 		return nil
 	}
-	file, err := os.OpenFile(resolved, os.O_CREATE|os.O_EXCL|os.O_WRONLY, createFileMode)
+	file, err := openFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, createFileMode)
 	if err != nil {
 		return classifyPathError(path, err)
 	}
@@ -615,13 +1012,13 @@ func (s *Service) Rename(ctx context.Context, path, newPath string) error {
 		return err
 	}
 
-	if _, err := os.Lstat(target); err == nil {
+	if _, err := lstat(target); err == nil {
 		return fmt.Errorf("%w: %s already exists", ErrConflict, newPath)
 	} else if !os.IsNotExist(err) {
 		return classifyPathError(newPath, err)
 	}
 
-	return classifyPathError(newPath, os.Rename(source, target))
+	return classifyPathError(newPath, renameAt(source, target))
 }
 
 // entryTarget resolves a path into the canonical directory that holds the entry
@@ -649,9 +1046,9 @@ func (s *Service) Rename(ctx context.Context, path, newPath string) error {
 // A trailing slash is stripped by that normalization, so `link/` names the link
 // rather than what it points at. That is a deliberate divergence from the shell,
 // which follows: following here is what would let a delete reach the target.
-func (s *Service) entryTarget(path string) (string, error) {
+func (s *Service) entryTarget(path string) (Confined, error) {
 	if err := validatePathShape(path); err != nil {
-		return "", err
+		return Confined{}, err
 	}
 	cleaned := filepath.Clean(path)
 	if cleaned == string(os.PathSeparator) {
@@ -659,20 +1056,21 @@ func (s *Service) entryTarget(path string) (string, error) {
 		// directory. No listing offers it, which leaves only a caller that named
 		// it by accident -- and handing it to RemoveAll would ask the kernel to
 		// delete the filesystem the hub is standing on.
-		return "", fmt.Errorf("%w: the filesystem root is not an entry", ErrInvalidPath)
+		return Confined{}, fmt.Errorf("%w: the filesystem root is not an entry", ErrInvalidPath)
 	}
 
 	parent := filepath.Dir(cleaned)
 	canonicalParent, err := s.roots.Resolve(parent, ModeRead)
 	if err != nil {
-		return "", err
+		return Confined{}, err
 	}
-	info, err := os.Stat(canonicalParent)
+	parentPath := s.roots.Confine(canonicalParent)
+	info, err := stat(parentPath)
 	if err != nil {
-		return "", classifyPathError(path, err)
+		return Confined{}, classifyPathError(path, err)
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("%w: %s is not a directory", ErrInvalidPath, parent)
+		return Confined{}, fmt.Errorf("%w: %s is not a directory", ErrInvalidPath, parent)
 	}
 
 	// The entry itself, not just its parent. Authorizing the parent covers every
@@ -680,39 +1078,51 @@ func (s *Service) entryTarget(path string) (string, error) {
 	// refused -- but the interface's own name has an ordinary parent, so /dev,
 	// /proc and /sys would otherwise be reachable as entries. They are refused
 	// before any root check, so no configuration can expose them.
-	target := filepath.Join(canonicalParent, filepath.Base(cleaned))
-	if isBlocked(target) {
-		return "", fmt.Errorf("%w: %s is not reachable through the file API", ErrPathNotAllowed, path)
+	target := parentPath.join(filepath.Base(cleaned))
+	if isBlocked(target.abs) {
+		return Confined{}, fmt.Errorf("%w: %s is not reachable through the file API", ErrPathNotAllowed, path)
 	}
 	return target, nil
 }
 
 // Delete removes an entry. A directory that still contains something is refused
 // unless the caller asked for it to go recursively.
-func (s *Service) Delete(ctx context.Context, path string, recursive bool) error {
+func (s *Service) Delete(ctx context.Context, path string, recursive bool) (err error) {
+	// Classified once, for the reason Write is: a handle closed by a shutdown can
+	// be met at any of the places this can fail -- including the window between
+	// the check that a directory is empty and the removal of it -- and a rule that
+	// has to be remembered at each of them is a rule that can be dropped at one.
+	defer func() {
+		if err != nil {
+			err = classifyPathError(path, err)
+		}
+	}()
+
 	target, err := s.entryTarget(path)
 	if err != nil {
 		return err
 	}
 
-	info, err := os.Lstat(target)
+	info, err := lstat(target)
 	if err != nil {
-		return classifyPathError(path, err)
+		return err
 	}
 	if !info.IsDir() {
-		return classifyPathError(path, os.Remove(target))
+		return remove(target)
 	}
 	if !recursive {
-		children, err := os.ReadDir(target)
+		// One entry is all it takes to know, and reading more would make the cost
+		// of refusing a directory the size of the directory. See dirHasEntries.
+		hasEntries, err := dirHasEntries(target)
 		if err != nil {
-			return classifyPathError(path, err)
+			return err
 		}
-		if len(children) > 0 {
+		if hasEntries {
 			return fmt.Errorf("%w: %s", ErrDirNotEmpty, path)
 		}
-		return classifyPathError(path, os.Remove(target))
+		return remove(target)
 	}
-	if err := os.RemoveAll(target); err != nil {
+	if err := removeAll(target); err != nil {
 		return fmt.Errorf("%w: %w", ErrWriteFailed, err)
 	}
 	return nil
@@ -732,13 +1142,17 @@ func (r cancelableReader) Read(p []byte) (int, error) {
 	return r.body.Read(p)
 }
 
-// mtimeOf reports a path's modification time in milliseconds since the epoch.
-// Nanoseconds would be finer but unusable: Go's UnixNano exceeds JavaScript's
-// Number.MAX_SAFE_INTEGER and would be silently corrupted by a JSON client.
-func mtimeOf(path string) (int64, error) {
-	info, err := os.Stat(path)
+// stampOf reports a path's modification time in each precision the service
+// speaks: milliseconds, which a JSON client can carry exactly, and nanoseconds,
+// which is what the filesystem records and what the next write is compared
+// against.
+func stampOf(target Confined) (WriteResult, error) {
+	info, err := stat(target)
 	if err != nil {
-		return 0, classifyPathError(path, err)
+		return WriteResult{}, classifyPathError(target.abs, err)
 	}
-	return info.ModTime().UnixMilli(), nil
+	return WriteResult{
+		Mtime:      info.ModTime().UnixMilli(),
+		MtimeNanos: info.ModTime().UnixNano(),
+	}, nil
 }

@@ -2,7 +2,7 @@
 // The file manager. It owns every piece of its own state -- the loaded tree, the
 // open tabs, the dirty set -- and discards all of it on close, so nothing here
 // outlives the panel and no store or route is needed.
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import {
   FileApiError,
@@ -10,16 +10,30 @@ import {
   deleteEntry,
   downloadFile,
   fetchWorkingDirectory,
+  probeFile,
   readFile,
   renameEntry,
+  stampFromList,
   type Entry,
   type StartDirectory,
 } from '../../files/api'
 import { basename, dirname, joinPath, quoteForShell } from '../../files/pathUtils'
-import { createRenames } from '../../files/renames'
+import { createPending } from '../../files/pending'
+import { reasonFor as reasonForCode } from '../../files/reasons'
+import { createPathChanges } from '../../files/pathChanges'
 import { getConfig } from '../../config'
-import { choosePreview } from '../../files/preview'
-import { applySaved, anyDirty, isDirty, saveOpenFile, type OpenFile } from '../../files/tabs'
+import type { Classification } from '../../files/classification'
+import { choosePreview, editable, namesAnImage, presentation, wantsText } from '../../files/preview'
+import {
+  anyDirty,
+  beginSave,
+  isDirty,
+  panelElementId,
+  saveOpenFile,
+  settleSave,
+  tabElementId,
+  type OpenFile,
+} from '../../files/tabs'
 import {
   createTreeState,
   forgetDirectory,
@@ -48,6 +62,18 @@ const emit = defineEmits<{
 }>()
 
 const tree = reactive(createTreeState())
+// treeRef is the rendered tree, asked to put the keyboard back after an action
+// removes or renames the row it was on.
+const treeRef = ref<InstanceType<typeof FileTree> | null>(null)
+// tabsRef is where the keyboard goes back after a tab is closed: its strip, and
+// the tree when the strip has nothing left -- the panel is not rendered at all
+// once no file is open, and the listing is what the user would act on next.
+//
+// listingRef is that column itself, which is what is left when there is no row to
+// put the focus on: a directory still loading (the tree is not rendered while one
+// is) or one with nothing in it.
+const tabsRef = ref<InstanceType<typeof EditorTabs> | null>(null)
+const listingRef = ref<HTMLElement | null>(null)
 const current = ref('')
 const loading = ref(true)
 // failure takes over the panel, so it is only ever set when there is nothing
@@ -57,7 +83,15 @@ const navError = ref('')
 const tabs = ref<OpenFile[]>([])
 const activePath = ref<string | null>(null)
 const markdownView = reactive(new Map<string, 'source' | 'preview'>())
-const menu = ref<{ x: number; y: number; entry: Entry; path: string } | null>(null)
+const menu = ref<{
+  x: number
+  y: number
+  entry: Entry
+  path: string
+  /** opener is the row the menu was opened from, and where the focus goes back
+   * to when it closes. Null when the event carried no element to return to. */
+  opener: HTMLElement | null
+} | null>(null)
 
 // navigationAt is the ticket of the most recent goTo; an earlier one that
 // finishes later must not write. opening holds the paths being read right now.
@@ -66,42 +100,72 @@ const opening = new Set<string>()
 // saveTickets is the newest save attempted per tab session, so an out-of-order
 // answer from an older one cannot be folded back in.
 const saveTickets = new Map<number, number>()
+// saving, renaming and deleting are the requests this manager has sent and not
+// yet been answered about, by the path each one named. What each one is asked is
+// different, which is why there are three: a rename outstanding when a save is
+// answered means that answer describes a path the rename may have vacated, so it
+// is not recorded (see settleSave), and a delete outstanding when a save is sent
+// means the file is on its way out, so the save is not sent at all (see save).
+//
+// A count per path rather than a flag, because two of a kind can be in flight on
+// one path at once. The two questions also look in *opposite* directions, which
+// is what makes each of them the right one for its caller: isPending asks
+// whether anything is outstanding for this path or for a directory above it, and
+// idle waits for the writes naming this path or anything inside it. Both rules,
+// with what they are for, are in files/pending.ts.
+const saving = createPending()
+const renaming = createPending()
+const deleting = createPending()
 // nextTabId numbers the editing sessions. See OpenFile.id for why an answer is
 // matched to a session rather than to a path.
 let nextTabId = 1
 
 const active = computed(() => tabs.value.find((tab) => tab.path === activePath.value) ?? null)
 const dirty = computed(() => anyDirty(tabs.value))
-const preview = computed(() => {
-  const tab = active.value
-  if (!tab) return null
-  // The hub's classification outranks the file's name: something it reports as
-  // binary is presented as information whatever the name suggests, and decoding
-  // its bytes as text is what would corrupt them on the next save.
-  if (tab.binary) return 'info'
-  return choosePreview(tab.name, tab.size)
-})
+const preview = computed(() =>
+  active.value === null ? null : presentation(active.value.name, active.value.size, active.value.binary),
+)
 const activeIsMarkdownSource = computed(
   () => active.value !== null && (markdownView.get(active.value.path) ?? 'source') === 'source',
 )
+// editorTabs is every open file whose contents the editor is holding -- which is
+// every open file that is editable at all, not only the one on screen. All of
+// them stay mounted: unmounting the editor for a file the user switched away
+// from would take that file's undo history with it, and history is the thing a
+// user reaches for precisely after switching away and back.
+const editorTabs = computed(() =>
+  tabs.value.filter((tab) => editable(tab.name, tab.size, tab.binary)),
+)
+// editorVisible says whether the active file is shown in the editor right now,
+// as opposed to rendered Markdown or a preview of some other kind.
+const editorVisible = computed(
+  () =>
+    preview.value === 'editor' || (preview.value === 'markdown' && activeIsMarkdownSource.value),
+)
+// notShown is why a file presented as information is not shown. The reasons are
+// different facts and the panel says which one holds. A file whose bytes the hub
+// read as binary, or an image too large to render, has a reason of its own that
+// has nothing to do with reading. A tab that holds nothing *because* nobody read
+// the file is the one a rename leaves behind: the name no longer says image, so
+// there is no preview to fetch and no contents to edit, and the panel says that
+// rather than describing the file as something nobody has looked at. An image
+// name is the one case left out of it -- the size may be the reason, and the
+// image preview is what knows it.
+const notShown = computed(() => {
+  const file = active.value
+  if (file === null) return ''
+  if (file.binary === null && !namesAnImage(file.name)) return 'its contents have not been read'
+  return 'it is binary or too large to preview'
+})
 
 watch(dirty, (value) => emit('dirty-change', value), { immediate: true })
 
-/** REASONS turn the hub's wire codes into something a person can act on. The
- * code is what the client matches on, not what the user should have to read. A
- * code with no entry falls through to the code itself, so a hub that adds one
- * still says something rather than nothing. */
-const REASONS: Record<string, string> = {
-  path_not_allowed: 'that path is outside the directories this hub may open',
-  not_found: 'it is no longer there',
-  permission_denied: 'the hub is not allowed to read or write it',
-  file_too_large: 'it is larger than the size limit for one file',
-  conflict: 'it changed on disk since it was read',
-  invalid_path: 'the hub cannot use that as a path',
-  invalid_body: 'the request did not match the file it described',
-  dir_not_empty: 'the directory still contains something',
-  write_failed: 'the hub could not complete the write',
-  mtime_unavailable: 'the hub did not say when the file last changed',
+/** REASONS and reasonFor live in files/reasons.ts, where a test can hold them
+ * against the codes the hub's file routes actually answer with. A code with no
+ * entry does not fail anything -- it shows the user the identifier itself -- so
+ * the two sides have to be checked against each other somewhere. */
+function reasonFor(code: string): string {
+  return reasonForCode(code, fileSizeLimit(), formatSize)
 }
 
 /** fileSizeLimit reads the hub's per-file limit, or zero when it did not say. */
@@ -114,16 +178,6 @@ function fileSizeLimit(): number {
   }
 }
 
-/** reasonFor explains a refusal. A file over the limit names the limit, which is
- * what the specification asks the browser to report rather than the refusal. */
-function reasonFor(code: string): string {
-  if (code === 'file_too_large') {
-    const limit = fileSizeLimit()
-    if (limit > 0) return `it is larger than this hub's ${formatSize(limit)} limit for one file`
-  }
-  return REASONS[code] ?? code
-}
-
 function report(err: unknown, action: string) {
   const code = err instanceof FileApiError ? err.code : String(err)
   emit('notice', `${action}: ${reasonFor(code)}`, 'error')
@@ -133,6 +187,79 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
+}
+
+/** reportRemoved says that a file the hub had already been asked for was deleted
+ * before the answer landed.
+ *
+ * A read this manager has sent is granted before the answer arrives, so a delete
+ * answered in between does not stop it: the contents come back for a path that
+ * is gone. The delete sweeps the tabs it finds afterwards, and this is the other
+ * half of that sweep -- the answer that lands after it would install a tab
+ * naming nothing, whose save is answered not_found with no way out through the
+ * interface. What records that is the delete itself, for the reads that were
+ * travelling when it was answered; see files/pathChanges.ts.
+ *
+ * A directory being deleted takes its open files with it, which resolves the
+ * same way, so there is one thing to say about both. Naming the file rather than
+ * the path because the name is what the user clicked. */
+function reportRemoved(name: string) {
+  emit('notice', `${name} was deleted before it could be opened.`, 'warning')
+}
+
+/** openWithoutReading opens a tab for a file whose contents are not read: an
+ * image, which the preview fetches for itself, or something the hub read as
+ * binary. The size is whichever of the two observations is truthful.
+ *
+ * The path is corrected for a rename that landed while this was travelling, the
+ * same way the read path corrects its own. Asking the hub is an await, and a
+ * rename completing inside it moves the file exactly as a read's await allows --
+ * so a tab built at the old name would name a file that is gone, and a click on
+ * the new name would open a second tab for the one file. */
+function openWithoutReading(
+  path: string,
+  startedAt: number,
+  entry: Entry,
+  size: number,
+  binary: Classification,
+) {
+  const at = changes.resolve(path, startedAt)
+  if (at === null) {
+    reportRemoved(entry.name)
+    return
+  }
+  if (tabs.value.some((tab) => tab.path === at)) {
+    activePath.value = at
+    return
+  }
+  tabs.value = [
+    ...tabs.value,
+    {
+      id: nextTabId++,
+      path: at,
+      name: basename(at),
+      text: '',
+      saved: '',
+      // From the listing, which reports milliseconds only. These files are
+      // never saved, so the weaker precision costs nothing.
+      stamp: stampFromList(entry.mtime),
+      size,
+      binary,
+    },
+  ]
+  activePath.value = at
+}
+
+/** onImageTooLarge records the size an image preview refused to render.
+ *
+ * The tab's size came from a directory listing, and that is the only thing that
+ * ever said this file was small enough to render. Correcting it is the whole
+ * fix: how a file is presented is decided from its name and its size, so once
+ * the size is true the file presents as information with a download action --
+ * which is what the specification asks for above the bound. */
+function onImageTooLarge(path: string, size: number) {
+  tabs.value = tabs.value.map((tab) => (tab.path === path ? { ...tab, size } : tab))
+  emit('notice', `${basename(path)} is ${formatSize(size)}, larger than this view renders.`, 'warning')
 }
 
 /** goTo loads a directory and makes it the current one.
@@ -253,26 +380,33 @@ async function openFile(entry: Entry, path: string) {
   // disagree about what they are showing.
   if (opening.has(path)) return
   opening.add(path)
-  const startedAt = renames.generation()
+  const startedAt = changes.generation()
 
   try {
     const kind = choosePreview(entry.name, entry.size)
-    if (kind === 'info' || kind === 'image') {
-      tabs.value = [
-        ...tabs.value,
-        {
-          id: nextTabId++,
-          path,
-          name: entry.name,
-          text: '',
-          saved: '',
-          mtime: entry.mtime,
-          size: entry.size,
-          binary: false,
-        },
-      ]
-      activePath.value = path
+    if (kind === 'image') {
+      // Never read and never asked about: how it is shown is decided from its
+      // name, which is all anyone knows.
+      openWithoutReading(path, startedAt, entry, entry.size, null)
       return
+    }
+
+    // A name that calls a file binary, or an image too large to render, is a
+    // guess about contents the hub is the one that can read. One bodyless
+    // request gets its answer, and that answer decides: text the name called
+    // binary opens in the editor rather than being refused a look. The size is
+    // corrected at the same time, since a listing read earlier is the only thing
+    // that ever said how big this file is.
+    let size = entry.size
+    if (kind === 'info') {
+      const probed = await probeFile(path)
+      // The listing's size stands in when the hub did not report one: it is only
+      // ever displayed for a file that is not read as text.
+      size = probed.size ?? entry.size
+      if (probed.binary) {
+        openWithoutReading(path, startedAt, entry, size, true)
+        return
+      }
     }
 
     const contents = await readFile(path)
@@ -285,7 +419,14 @@ async function openFile(entry: Entry, path: string) {
     // whatever is at that name now -- possibly a file the user has just created
     // there -- and following an older record would open a different file under
     // the wrong name and then save over it.
-    const at = renames.resolve(path, startedAt)
+    const at = changes.resolve(path, startedAt)
+    // A delete of this path, or of a directory holding it, was answered while
+    // this read was travelling: the answer describes a file that is gone, and
+    // installing it would leave a tab naming nothing.
+    if (at === null) {
+      reportRemoved(entry.name)
+      return
+    }
     // Two paths can resolve to one name after a rename, and a click on the new
     // name during the flight arrives with a different one -- so the check at the
     // top has to happen again here, or two tabs end up sharing a path.
@@ -302,8 +443,8 @@ async function openFile(entry: Entry, path: string) {
         name: basename(at),
         text: contents.text,
         saved: contents.text,
-        mtime: contents.mtime,
-        size: entry.size,
+        stamp: contents.stamp,
+        size,
         binary: contents.binary,
       },
     ]
@@ -314,7 +455,7 @@ async function openFile(entry: Entry, path: string) {
     opening.delete(path)
     // The record only exists for reads that are travelling; with none left it
     // would start redirecting files created at those names later on.
-    if (opening.size === 0) renames.clear()
+    if (opening.size === 0) changes.clear()
   }
 }
 
@@ -333,19 +474,42 @@ async function toggleDirectory(path: string) {
 
 /** save writes one tab, named by its session rather than by its path.
  *
- * The tab is identified rather than looked up by path because everything here
- * happens around an await: the user can rename the file, or switch to another
- * tab, while the write travels. Naming the session is what makes the conflict
- * prompt re-save the file the question was about even then, and what keeps a
- * rename from stranding the answer on a path nothing holds any more.
- *
- * `sent` is the exact text this call sends. applySaved has to compare against it
- * rather than against whatever the tab holds when the response lands, or
- * keystrokes typed during the round trip are recorded as saved without being
- * written. */
-async function save(force = false, tabId: number | null = active.value?.id ?? null) {
+ * The session, the path, and the text are captured together as one SaveRequest
+ * before the write travels, and the answer is matched against that same object.
+ * Everything here happens around an await: the user can rename the file or
+ * switch tabs while the write is in flight, and a rename is the one that bites.
+ * It moves the tab to a new path and replaces the tab object, so anything read
+ * again at answer time would describe the tab as it now is -- and agreeing with
+ * itself is what would mark the file at the new path saved by a write that named
+ * the old one. See settleSave. */
+async function save(
+  force = false,
+  tabId: number | null = active.value?.id ?? null,
+  allowOtherNames = false,
+) {
   const tab = tabs.value.find((candidate) => candidate.id === tabId)
   if (!tab) return
+
+  // A file on its way out is not one to write to. The delete below waits for the
+  // saves it found travelling, and this is the other direction: a save started
+  // while a delete is in flight would reach the hub in an order neither request
+  // can see, and could put the file back after the user was told it was gone.
+  //
+  // The query runs *upwards* -- it is true when this path, or a directory above
+  // it, has a delete in flight -- so a file inside a directory being deleted is
+  // refused as well as the entry itself.
+  if (deleting.isPending(tab.path)) {
+    // What is known, and no more: a delete of this file, or of a directory above
+    // it, has been sent. Whether it will succeed is not known here, and saying
+    // the file "is being deleted" and then failing to delete it would be the
+    // refusal explaining itself with something that did not happen.
+    emit(
+      'notice',
+      `A delete of ${tab.name} or of a directory above it is in flight, so it was not saved.`,
+      'warning',
+    )
+    return
+  }
 
   // Only the newest save for a session may fold its result back in. Two saves in
   // flight (edit again while the first is travelling) can resolve out of order,
@@ -354,32 +518,98 @@ async function save(force = false, tabId: number | null = active.value?.id ?? nu
   const ticket = (saveTickets.get(tab.id) ?? 0) + 1
   saveTickets.set(tab.id, ticket)
 
-  const sent = tab.text
+  const request = beginSave(tab, force, allowOtherNames)
+  saving.begin(request.path)
   try {
-    const mtime = await saveOpenFile(tab, force)
+    const stamp = await saveOpenFile(request)
     if (!isSameTab(tab.id)) return
     if (saveTickets.get(tab.id) !== ticket) return
-    tabs.value = tabs.value.map((candidate) =>
-      candidate.id === tab.id ? applySaved(candidate, mtime, sent) : candidate,
-    )
+    const settled = settleSave(tabs.value, request, stamp, renaming.isPending(request.path))
+    tabs.value = settled.files
+    if (settled.outcome === 'raced') {
+      emit(
+        'notice',
+        // Naming the directory as well as the file, because a rename of either is
+        // what this branch covers: the check is by path and a path has ancestors.
+        `A rename of ${tab.name} or of a directory above it was in flight while it was saved, ` +
+          `so the answer was not recorded. Save again once the rename finishes.`,
+        'warning',
+      )
+    }
+    if (settled.outcome === 'moved') {
+      const moved = liveTab(tab.id)
+      emit(
+        'notice',
+        `${tab.name} moved to ${moved?.path ?? 'another path'} while it was being saved, so the ` +
+          `answer was not recorded against it. Save again to write the edit to the new name.`,
+        'warning',
+      )
+    }
   } catch (err) {
     if (!isSameTab(tab.id)) return
     if (saveTickets.get(tab.id) !== ticket) return
+    const moved = liveTab(tab.id)
+    if (moved && moved.path !== request.path) {
+      // The path moved, so the question a conflict prompt would ask -- overwrite
+      // the file that changed? -- would be about a file this tab no longer
+      // holds. Answering it would write to whatever is at the new name instead,
+      // which the user was never asked about.
+      report(err, `Could not save ${tab.name}, which moved to ${moved.path} while the save travelled`)
+      return
+    }
     if (err instanceof FileApiError && err.code === 'conflict') {
       const overwrite = window.confirm(
         `${tab.name} changed on disk since it was opened. Overwrite it with your version?`,
       )
-      if (overwrite) await save(true, tab.id)
+      // The agreement about other names travels with the retry: the user gave it
+      // for this write, and asking for it again on the way to the same write
+      // would be the manager forgetting an answer it already has.
+      if (overwrite) await save(true, tab.id, allowOtherNames)
+      return
+    }
+    if (err instanceof FileApiError && err.code === 'other_names') {
+      // The hub will not replace a file that is reachable under other names
+      // without being told that the user knows what that means: the replacement
+      // is a new file, so every other name keeps the contents it had, and the
+      // user is the only one who can decide to have it that way.
+      //
+      // The retry saves the tab as it stands when the answer arrives, with the
+      // agreement added -- not a replay of the request that was refused. That is
+      // deliberate: the first click meant "save this", and anything typed while
+      // the refused write travelled is part of what the user meant. The
+      // observation travels with it because the tab has not changed it, and it is
+      // the tab's own, so a save of the newest text is still checked against what
+      // the hub last reported.
+      const replace = window.confirm(
+        `${tab.name} is reachable under other names as well. Saving replaces this file, and ` +
+          `the other names keep the contents they have now. Save anyway?`,
+      )
+      if (replace) await save(force, tab.id, true)
       return
     }
     report(err, `Could not save ${tab.name}`)
+  } finally {
+    // The path the write named, not the tab's: a rename during the flight moved
+    // the tab, and it is the write that was outstanding.
+    saving.end(request.path)
   }
 }
 
-// renames records where a rename moved a path, for the reads that were travelling
-// when it happened. See files/renames.ts for why the record is scoped to the read
-// rather than consulted wholesale.
-const renames = createRenames()
+// changes records what happened to a path -- a rename that moved it, a delete
+// that removed it -- for the reads that were travelling when it happened. See
+// files/pathChanges.ts for why each record is scoped to the read rather than
+// consulted wholesale.
+const changes = createPathChanges()
+
+/** liveTab is the tab as it is now, by session.
+ *
+ * Everything that happens during a round trip replaces the tab object -- a
+ * rename retargets it, a save rewrites it -- so a reference captured before an
+ * await is a snapshot, and anything that has to be current must be looked up
+ * again rather than held. */
+function liveTab(id: number): OpenFile | undefined {
+  return tabs.value.find((candidate) => candidate.id === id)
+}
 
 /** isSameTab reports whether the editing session a save started from is still
  * open.
@@ -388,9 +618,9 @@ const renames = createRenames()
  * the second time; an answer meant for the first would be folded into the second,
  * marking it saved at a text and a time that describe a write it never made. A
  * rename keeps the session, because the tab that is now at the new path is the
- * one that asked. */
+ * one that asked -- which is why the path is checked separately, in settleSave. */
 function isSameTab(id: number): boolean {
-  return tabs.value.some((candidate) => candidate.id === id)
+  return liveTab(id) !== undefined
 }
 
 function closeTab(path: string) {
@@ -402,6 +632,29 @@ function closeTab(path: string) {
   if (activePath.value === path) {
     activePath.value = tabs.value.length > 0 ? tabs.value[tabs.value.length - 1].path : null
   }
+  void replaceTabFocus()
+}
+
+/** replaceTabFocus puts the keyboard back after a tab closes.
+ *
+ * The element that had the focus -- the tab itself, or the close button beside it
+ * -- is removed with the tab, and the browser leaves the focus on the document
+ * body: the next Tab then starts from the top of the page, and the file the user
+ * was working on is no longer reachable from where they are. The strip takes it
+ * back on whichever tab is active now, or on the listing when the last tab has
+ * gone and there is nothing left in the strip.
+ *
+ * Left alone when the focus is somewhere else, which is the user having moved it
+ * -- the same rule the tree's restore follows. */
+async function replaceTabFocus() {
+  await nextTick()
+  if (!focusIsNowhere()) return
+  // The listing column rather than a row of it when there is no row: a directory
+  // being loaded renders no tree at all, and an empty one renders no row, so
+  // there would otherwise be nowhere to put the keyboard and it would stay on the
+  // body.
+  if (tabsRef.value?.focusActiveTab()) return
+  if (!treeRef.value?.focusFirstRow()) listingRef.value?.focus()
 }
 
 /** requestClose warns before discarding unsaved edits, which are not recoverable
@@ -495,6 +748,12 @@ async function createHere(isDir: boolean) {
   // buttons are disabled in that state; this is the same rule at the point that
   // matters, because joinPath('', name) would name a path at the filesystem root.
   if (current.value === '') return
+  // A create is deliberately not ordered against an outstanding delete, unlike a
+  // save: one that lands before the unlink has its empty file removed, and one
+  // that lands after leaves exactly what the user asked for. Nothing of theirs is
+  // lost either way -- though which of the two the screen is left showing is not
+  // guaranteed, since the two listings race -- so there is nothing here for the
+  // ordering to protect.
   const name = window.prompt(isDir ? 'New directory name' : 'New file name')
   if (!name) return
   const path = joinPath(current.value, name)
@@ -515,7 +774,7 @@ async function createHere(isDir: boolean) {
  * the UI. Renaming a directory carries its open files with it. */
 function retargetTabs(path: string, target: string, name: string) {
   const prefix = `${path}/`
-  renames.record(path, target)
+  changes.record(path, target)
 
   // Where each tab that followed the rename ends up. A name freed outside the
   // manager -- a file removed from the terminal -- can already have a tab on it,
@@ -534,6 +793,25 @@ function retargetTabs(path: string, target: string, name: string) {
     const names = lost.map((tab) => tab.name).join(', ')
     emit('notice', `Unsaved changes in ${names} were dropped: ${target} replaced that name.`, 'warning')
   }
+  // A tab nobody has read was opened without reading, and its *name* is the
+  // reason: an image goes to the preview, which fetches what it needs, and its
+  // bytes are never decoded as text. A rename replaces the name and with it the
+  // reason -- the file is the same file, and what it now claims to be is a guess
+  // nothing has checked. So a tab that follows a rename to a name the editor
+  // would hold is read at that name, and becomes whatever the hub says it is:
+  // text to edit, or a file to download. Until the answer lands, `presentation`
+  // keeps the unread tab out of the editor, which is what stops an empty
+  // document from standing in front of bytes nobody read.
+  //
+  // Collected before the tabs are moved, because the first party that changes
+  // the tab's name is the assignment below.
+  const unread = tabs.value.flatMap((tab) => {
+    const destination = moving.get(tab.id)
+    if (destination === undefined) return []
+    const renamed = tab.path === path ? name : tab.name
+    if (tab.binary !== null || !wantsText(renamed, tab.size)) return []
+    return [{ id: tab.id, path: destination }]
+  })
   tabs.value = tabs.value
     .filter((tab) => moving.has(tab.id) || !taken.has(tab.path))
     .map((tab) => {
@@ -541,6 +819,7 @@ function retargetTabs(path: string, target: string, name: string) {
       if (destination === undefined) return tab
       return { ...tab, path: destination, name: tab.path === path ? name : tab.name }
     })
+  for (const tab of unread) void readRenamedTab(tab.id, tab.path)
 
   if (activePath.value === path) activePath.value = target
   else if (activePath.value?.startsWith(prefix)) {
@@ -560,19 +839,67 @@ function retargetTabs(path: string, target: string, name: string) {
   }
 }
 
+/** readRenamedTab reads the file a tab was opened on without reading, after a
+ * rename gave it a name that asks to be decoded as text.
+ *
+ * The tab's session rather than its path identifies it, because what is being
+ * filled in is the state of an editing session that followed the file. That
+ * state is also what decides whether the answer is still wanted, and it is
+ * checked before anything is written: only a tab that is still *unread* is
+ * filled in. Two reads of one path can be in flight -- renamed to a text name,
+ * renamed back to an image name, renamed to the text name again -- and the first
+ * of them to land is what makes the tab editable. Letting a later answer replace
+ * that would take the user's keystrokes with it and leave the tab reporting
+ * itself saved against contents they never saw. The path is checked as well,
+ * since a tab that has moved on names another file.
+ *
+ * What comes back replaces the contents, the observation, and the hub's
+ * classification together, so the tab describes the file the hub read rather
+ * than the name it was given. A hub that answers not_found leaves the tab as it
+ * is: it says the file is not there, which the tab now shows as information,
+ * and reopening it reports the same thing in the same words. */
+async function readRenamedTab(id: number, path: string) {
+  try {
+    const contents = await readFile(path)
+    const live = liveTab(id)
+    if (!live || live.path !== path || live.binary !== null) return
+    tabs.value = tabs.value.map((tab) =>
+      tab.id === id
+        ? {
+            ...tab,
+            text: contents.text,
+            saved: contents.text,
+            stamp: contents.stamp,
+            binary: contents.binary,
+          }
+        : tab,
+    )
+  } catch (err) {
+    report(err, `Could not open ${basename(path)}`)
+  }
+}
+
 function renameTarget(entry: Entry, path: string) {
   const name = window.prompt('Rename to', entry.name)
   if (!name || name === entry.name) return
   const target = joinPath(dirname(path), name)
+  renaming.begin(path)
   void renameEntry(path, target)
     .then(() => {
       retargetTabs(path, target, name)
       return settleMutation(path, target)
     })
+    .then(() => {
+      // The row the menu gave the keyboard back to is the one that just changed
+      // its name, so the focus follows the entry it belongs to. Asked for by
+      // path, because the row that now carries it is a different element.
+      if (focusIsNowhere()) treeRef.value?.focusPath(target)
+    })
     .catch((err: unknown) => report(err, `Could not rename ${entry.name}`))
+    .finally(() => renaming.end(path))
 }
 
-function deleteTarget(entry: Entry, path: string) {
+async function deleteTarget(entry: Entry, path: string) {
   const kind = entry.is_dir ? 'directory' : 'file'
   // Tabs for the entry and for anything it contains: a deleted directory takes
   // its open files with it, and unsaved edits among them are not recoverable.
@@ -589,34 +916,95 @@ function deleteTarget(entry: Entry, path: string) {
     return
   }
 
-  void deleteEntry(path, entry.is_dir)
-    .then(() => {
-      // Filtered by path where the answer lands, not by the set captured before
-      // the request: a tab opened while the delete travelled names a file that is
-      // now gone, and would otherwise survive pointing at nothing. A tab renamed
-      // out of the way during the flight no longer matches, and should survive.
-      const removed = tabs.value.filter(
-        (tab) => tab.path === path || tab.path.startsWith(prefix),
-      )
-      // The warning named what was dirty when the user answered. A tab that
-      // appeared or was edited while the delete travelled was not in it -- and
-      // the file is gone by now, so it is said rather than asked.
-      const warned = new Set(unsaved.map((tab) => tab.id))
-      const unwarned = removed.filter((tab) => isDirty(tab) && !warned.has(tab.id))
-      if (unwarned.length > 0) {
-        const names = unwarned.map((tab) => tab.name).join(', ')
-        emit('notice', `Unsaved changes in ${names} went with ${entry.name}.`, 'warning')
-      }
+  // The manager does not let the deletes it sends race the saves it sends, and
+  // this is where that is decided. The hub's last check and the rename that
+  // installs a write are two adjacent system calls -- no filesystem primitive
+  // replaces a name only if it still holds what was there -- so a write landing
+  // between them puts the file back, while the delete's own answer says the file
+  // is gone. Nothing can order another process's write against this delete; the
+  // manager can at least refuse to order its own that way.
+  //
+  // Waiting by *path* rather than by the tabs this is about to close is the
+  // whole of it. The writes that can cross this delete are the ones naming the
+  // entry or anything under it, and a tab is not a reliable way to find them: a
+  // write outlives the tab it came from, so a file saved and then closed before
+  // the delete was confirmed has no tab left to be found by, and the write is
+  // still travelling. The record is keyed by the path the write named, so the
+  // path is what asks.
+  //
+  // The marker goes up before the wait rather than after it, so a save started
+  // while the wait is on is refused by save() instead of joining the queue: the
+  // wait is for what was already travelling, and a later write is a separate
+  // question the marker answers directly.
+  //
+  // The wait is bounded by the writes it is waiting for and by nothing else --
+  // there is no timeout on these requests anywhere in this client. A write that
+  // never answers therefore leaves the delete unsent, with the entry still
+  // listed, which is the truth; the alternative is a delete sent into a race it
+  // cannot see. It is worth being plain about the cost rather than calling that
+  // transient: while the wait is outstanding the marker stays up, so saves of
+  // that path are refused from then on and each retry of the delete adds another
+  // waiter. A client where a write never answers is one where that write's tab
+  // never stops being unsaved either; the way out of both is a reload.
+  // Where the keyboard should go when the row is gone: the entry that follows it
+  // in the listing, or the one before it when it is last. Taken now, because the
+  // row cannot say afterwards what stood beside it -- and taken with the
+  // directory it was measured in, because the wait below is unbounded and the
+  // user may have navigated somewhere else in the meantime. A row number in a
+  // listing the user has since opened is not a place they have ever been.
+  const neighbour = treeRef.value?.neighbourOf(path) ?? null
+  const listing = current.value
 
-      tabs.value = tabs.value.filter(
-        (tab) => tab.path !== path && !tab.path.startsWith(prefix),
-      )
-      if (!tabs.value.some((tab) => tab.path === activePath.value)) {
-        activePath.value = tabs.value.length > 0 ? tabs.value[tabs.value.length - 1].path : null
+  deleting.begin(path)
+  try {
+    await saving.idle(path)
+
+    await deleteEntry(path, entry.is_dir)
+
+    // The hub has answered that the entry is gone, and that is what the reads
+    // still travelling need to know: one of them was granted before this delete
+    // was sent, so it comes back with contents for a path that has been removed,
+    // and it can land after the sweep below. The record is what makes that sweep
+    // a rule rather than a moment. It is kept before the sweep rather than after,
+    // because there is no await between the answer and this line: an answer that
+    // arrives from here on finds it.
+    changes.recordRemoval(path)
+
+    // Filtered by path where the answer lands, not by the set captured before
+    // the request: a tab opened while the delete travelled names a file that is
+    // now gone, and would otherwise survive pointing at nothing. A tab renamed
+    // out of the way during the flight no longer matches, and should survive.
+    const removed = tabs.value.filter((tab) => tab.path === path || tab.path.startsWith(prefix))
+    // The warning named what was dirty when the user answered. A tab that
+    // appeared or was edited while the delete travelled was not in it -- and
+    // the file is gone by now, so it is said rather than asked.
+    const warned = new Set(unsaved.map((tab) => tab.id))
+    const unwarned = removed.filter((tab) => isDirty(tab) && !warned.has(tab.id))
+    if (unwarned.length > 0) {
+      const names = unwarned.map((tab) => tab.name).join(', ')
+      emit('notice', `Unsaved changes in ${names} went with ${entry.name}.`, 'warning')
+    }
+
+    tabs.value = tabs.value.filter((tab) => tab.path !== path && !tab.path.startsWith(prefix))
+    if (!tabs.value.some((tab) => tab.path === activePath.value)) {
+      activePath.value = tabs.value.length > 0 ? tabs.value[tabs.value.length - 1].path : null
+    }
+    await settleMutation(path)
+  } catch (err) {
+    report(err, `Could not delete ${entry.name}`)
+  } finally {
+    deleting.end(path)
+    // The confirmation took the focus and the entry is gone, so the row that
+    // stands where it did is what gets it. Left alone when the focus is somewhere
+    // else -- that is the user having moved it on purpose -- and when the tree is
+    // showing a different directory than the one this was measured in, which is
+    // the same thing: a listing they opened while the delete waited for a write.
+    if (current.value === listing && focusIsNowhere()) {
+      if (neighbour === null || !treeRef.value?.focusPath(neighbour)) {
+        treeRef.value?.focusFirstRow()
       }
-      return settleMutation(path)
-    })
-    .catch((err: unknown) => report(err, `Could not delete ${entry.name}`))
+    }
+  }
 }
 
 async function download(path: string, name: string) {
@@ -636,7 +1024,11 @@ async function download(path: string, name: string) {
 async function copyPathToClipboard(path: string) {
   const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
   if (!clipboard) {
-    emit('notice', 'Copy failed: the browser exposes no clipboard outside a secure context.', 'warning')
+    emit(
+      'notice',
+      'Copy failed: this browser exposes no clipboard here. It needs a secure context, and not every browser provides one.',
+      'warning',
+    )
     return
   }
   try {
@@ -658,7 +1050,7 @@ function insertPath(path: string) {
 
 function onMenuAction(action: string) {
   const target = menu.value
-  menu.value = null
+  closeMenu()
   if (!target) return
   switch (action) {
     case 'new-file':
@@ -671,7 +1063,7 @@ function onMenuAction(action: string) {
       renameTarget(target.entry, target.path)
       break
     case 'delete':
-      deleteTarget(target.entry, target.path)
+      void deleteTarget(target.entry, target.path)
       break
     case 'download':
       void download(target.path, target.entry.name)
@@ -685,8 +1077,61 @@ function onMenuAction(action: string) {
   }
 }
 
-function openMenu(event: MouseEvent, entry: Entry, path: string) {
-  menu.value = { x: event.clientX, y: event.clientY, entry, path }
+function openMenu(event: MouseEvent, entry: Entry, path: string, opener: HTMLElement | null) {
+  menu.value = { ...anchorFor(event, opener), entry, path, opener }
+}
+
+/** anchorFor is where a menu for this event should open.
+ *
+ * A press carries the pointer's own position, and the menu belongs there. A
+ * contextmenu the browser raised for the keyboard -- Shift+F10, or the menu key
+ * on a focused row -- carries no pointer at all: what it reports is the origin,
+ * or wherever the mouse was last left, and a menu opened at either is a menu the
+ * user has to go looking for. The row that raised it is the anchor in that case,
+ * and the test is whether the event's position is inside the row: a press on the
+ * row is inside by construction, so anything else is a position that does not
+ * describe this press. */
+function anchorFor(event: MouseEvent, opener: HTMLElement | null): { x: number; y: number } {
+  if (opener === null) return { x: event.clientX, y: event.clientY }
+  const box = opener.getBoundingClientRect()
+  const inside =
+    event.clientX >= box.left &&
+    event.clientX <= box.right &&
+    event.clientY >= box.top &&
+    event.clientY <= box.bottom
+  if (inside) return { x: event.clientX, y: event.clientY }
+  // Under the row rather than over it, which is where a press on it would put a
+  // menu and where the entry stays visible while the menu is up.
+  return { x: box.left + 8, y: box.bottom }
+}
+
+/** focusIsNowhere reports whether the focus is on nothing in particular, which
+ * is where removing the element that held it leaves it: the browser moves it to
+ * the document body, and a keyboard user starts over from there.
+ *
+ * It is the condition for putting it back, rather than an unconditional restore:
+ * a focus that is somewhere else is one the user moved on purpose, and a manager
+ * that took it back would be worse than the gap it closes. */
+function focusIsNowhere(): boolean {
+  const active = document.activeElement
+  return active === null || active === document.body || active === document.documentElement
+}
+
+/** closeMenu dismisses the menu, and hands the keyboard back to the row it was
+ * opened from.
+ *
+ * The menu takes the focus when it opens, so it has to give it back: closing it
+ * without that leaves the focus nowhere, and a keyboard user who opened it from
+ * a row has to walk back to that row through every control between. The row may
+ * be gone by now -- the action just taken may have deleted or renamed it -- in
+ * which case there is nothing to focus and the browser's own default stands.
+ *
+ * preventScroll because a dismissal is not a navigation: the row is where the
+ * user left it, and focusing it must not drag the tree back to it. */
+function closeMenu() {
+  const opener = menu.value?.opener ?? null
+  menu.value = null
+  if (opener !== null && opener.isConnected) opener.focus({ preventScroll: true })
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -709,7 +1154,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
 </script>
 
 <template>
-  <div class="fm" @click.self="menu = null">
+  <div class="fm" @click.self="closeMenu()">
     <header class="fm__bar">
       <button
         class="fm__btn"
@@ -726,7 +1171,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
     </header>
 
     <div class="fm__body">
-      <aside class="fm__tree">
+      <aside ref="listingRef" class="fm__tree" tabindex="-1" aria-label="Files">
         <p v-if="loading" class="fm__state">Loading…</p>
         <p v-else-if="failure" class="fm__state fm__state--error" role="alert">{{ failure }}</p>
         <template v-else>
@@ -737,6 +1182,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
             </button>
           </p>
           <FileTree
+            ref="treeRef"
             :path="current"
             :state="tree"
             :current="current"
@@ -749,7 +1195,13 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
       </aside>
 
       <section class="fm__viewer">
-        <EditorTabs :files="tabs" :active="activePath" @select="activePath = $event" @close="closeTab" />
+        <EditorTabs
+          ref="tabsRef"
+          :files="tabs"
+          :active="activePath"
+          @select="activePath = $event"
+          @close="closeTab"
+        />
 
         <div v-if="!active" class="fm__state">Select a file to open it.</div>
 
@@ -772,27 +1224,60 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
             <span v-if="isDirty(active)" class="fm__dirty" role="status">unsaved changes</span>
           </div>
 
-          <div class="fm__content">
-            <ImagePreview
-              v-if="preview === 'image'"
-              :path="active.path"
-              @notice="(text, level) => emit('notice', text, level)"
-            />
-            <MarkdownPreview v-else-if="preview === 'markdown' && !activeIsMarkdownSource" :source="active.text" />
-            <CodeEditor
-              v-else-if="preview === 'editor' || preview === 'markdown'"
-              :key="active.path"
-              v-model="active.text"
-            />
-            <div v-else class="fm__info">
-              <p class="fm__state">
-                {{ active.name }} is not shown here: it is
-                {{ preview === 'info' ? 'binary or too large to preview' : 'not previewable' }}.
-              </p>
-              <p class="fm__meta">{{ formatSize(active.size) }} · {{ active.path }}</p>
-              <button class="fm__btn" type="button" @click="download(active.path, active.name)">
-                Download
-              </button>
+          <!--
+            The panel the tab strip's tabs label: role="tabpanel" and the id of
+            the tab that is selected, which is the other half of the tablist
+            contract the strip declares. It is a tab stop of its own because it
+            scrolls -- a scrollable region has to be reachable without a pointer
+            -- and because the editor inside it is reached through it.
+          -->
+          <div
+            :id="panelElementId"
+            class="fm__content"
+            role="tabpanel"
+            tabindex="0"
+            :aria-labelledby="active ? tabElementId(active.id) : undefined"
+          >
+            <template v-if="active">
+              <ImagePreview
+                v-if="preview === 'image'"
+                :path="active.path"
+                @notice="(text, level) => emit('notice', text, level)"
+                @too-large="onImageTooLarge"
+                @download="download(active.path, active.name)"
+              />
+              <MarkdownPreview
+                v-else-if="preview === 'markdown' && !activeIsMarkdownSource"
+                :source="active.text"
+              />
+              <div v-else-if="!editorVisible" class="fm__info">
+                <p class="fm__state">{{ active.name }} is not shown here: {{ notShown }}.</p>
+                <p class="fm__meta">{{ formatSize(active.size) }} · {{ active.path }}</p>
+                <button class="fm__btn" type="button" @click="download(active.path, active.name)">
+                  Download
+                </button>
+              </div>
+            </template>
+
+            <!--
+              One editor per open file, all of them mounted, only the active one
+              shown. Keyed by the editing session rather than by the path, so a
+              rename keeps the instance (and its undo history) instead of
+              rebuilding it under the new name.
+
+              Keeping the others mounted is the point. The editor owns its own
+              history, and history does not survive being destroyed and
+              rebuilt -- so an editor that were unmounted whenever the user
+              looked at another tab would lose the undo stack of every file they
+              switched away from, which is exactly when they reach for it.
+            -->
+            <div
+              v-for="tab in editorTabs"
+              v-show="tab.id === active?.id && editorVisible"
+              :key="tab.id"
+              class="fm__editor"
+            >
+              <CodeEditor v-model="tab.text" :active="tab.id === active?.id && editorVisible" />
             </div>
           </div>
         </template>
@@ -812,7 +1297,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
       @download="onMenuAction('download')"
       @copy-path="onMenuAction('copy-path')"
       @insert-path="onMenuAction('insert-path')"
-      @close="menu = null"
+      @close="closeMenu"
     />
   </div>
 </template>
@@ -905,6 +1390,11 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
   flex: 1;
   min-height: 0;
   overflow: auto;
+}
+
+/* A hidden editor is out of the flow, so the visible one fills the viewer. */
+.fm__editor {
+  height: 100%;
 }
 
 .fm__state {

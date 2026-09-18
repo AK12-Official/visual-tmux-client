@@ -1,9 +1,4 @@
-# file-manager Specification
-
-## Purpose
-Lets an authenticated browser user browse, preview, edit, and organize files on the machine running the hub, within an operator-configured access boundary, without leaving the terminal workspace.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Filesystem access boundary
 
@@ -76,6 +71,72 @@ Roots are therefore a boundary against a caller, and against a replaced path com
 
 - **WHEN** roots are configured and a caller writes a new file whose parent directory is a symbolic link pointing outside every configured root
 - **THEN** the hub refuses the operation rather than creating the file at the resolved parent
+
+### Requirement: File and directory operations
+
+The hub SHALL support creating an empty file, creating a directory, renaming or moving a file or directory, and deleting a file or directory. Creating or renaming SHALL validate both the source and the destination against the access boundary. Creating a target that already exists SHALL be refused. Deleting a directory that contains entries SHALL require the caller to request recursive deletion, and SHALL be refused otherwise.
+
+A create request SHALL name the kind of entry it asks for, from the set the hub defines. A request that names none of them -- an absent field, or a spelling this hub does not have -- SHALL be refused rather than carried out as the creation of a file, since the caller asked for something else and would be told it succeeded. Every request on these routes SHALL be exactly one JSON object carrying the fields the route defines: an unknown field, a body with nothing in it, and a second value after the object SHALL each be refused, because acting on the part of such a request that is recognised would carry out something the caller did not write.
+
+#### Scenario: Create a file
+
+- **WHEN** a caller creates a file at a path inside a configured root whose parent exists and which does not already exist
+- **THEN** the hub creates an empty file at that path
+
+#### Scenario: Create a directory
+
+- **WHEN** a caller creates a directory at a path inside a configured root whose parent exists and which does not already exist
+- **THEN** the hub creates the directory
+
+#### Scenario: Create over an existing entry
+
+- **WHEN** a caller creates a file or directory at a path that already exists
+- **THEN** the hub refuses and leaves the existing entry unmodified
+
+#### Scenario: Parent does not exist
+
+- **WHEN** a caller creates an entry whose parent directory does not exist
+- **THEN** the hub refuses rather than creating intermediate directories
+
+#### Scenario: Rename within the boundary
+
+- **WHEN** a caller renames an existing entry to a path inside a configured root
+- **THEN** the entry is reachable at the new path and no longer at the old one
+
+#### Scenario: Rename across the boundary
+
+- **WHEN** a caller renames an entry to a destination outside every configured root
+- **THEN** the hub refuses and leaves the entry at its original path
+
+#### Scenario: Rename onto an existing entry
+
+- **WHEN** a caller renames an entry to a path that already exists
+- **THEN** the hub refuses and leaves both entries unmodified
+
+#### Scenario: Delete a non-empty directory without recursion
+
+- **WHEN** a caller deletes a directory that contains entries without requesting recursive deletion
+- **THEN** the hub refuses with a distinct error and removes nothing
+
+#### Scenario: Delete a non-empty directory recursively
+
+- **WHEN** a caller deletes a directory that contains entries and requests recursive deletion
+- **THEN** the hub removes the directory and its contents
+
+#### Scenario: Create names no kind of entry
+
+- **WHEN** a caller asks for a create without naming the kind of entry, or names a kind the hub does not define
+- **THEN** the hub refuses the request and creates nothing
+
+#### Scenario: A request carries a field the hub does not define
+
+- **WHEN** a caller's body on a create, rename, or delete route carries a field the hub does not define
+- **THEN** the hub refuses the request rather than acting on the fields it recognises
+
+#### Scenario: A request body is not one JSON object
+
+- **WHEN** a caller's body on one of those routes is empty, is not JSON, or carries a second value after the object
+- **THEN** the hub refuses the request
 
 ### Requirement: Directory listing
 
@@ -285,86 +346,6 @@ keeps the reading adjacent to the metadata work and the last identity check adja
 - **WHEN** the target's permissions are changed while the body is being transferred
 - **THEN** the replacement carries the permissions the target has when the body has arrived
 
-### Requirement: File and directory operations
-
-The hub SHALL support creating an empty file, creating a directory, renaming or moving a file or directory, and deleting a file or directory. Creating or renaming SHALL validate both the source and the destination against the access boundary. Creating a target that already exists SHALL be refused. Deleting a directory that contains entries SHALL require the caller to request recursive deletion, and SHALL be refused otherwise.
-
-A create request SHALL name the kind of entry it asks for, from the set the hub defines. A request that names none of them -- an absent field, or a spelling this hub does not have -- SHALL be refused rather than carried out as the creation of a file, since the caller asked for something else and would be told it succeeded. Every request on these routes SHALL be exactly one JSON object carrying the fields the route defines: an unknown field, a body with nothing in it, and a second value after the object SHALL each be refused, because acting on the part of such a request that is recognised would carry out something the caller did not write.
-
-#### Scenario: Create a file
-
-- **WHEN** a caller creates a file at a path inside a configured root whose parent exists and which does not already exist
-- **THEN** the hub creates an empty file at that path
-
-#### Scenario: Create a directory
-
-- **WHEN** a caller creates a directory at a path inside a configured root whose parent exists and which does not already exist
-- **THEN** the hub creates the directory
-
-#### Scenario: Create over an existing entry
-
-- **WHEN** a caller creates a file or directory at a path that already exists
-- **THEN** the hub refuses and leaves the existing entry unmodified
-
-#### Scenario: Parent does not exist
-
-- **WHEN** a caller creates an entry whose parent directory does not exist
-- **THEN** the hub refuses rather than creating intermediate directories
-
-#### Scenario: Rename within the boundary
-
-- **WHEN** a caller renames an existing entry to a path inside a configured root
-- **THEN** the entry is reachable at the new path and no longer at the old one
-
-#### Scenario: Rename across the boundary
-
-- **WHEN** a caller renames an entry to a destination outside every configured root
-- **THEN** the hub refuses and leaves the entry at its original path
-
-#### Scenario: Rename onto an existing entry
-
-- **WHEN** a caller renames an entry to a path that already exists
-- **THEN** the hub refuses and leaves both entries unmodified
-
-#### Scenario: Delete a non-empty directory without recursion
-
-- **WHEN** a caller deletes a directory that contains entries without requesting recursive deletion
-- **THEN** the hub refuses with a distinct error and removes nothing
-
-#### Scenario: Delete a non-empty directory recursively
-
-- **WHEN** a caller deletes a directory that contains entries and requests recursive deletion
-- **THEN** the hub removes the directory and its contents
-
-#### Scenario: Create names no kind of entry
-
-- **WHEN** a caller asks for a create without naming the kind of entry, or names a kind the hub does not define
-- **THEN** the hub refuses the request and creates nothing
-
-#### Scenario: A request carries a field the hub does not define
-
-- **WHEN** a caller's body on a create, rename, or delete route carries a field the hub does not define
-- **THEN** the hub refuses the request rather than acting on the fields it recognises
-
-#### Scenario: A request body is not one JSON object
-
-- **WHEN** a caller's body on one of those routes is empty, is not JSON, or carries a second value after the object
-- **THEN** the hub refuses the request
-
-### Requirement: Authenticated file access
-
-The hub SHALL require every file operation to be performed by an authenticated caller. The hub SHALL NOT disclose the existence, size, type, or contents of any path to an unauthenticated caller, and SHALL NOT perform any filesystem operation on its behalf. Rejecting an unauthenticated caller SHALL NOT require reading the filesystem.
-
-#### Scenario: Missing or invalid credentials
-
-- **WHEN** a caller invokes a file operation without credentials, or with credentials that do not match
-- **THEN** the hub refuses with an authentication error and performs no filesystem operation
-
-#### Scenario: File operations do not weaken terminal authorization
-
-- **WHEN** a file operation succeeds with valid credentials
-- **THEN** terminal attachment still requires its own session-bound single-use ticket
-
 ### Requirement: Session working directory
 
 The hub SHALL expose the working directory of a session's active pane, so the browser can open the file manager at the directory the user is currently working in. The directory SHALL be reported exactly as the pane holds it, since leading and trailing whitespace is part of a name rather than formatting around it: a trimmed name denotes a different directory, or none at all.
@@ -383,71 +364,6 @@ The hub SHALL expose the working directory of a session's active pane, so the br
 
 - **WHEN** a caller requests the working directory of a session that does not exist
 - **THEN** the hub returns a not-found error
-
-### Requirement: Browser file manager
-
-The browser SHALL provide a file manager opened from the terminal for the current session. On opening, the browser SHALL resolve the manager's starting directory from the session's active pane working directory. That starting directory SHALL be captured once, so that later changes to the active pane do not move an already-open manager. The browser SHALL then let the user navigate freely within the boundary, including moving to a parent directory and selecting any directory in the tree as the current one. When the pane working directory is not permitted by the boundary, the browser SHALL open at a permitted directory instead and inform the user that it did so. The manager SHALL load directory contents on demand as the user expands the tree. The manager SHALL offer creating a file, creating a directory, renaming, deleting, and downloading, and SHALL require the user to confirm a delete before it is performed.
-
-The browser SHALL NOT let the deletes it sends race the saves it sends. The hub's last check before replacing a file and the replacement itself are two adjacent system calls, so a write landing between them leaves the file present at a path the user has just been told it was deleted from, while the delete's own answer reports success. Before sending a delete the browser SHALL wait for the writes already travelling that name the entry or anything beneath it, and it SHALL refuse to send a save whose path, or a directory holding it, has a delete in flight rather than letting the two race. This orders the browser's own requests against each other; a write from any other process is not ordered by it, which is specified under Optimistic concurrent writes.
-
-The manager SHALL be operable without a pointer. Its context menu SHALL take the focus when it opens, SHALL move that focus among the actions a user can choose -- an action that cannot be chosen is not a stop -- and SHALL return it to the entry the menu was opened from when it closes. A menu the browser raised for the keyboard SHALL be anchored to that entry, because such an event carries no pointer position to open at.
-
-The manager SHALL NOT open a tab for a file whose contents it has asked the hub for when its own delete of that file, or of a directory holding it, is answered before that answer arrives. The read was granted before the delete, so it still returns the file's contents; a tab built from them would name a path that no longer exists, and every later save of it could only be refused. A delete SHALL record what it removed for the reads that were travelling when it was answered, and those reads SHALL install nothing.
-
-#### Scenario: Open from the terminal
-
-- **WHEN** the user opens the file manager while attached to a session whose active pane is at a permitted directory
-- **THEN** the manager opens showing that directory and the terminal remains usable
-
-#### Scenario: Active pane changes while open
-
-- **WHEN** the user changes the active pane or its working directory after the manager has opened
-- **THEN** the manager keeps its current directory rather than following the pane
-
-#### Scenario: Navigate to a parent directory
-
-- **WHEN** the user navigates to the parent of the current directory
-- **THEN** the manager shows that parent's contents as its current directory
-
-#### Scenario: Pane directory is not permitted
-
-- **WHEN** the session's active pane working directory is not permitted by the boundary
-- **THEN** the manager opens at a permitted directory and tells the user the pane directory was not accessible
-
-#### Scenario: Directory loads on demand
-
-- **WHEN** the user expands a directory that has not been loaded yet
-- **THEN** the browser requests that directory's children at that point rather than loading the whole tree up front
-
-#### Scenario: Deletion requires confirmation
-
-- **WHEN** the user deletes a file or directory
-- **THEN** the browser asks for confirmation first and performs no deletion if the user declines
-
-#### Scenario: A delete while a save of the same file is travelling
-
-- **WHEN** the user confirms deleting a file that has a save in flight
-- **THEN** the browser sends the delete only once that save has been answered, so the write cannot land between the hub's last check and its replacement
-
-#### Scenario: A save while a delete of the same file is in flight
-
-- **WHEN** the user saves a file whose deletion has been sent and not yet answered
-- **THEN** the browser sends no write and tells the user that a delete of that file, or of a directory above it, is in flight
-
-#### Scenario: Operation fails
-
-- **WHEN** a file operation is refused by the hub
-- **THEN** the browser reports the reason using the application's existing notification mechanism and leaves the manager usable
-
-#### Scenario: The context menu from the keyboard
-
-- **WHEN** the user opens an entry's context menu from the keyboard and then closes it
-- **THEN** the menu holds the focus while it is open, the arrow keys move between the actions that can be chosen, and the focus returns to that entry when it closes
-
-#### Scenario: A file deleted while its contents were being read
-
-- **WHEN** the user deletes a file whose contents the browser has already asked the hub for, and the delete is answered before that read answers
-- **THEN** the browser opens no tab for it and reports that it was deleted
 
 ### Requirement: Editing and unsaved changes
 
@@ -576,57 +492,72 @@ A file the manager opened without reading has no contents in hand, and only an i
 - **WHEN** a file opened as an image has been renamed to a name the editor would hold, and the read that rename started has not yet answered
 - **THEN** the browser presents it as information about the file, and the editor is not offered for it
 
-### Requirement: Preview rendering safety
+### Requirement: Browser file manager
 
-Rendered Markdown SHALL be sanitized before insertion into the document, so that a file containing script elements, event-handler attributes, or embedded document elements cannot execute code or load remote content when previewed. The browser SHALL never insert raw file contents into the document as markup.
+The browser SHALL provide a file manager opened from the terminal for the current session. On opening, the browser SHALL resolve the manager's starting directory from the session's active pane working directory. That starting directory SHALL be captured once, so that later changes to the active pane do not move an already-open manager. The browser SHALL then let the user navigate freely within the boundary, including moving to a parent directory and selecting any directory in the tree as the current one. When the pane working directory is not permitted by the boundary, the browser SHALL open at a permitted directory instead and inform the user that it did so. The manager SHALL load directory contents on demand as the user expands the tree. The manager SHALL offer creating a file, creating a directory, renaming, deleting, and downloading, and SHALL require the user to confirm a delete before it is performed.
 
-#### Scenario: Markdown containing script
+The browser SHALL NOT let the deletes it sends race the saves it sends. The hub's last check before replacing a file and the replacement itself are two adjacent system calls, so a write landing between them leaves the file present at a path the user has just been told it was deleted from, while the delete's own answer reports success. Before sending a delete the browser SHALL wait for the writes already travelling that name the entry or anything beneath it, and it SHALL refuse to send a save whose path, or a directory holding it, has a delete in flight rather than letting the two race. This orders the browser's own requests against each other; a write from any other process is not ordered by it, which is specified under Optimistic concurrent writes.
 
-- **WHEN** the user previews a Markdown file containing a script element or an event-handler attribute
-- **THEN** the rendered output contains neither, and no script from the file executes
+The manager SHALL be operable without a pointer. Its context menu SHALL take the focus when it opens, SHALL move that focus among the actions a user can choose -- an action that cannot be chosen is not a stop -- and SHALL return it to the entry the menu was opened from when it closes. A menu the browser raised for the keyboard SHALL be anchored to that entry, because such an event carries no pointer position to open at.
 
-#### Scenario: Markdown containing embedded document
+The manager SHALL NOT open a tab for a file whose contents it has asked the hub for when its own delete of that file, or of a directory holding it, is answered before that answer arrives. The read was granted before the delete, so it still returns the file's contents; a tab built from them would name a path that no longer exists, and every later save of it could only be refused. A delete SHALL record what it removed for the reads that were travelling when it was answered, and those reads SHALL install nothing.
 
-- **WHEN** the user previews a Markdown file containing an embedded frame or object element
-- **THEN** the rendered output omits it
+#### Scenario: Open from the terminal
 
-### Requirement: File download
+- **WHEN** the user opens the file manager while attached to a session whose active pane is at a permitted directory
+- **THEN** the manager opens showing that directory and the terminal remains usable
 
-The browser SHALL allow downloading a file's exact bytes to the user's machine, subject to the configured per-file size limit, without requiring the user to open it in the editor first.
+#### Scenario: Active pane changes while open
 
-#### Scenario: Download a file
+- **WHEN** the user changes the active pane or its working directory after the manager has opened
+- **THEN** the manager keeps its current directory rather than following the pane
 
-- **WHEN** the user downloads a file within the size limit
-- **THEN** the browser saves the file under its own name with its bytes unchanged
+#### Scenario: Navigate to a parent directory
 
-#### Scenario: Download exceeds the limit
+- **WHEN** the user navigates to the parent of the current directory
+- **THEN** the manager shows that parent's contents as its current directory
 
-- **WHEN** the user downloads a file larger than the configured per-file limit
-- **THEN** the browser reports the limit and saves nothing
+#### Scenario: Pane directory is not permitted
 
-### Requirement: Insert a path into the terminal
+- **WHEN** the session's active pane working directory is not permitted by the boundary
+- **THEN** the manager opens at a permitted directory and tells the user the pane directory was not accessible
 
-The browser SHALL allow the user to insert a file's path into the current terminal's input line from the file manager. The inserted text SHALL NOT contain a line terminator, so that an insertion never executes a command on its own. A path whose characters a shell would otherwise interpret SHALL be quoted so that the inserted text denotes the path literally. Insertion SHALL require a live terminal attachment; when none is available the browser SHALL report that instead of silently doing nothing.
+#### Scenario: Directory loads on demand
 
-#### Scenario: Insert a path
+- **WHEN** the user expands a directory that has not been loaded yet
+- **THEN** the browser requests that directory's children at that point rather than loading the whole tree up front
 
-- **WHEN** the user inserts a file's path into the terminal from the file manager
-- **THEN** the path appears in the terminal's input line and no command is executed
+#### Scenario: Deletion requires confirmation
 
-#### Scenario: Path needs quoting
+- **WHEN** the user deletes a file or directory
+- **THEN** the browser asks for confirmation first and performs no deletion if the user declines
 
-- **WHEN** the inserted path contains a space or a character a shell would interpret
-- **THEN** the inserted text quotes it so that submitting the line would refer to that exact path
+#### Scenario: A delete while a save of the same file is travelling
 
-#### Scenario: No live terminal
+- **WHEN** the user confirms deleting a file that has a save in flight
+- **THEN** the browser sends the delete only once that save has been answered, so the write cannot land between the hub's last check and its replacement
 
-- **WHEN** the user inserts a path while no terminal attachment is active
-- **THEN** the browser reports that no terminal is available and inserts nothing
+#### Scenario: A save while a delete of the same file is in flight
 
-#### Scenario: File manager state is unaffected
+- **WHEN** the user saves a file whose deletion has been sent and not yet answered
+- **THEN** the browser sends no write and tells the user that a delete of that file, or of a directory above it, is in flight
 
-- **WHEN** a path is inserted into the terminal
-- **THEN** open files, unsaved edits, and the current directory are unchanged
+#### Scenario: Operation fails
+
+- **WHEN** a file operation is refused by the hub
+- **THEN** the browser reports the reason using the application's existing notification mechanism and leaves the manager usable
+
+#### Scenario: The context menu from the keyboard
+
+- **WHEN** the user opens an entry's context menu from the keyboard and then closes it
+- **THEN** the menu holds the focus while it is open, the arrow keys move between the actions that can be chosen, and the focus returns to that entry when it closes
+
+#### Scenario: A file deleted while its contents were being read
+
+- **WHEN** the user deletes a file whose contents the browser has already asked the hub for, and the delete is answered before that read answers
+- **THEN** the browser opens no tab for it and reports that it was deleted
+
+## ADDED Requirements
 
 ### Requirement: Disabled file manager
 

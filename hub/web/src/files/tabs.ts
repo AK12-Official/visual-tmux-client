@@ -1,7 +1,13 @@
 // Open-file state for the file manager, kept free of the DOM so the save and
 // conflict rules can be exercised directly.
+//
+// Free of the renderer too, deliberately: how a file's contents should be shown
+// is a presentation rule and lives in preview.ts, which imports the sanitizer.
+// A save has no opinion about either, and importing the renderer to answer a
+// question about a file name would drag it in for nothing.
 
-import { writeFile } from './api'
+import { writeFile, type Stamp } from './api'
+import type { Classification } from './classification'
 
 /** OpenFile is one file open in the editor. */
 export interface OpenFile {
@@ -20,19 +26,59 @@ export interface OpenFile {
   text: string
   /** saved is what was last read or written, which dirty is measured against. */
   saved: string
-  /** mtime is the modification time last observed from the hub. */
-  mtime: number
-  /** size is the byte size the directory listing reported. */
+  /**
+   * stamp is the modification time last observed from the hub, at both the
+   * precisions it reports. It is what the next save is checked against, so it is
+   * the observation and not a display value: taking it from anywhere but the
+   * hub's own answer is what makes a save look like a conflict that is not one.
+   */
+  stamp: Stamp
+  /**
+   * size is what the file's size is currently believed to be, and it is not a
+   * display field: it is an argument to `presentation`, so it decides which size
+   * bound applies to the file.
+   *
+   * It comes from whichever observation is most recent, which is why the doc says
+   * "believed": the directory listing's report when the tab was opened, the hub's
+   * report at read time when a name-suggesting-binary file was probed, the size an
+   * image preview refused to render, and zero for a file that was just created.
+   * Only the last of those is a guess, and a created file is empty.
+   */
   size: number
   /**
-   * binary is the hub's classification of the contents, for a file that was read
-   * as text. It is what decides whether the file may be shown as editable text,
-   * and it outranks the file's name: a name is a guess, and a wrong guess either
-   * mojibakes a file or refuses to open one that is text. A file that was never
-   * read -- an image, or one already known to be uneditable -- is false, and its
-   * presentation is decided by its kind instead.
+   * binary is the hub's classification of the contents: true for binary, false
+   * for text, and null for a file it was never asked about.
+   *
+   * It outranks the file's name, in both directions, because a name is a guess
+   * and a wrong guess either mojibakes a file or refuses to open one that is
+   * text. Null is a different answer from false, and has to be: an image is
+   * never read, and a file the hub read as text is shown as text however it is
+   * named. See Classification in ./classification.
    */
-  binary: boolean
+  binary: Classification
+}
+
+/**
+ * panelElementId is the DOM id of the element the open files are shown in.
+ *
+ * One panel, whose contents are the selected file's, rather than one per tab:
+ * the manager renders a single viewer and swaps what is in it. Every tab names
+ * it, and it is labelled by the tab that is selected, so the association reads in
+ * both directions.
+ */
+export const panelElementId = 'file-panel'
+
+/**
+ * tabElementId is the DOM id of an editing session's tab.
+ *
+ * The tab and the panel it labels are rendered by two components -- the strip is
+ * the editor's, the panel is the manager's -- so the association between them is
+ * a name the two have to agree on, and this is where that name is written down.
+ * The session id rather than the path, because a rename moves the path and must
+ * not move the association: the panel is still the panel the tab points at.
+ */
+export function tabElementId(id: number): string {
+  return `file-tab-${id}`
 }
 
 /** isDirty reports whether a file differs from what was last read or saved. */
@@ -46,19 +92,64 @@ export function anyDirty(files: OpenFile[]): boolean {
 }
 
 /**
- * saveOpenFile writes a file's current contents and returns the modification
- * time the hub reports, or null when it reported none.
+ * SaveRequest is everything one save is sent with, captured together.
  *
- * The caller must adopt a returned value. Guessing it instead -- which is what a
- * client that assumed the current time would do -- dates the file behind itself
- * and makes the very next save look like a conflict.
+ * Captured together, and not read again later, is the whole point. Everything
+ * here happens around an await, and a rename completes inside that window: the
+ * tab moves to a new name, and an answer that arrives afterwards describes the
+ * write that named the old one. A save that re-read the tab at answer time would
+ * compare the tab against itself and agree, and would mark the file at the new
+ * name saved having never written a byte there. So what is sent and what the
+ * answer is matched against are the same object, taken once.
+ */
+export interface SaveRequest {
+  /** id is the editing session that asked, which survives a rename. */
+  id: number
+  /** path is the file the write names. */
+  path: string
+  /** text is the exact contents the write carries. */
+  text: string
+  /** expected is what the write is compared against, or null to force it. */
+  expected: Stamp | null
+  /**
+   * allowOtherNames is the user's agreement that a target reachable under more
+   * than one name may be replaced, which leaves those other names holding the
+   * contents they had.
+   *
+   * It is part of the request because it is part of what the write asks for --
+   * the hub refuses such a target without it -- and a request is still everything
+   * one save is sent with, captured together. The manager's retry after the
+   * refusal is a save of the tab as it then stands, with this set; see
+   * FileManagerOverlay for why that is not a replay.
+   */
+  allowOtherNames: boolean
+}
+
+/**
+ * beginSave captures what a save will send.
  *
  * `force` is what the user's confirmation after a conflict asks for: it drops the
  * observed modification time, which is the only thing that asks the hub to
  * overwrite regardless.
  */
-export async function saveOpenFile(file: OpenFile, force = false): Promise<number | null> {
-  return writeFile(file.path, file.text, force ? null : file.mtime)
+export function beginSave(file: OpenFile, force = false, allowOtherNames = false): SaveRequest {
+  return {
+    id: file.id,
+    path: file.path,
+    text: file.text,
+    expected: force ? null : file.stamp,
+    allowOtherNames,
+  }
+}
+
+/** saveOpenFile sends a captured save and reports the modification time the hub
+ * answered with, or null when it reported none.
+ *
+ * The caller must adopt a returned value. Guessing it instead -- which is what a
+ * client that assumed the current time would do -- dates the file behind itself
+ * and makes the very next save look like a conflict. */
+export async function saveOpenFile(request: SaveRequest): Promise<Stamp | null> {
+  return writeFile(request.path, request.text, request.expected, request.allowOtherNames)
 }
 
 /** applySaved folds a successful save back into the file's state.
@@ -68,9 +159,72 @@ export async function saveOpenFile(file: OpenFile, force = false): Promise<numbe
  * during the round trip as saved -- they never reached the disk, and the tab
  * would report itself clean and let them be discarded without a warning.
  *
- * A null mtime leaves the observed time as it was. The write did happen, so the
+ * A null stamp leaves the observed time as it was. The write did happen, so the
  * tab is saved; the next save will be told the file changed -- which it did --
  * and ask before overwriting rather than assuming it did not. */
-export function applySaved(file: OpenFile, mtime: number | null, sent: string): OpenFile {
-  return { ...file, saved: sent, mtime: mtime ?? file.mtime }
+export function applySaved(file: OpenFile, stamp: Stamp | null, sent: string): OpenFile {
+  return { ...file, saved: sent, stamp: stamp ?? file.stamp }
+}
+
+/** SaveSettlement is what became of a save's answer. */
+export interface SaveSettlement {
+  files: OpenFile[]
+  /**
+   * outcome is what the caller still has to say about it:
+   *
+   *   `saved`  -- the answer describes the file the tab holds, and the tab is now
+   *               clean at the text that was sent.
+   *   `closed` -- the tab is gone, so there is nothing to fold the answer into.
+   *   `moved`  -- the tab is open under a different path than the write named.
+   *   `raced`  -- a rename of that path, or of a directory above it, was outstanding
+   *               when the answer arrived.
+   */
+  outcome: 'saved' | 'closed' | 'moved' | 'raced'
+}
+
+/**
+ * settleSave folds a save's answer back into the open files.
+ *
+ * The request carries the path the write named, and this is why it has to. A
+ * rename completes while the write is travelling: it moves the tab to the new
+ * name, and the answer that arrives afterwards describes the file the write
+ * named -- which the tab no longer holds. Applying it anyway is worse than doing
+ * nothing, because it records the tab as saved, at the new name, having never
+ * written a byte there: the edit is left only at the old name, and the tab
+ * reports no unsaved changes. So the answer is passed back to the caller as
+ * `moved` instead, and the user is told to save again -- which writes the edit to
+ * the name the tab now holds.
+ *
+ * The tab is identified by session rather than by path throughout, because a
+ * rename replaces the tab object: the one captured before the await is a
+ * snapshot whose path is the old one, and comparing against it would agree with
+ * itself and mark the wrong file saved. That is why the request is an argument
+ * rather than a set of loose values -- there is nothing here for the caller to
+ * pass the wrong way round.
+ */
+export function settleSave(
+  files: OpenFile[],
+  request: SaveRequest,
+  stamp: Stamp | null,
+  racing = false,
+): SaveSettlement {
+  const tab = files.find((candidate) => candidate.id === request.id)
+  if (!tab) return { files, outcome: 'closed' }
+  if (tab.path !== request.path) return { files, outcome: 'moved' }
+  // A rename of this path, or of a directory above it, is outstanding, so this
+  // answer and that rename crossed on the wire and the browser cannot tell which
+  // reached the hub first. The
+  // write may have landed before the rename carried the entry to its new name --
+  // in which case the tab is saved and this is only a nag -- or the rename may
+  // have landed first, in which case the write recreated the old name and the
+  // entry the tab now holds was never written. Recording the tab as saved would
+  // be a lie in the second case and merely cautious in the first, so the answer
+  // is not recorded. See design.md on the window POSIX rename cannot close.
+  if (racing) return { files, outcome: 'raced' }
+  return {
+    files: files.map((candidate) =>
+      candidate.id === request.id ? applySaved(candidate, stamp, request.text) : candidate,
+    ),
+    outcome: 'saved',
+  }
 }

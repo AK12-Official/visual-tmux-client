@@ -23,7 +23,9 @@ type mockFileService struct {
 	startFn  func(candidate string) (string, bool)
 	listFn   func(path string) (files.ListResult, error)
 	readFn   func(path string) (files.ReadResult, error)
-	writeFn  func(path string, body io.Reader, size int64, mtime *int64) (int64, error)
+	writeFn  func(
+		path string, body io.Reader, size int64, mtime *files.ExpectedMtime, allowOtherNames bool,
+	) (files.WriteResult, error)
 	createFn func(path string, isDir bool) error
 	renameFn func(path, newPath string) error
 	deleteFn func(path string, recursive bool) error
@@ -55,12 +57,13 @@ func (m *mockFileService) Read(ctx context.Context, path string) (files.ReadResu
 }
 
 func (m *mockFileService) Write(
-	ctx context.Context, path string, body io.Reader, size int64, mtime *int64,
-) (int64, error) {
+	ctx context.Context, path string, body io.Reader, size int64,
+	mtime *files.ExpectedMtime, allowOtherNames bool,
+) (files.WriteResult, error) {
 	if m.writeFn != nil {
-		return m.writeFn(path, body, size, mtime)
+		return m.writeFn(path, body, size, mtime, allowOtherNames)
 	}
-	return 0, nil
+	return files.WriteResult{}, nil
 }
 
 func (m *mockFileService) Create(ctx context.Context, path string, isDir bool) error {
@@ -183,10 +186,12 @@ func TestMapFileErrorTranslatesTheWholeVocabulary(t *testing.T) {
 		{"invalid path", files.ErrInvalidPath, http.StatusBadRequest, "invalid_path"},
 		{"invalid body", files.ErrInvalidBody, http.StatusBadRequest, "invalid_body"},
 		{"path not allowed", files.ErrPathNotAllowed, http.StatusForbidden, "path_not_allowed"},
+		{"cross-root move", files.ErrCrossRoot, http.StatusForbidden, "cross_root_move"},
 		{"permission denied", files.ErrPermissionDenied, http.StatusForbidden, "permission_denied"},
 		{"not found", files.ErrNotFound, http.StatusNotFound, "not_found"},
 		{"conflict", files.ErrConflict, http.StatusConflict, "conflict"},
 		{"directory not empty", files.ErrDirNotEmpty, http.StatusConflict, "dir_not_empty"},
+		{"target has other names", files.ErrHasOtherNames, http.StatusConflict, "other_names"},
 		{"file too large", files.ErrFileTooLarge, http.StatusRequestEntityTooLarge, "file_too_large"},
 		{"write failed", files.ErrWriteFailed, http.StatusInternalServerError, "write_failed"},
 		{"unrecognised", fmt.Errorf("something else"), http.StatusInternalServerError, "write_failed"},
@@ -215,16 +220,60 @@ func TestMapFileErrorSeesThroughWrapping(t *testing.T) {
 	}
 }
 
+// A disabled manager is answered without the service being consulted, on every
+// route: the capability is off, so nothing looks at a path and nothing is
+// attempted on the caller's behalf. Every route, rather than one of them,
+// because this gate is what makes it safe to build a disabled service with no
+// boundary at all -- see the composition root's newFileService. A route that
+// lost the check would be an unrestricted file manager wearing a disabled one's
+// configuration.
 func TestFileRoutesAnswerADisabledManagerWithoutReachingTheService(t *testing.T) {
-	svc := &mockFileService{disabled: true, listFn: func(string) (files.ListResult, error) {
-		t.Error("a disabled manager must not reach the service")
-		return files.ListResult{}, nil
-	}}
-	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+	touched := ""
+	mark := func(what string) { touched = what }
+	svc := &mockFileService{
+		disabled: true,
+		listFn: func(string) (files.ListResult, error) {
+			mark("list")
+			return files.ListResult{}, nil
+		},
+		readFn: func(string) (files.ReadResult, error) {
+			mark("read")
+			return files.ReadResult{}, nil
+		},
+		writeFn: func(string, io.Reader, int64, *files.ExpectedMtime, bool) (files.WriteResult, error) {
+			mark("write")
+			return files.WriteResult{}, nil
+		},
+		createFn: func(string, bool) error { mark("create"); return nil },
+		renameFn: func(string, string) error { mark("rename"); return nil },
+		deleteFn: func(string, bool) error { mark("delete"); return nil },
+		startFn:  func(string) (string, bool) { mark("start directory"); return "", false },
+	}
+	sessions := &mockSessionService{
+		sessions: []session.Session{{Name: "work"}},
+		paneDir:  "/home/user/project",
+	}
+	router := NewRouter(testRouterConfig("tok", nil), sessions, svc, &mockTicketIssuer{}, nil)
 
-	rec := authedGet(t, router, "/api/hosts/local/files/list?path=/tmp")
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected a disabled manager to answer 404, got %d", rec.Code)
+	for _, route := range fileRoutes() {
+		// The working-directory route is not refused and is not meant to be: it
+		// reports the session's own directory, and asks the file manager only to
+		// substitute a permitted one when a boundary exists, so a disabled manager
+		// changes nothing about its answer (see
+		// TestWorkingDirectoryRouteFlagsASubstitutedDirectory). What it shares with
+		// the rest is the part under test here -- that the disabled manager is not
+		// consulted -- so it stays in the loop for that and is not asserted to 404.
+		refused := strings.Contains(route.target, "/files/")
+		t.Run(route.method+" "+route.target, func(t *testing.T) {
+			touched = ""
+			rec := authedRequest(t, router, route.method, route.target, route.body)
+			if refused && rec.Code != http.StatusNotFound {
+				t.Errorf("expected a disabled manager to answer 404, got %d", rec.Code)
+			}
+			if touched != "" {
+				t.Errorf("a disabled manager reached the service: %s", touched)
+			}
+		})
 	}
 }
 
@@ -330,12 +379,13 @@ func TestReadReportsWhetherTheContentsAreBinary(t *testing.T) {
 // limit rather than the 64 KiB limit every other route uses.
 func TestWriteRouteBoundsTheBodyByTheFileLimit(t *testing.T) {
 	const limit = 16
-	svc := &mockFileService{writeFn: func(_ string, body io.Reader, _ int64, _ *int64) (int64, error) {
+	write := func(_ string, body io.Reader, _ int64, _ *files.ExpectedMtime, _ bool) (files.WriteResult, error) {
 		if _, err := io.ReadAll(body); err != nil {
-			return 0, err
+			return files.WriteResult{}, err
 		}
-		return 4242, nil
-	}}
+		return files.WriteResult{Mtime: 4242, MtimeNanos: 4242000000}, nil
+	}
+	svc := &mockFileService{writeFn: write}
 
 	cfg := testRouterConfig("tok", nil)
 	cfg.MaxFileSize = limit
@@ -359,6 +409,12 @@ func TestWriteRouteBoundsTheBodyByTheFileLimit(t *testing.T) {
 	decodeBody(t, under, &got)
 	if got.Mtime != 4242 {
 		t.Errorf("expected the new modification time back, got %d", got.Mtime)
+	}
+	// The nanosecond value travels as a string, because as a JSON number it
+	// would be rounded by the client's own arithmetic before it was ever
+	// compared against a file.
+	if got.MtimeNanos != "4242000000" {
+		t.Errorf("expected the exact modification time back as a string, got %q", got.MtimeNanos)
 	}
 }
 
@@ -385,26 +441,112 @@ func TestWriteRouteRequiresAWellFormedDeclaredSize(t *testing.T) {
 // expected_mtime is optional, and its absence is what asks for a forced
 // overwrite, so it has to reach the service as nil rather than as zero.
 func TestWriteRoutePassesAnAbsentExpectedMtimeThrough(t *testing.T) {
-	var seen *int64
-	svc := &mockFileService{writeFn: func(_ string, _ io.Reader, _ int64, mtime *int64) (int64, error) {
+	var seen *files.ExpectedMtime
+	write := func(_ string, _ io.Reader, _ int64, mtime *files.ExpectedMtime, _ bool) (files.WriteResult, error) {
 		seen = mtime
-		return 1, nil
-	}}
+		return files.WriteResult{}, nil
+	}
+	svc := &mockFileService{writeFn: write}
 	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
 
 	if rec := authedPut(t, router, "/api/hosts/local/files/write?path=/tmp/a&size=1", "x"); rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 	if seen != nil {
-		t.Errorf("expected no observed mtime, got %d", *seen)
+		t.Errorf("expected no observed mtime, got %d", seen.Millis)
 	}
 
 	if rec := authedPut(t, router, "/api/hosts/local/files/write?path=/tmp/a&size=1&expected_mtime=7",
 		"x"); rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	if seen == nil || *seen != 7 {
+	if seen == nil || seen.Millis != 7 {
 		t.Errorf("expected the observed mtime 7 to arrive, got %v", seen)
+	}
+}
+
+// The exact modification time is what a save is actually checked against, and
+// it travels separately from the millisecond value because the two have
+// different jobs: one is displayable, the other is comparable.
+func TestWriteRouteCarriesTheExactModificationTime(t *testing.T) {
+	var seen *files.ExpectedMtime
+	write := func(_ string, _ io.Reader, _ int64, mtime *files.ExpectedMtime, _ bool) (files.WriteResult, error) {
+		seen = mtime
+		return files.WriteResult{}, nil
+	}
+	svc := &mockFileService{writeFn: write}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+
+	// A value well past JavaScript's safe integer range, which is the whole
+	// reason this one is not a JSON number.
+	rec := authedPut(t, router,
+		"/api/hosts/local/files/write?path=/tmp/a&size=1&expected_mtime=1760000000123"+
+			"&expected_mtime_nanos=1760000000123456789", "x")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if seen == nil || seen.Nanos == nil {
+		t.Fatalf("expected an exact modification time, got %v", seen)
+	}
+	if *seen.Nanos != 1760000000123456789 {
+		t.Errorf("expected the exact modification time through unchanged, got %d", *seen.Nanos)
+	}
+	if seen.Millis != 1760000000123 {
+		t.Errorf("expected the millisecond value alongside it, got %d", seen.Millis)
+	}
+
+	malformed := authedPut(t, router,
+		"/api/hosts/local/files/write?path=/tmp/a&size=1&expected_mtime_nanos=abc", "x")
+	if malformed.Code != http.StatusBadRequest {
+		t.Errorf("expected a malformed exact time to be refused, got %d", malformed.Code)
+	}
+}
+
+// Replacing a file replaces the inode, so a target reachable under other names
+// loses them: the caller has to agree to that, and this is where the agreement
+// travels. A value that is neither of the two the flag may carry is refused
+// rather than read as one of them -- a flag with three meanings is three
+// callers disagreeing about the other two.
+func TestWriteRouteCarriesTheAgreementAboutOtherNames(t *testing.T) {
+	var seen []bool
+	svc := &mockFileService{
+		writeFn: func(
+			_ string, body io.Reader, _ int64, _ *files.ExpectedMtime, allowOtherNames bool,
+		) (files.WriteResult, error) {
+			if _, err := io.ReadAll(body); err != nil {
+				return files.WriteResult{}, err
+			}
+			seen = append(seen, allowOtherNames)
+			return files.WriteResult{}, nil
+		},
+	}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+
+	for _, tc := range []struct {
+		query string
+		want  bool
+	}{
+		{"", false},
+		{"&allow_other_names=0", false},
+		{"&allow_other_names=1", true},
+	} {
+		rec := authedPut(t, router, "/api/hosts/local/files/write?path=/tmp/a&size=1"+tc.query, "x")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%q: expected 200, got %d", tc.query, rec.Code)
+		}
+		if got := seen[len(seen)-1]; got != tc.want {
+			t.Errorf("%q: the service was told allowOtherNames=%v", tc.query, got)
+		}
+	}
+
+	// An empty value is the absent flag, which is how every other optional
+	// parameter on these routes reads it; anything that is not one of the two
+	// values is refused.
+	for _, bad := range []string{"true", "2", "-1", "yes"} {
+		rec := authedPut(t, router, "/api/hosts/local/files/write?path=/tmp/a&size=1&allow_other_names="+bad, "x")
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%q: expected a refusal, got %d", bad, rec.Code)
+		}
 	}
 }
 
@@ -457,6 +599,84 @@ func TestFileOperationRoutesCarryTheirBodies(t *testing.T) {
 	}
 	if deleted.path != "/tmp/a" || !deleted.recursive {
 		t.Errorf("delete decoded %+v", deleted)
+	}
+}
+
+// The create route carried out whatever the body said, including a body that did
+// not say what to create: `kind` was compared against the name for a directory
+// and everything else -- absent, misspelled, from another version -- created a
+// file. A caller that asked for a directory and was handed a file at that path,
+// with a success status, has been told something untrue about its own filesystem.
+func TestCreateRouteRequiresAKindItKnows(t *testing.T) {
+	created := 0
+	var lastDir bool
+	svc := &mockFileService{
+		createFn: func(_ string, isDir bool) error {
+			created++
+			lastDir = isDir
+			return nil
+		},
+	}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+
+	for _, body := range []string{
+		`{"path":"/tmp/x","kind":"directory"}`,
+		`{"path":"/tmp/x","kind":"DIR"}`,
+		`{"path":"/tmp/x","kind":""}`,
+		`{"path":"/tmp/x"}`,
+		`{}`,
+	} {
+		rec := authedRequest(t, router, http.MethodPost, "/api/hosts/local/files/create", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: expected a refusal, got %d", body, rec.Code)
+		}
+	}
+	if created != 0 {
+		t.Errorf("expected nothing to be created, got %d creations", created)
+	}
+
+	// Both kinds it does know still work, so the refusal above is about the value
+	// and not about the field.
+	for body, wantDir := range map[string]bool{
+		`{"path":"/tmp/x","kind":"file"}`: false,
+		`{"path":"/tmp/x","kind":"dir"}`:  true,
+	} {
+		rec := authedRequest(t, router, http.MethodPost, "/api/hosts/local/files/create", body)
+		if rec.Code != http.StatusNoContent {
+			t.Errorf("%s: expected 204, got %d", body, rec.Code)
+		}
+		if lastDir != wantDir {
+			t.Errorf("%s: expected isDir=%v, got %v", body, wantDir, lastDir)
+		}
+	}
+}
+
+// Every file request is one JSON object, and the routes act on what it says. A
+// field this hub does not know, a second object after the first, and no body at
+// all are refused rather than read for the parts that are understood: silently
+// ignoring what it does not recognise is how a create, a move, or a delete turns
+// into an action the caller did not ask for.
+func TestFileRequestBodiesAreOneKnownObject(t *testing.T) {
+	svc := &mockFileService{
+		createFn: func(string, bool) error { return nil },
+		renameFn: func(string, string) error { return nil },
+		deleteFn: func(string, bool) error { return nil },
+	}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+
+	for _, route := range []string{"create", "rename", "delete"} {
+		for _, body := range []string{
+			``,
+			`{"path":"/tmp/x","kind":"file","extra":1}`,
+			`{"path":"/tmp/x","kind":"file"}{"path":"/tmp/y","kind":"file"}`,
+			`{"path":"/tmp/x","kind":"file"} trailing`,
+			`not json`,
+		} {
+			rec := authedRequest(t, router, http.MethodPost, "/api/hosts/local/files/"+route, body)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("%s %s: expected a refusal, got %d", route, body, rec.Code)
+			}
+		}
 	}
 }
 
@@ -550,5 +770,89 @@ func TestFileRoutesRejectANonLocalHost(t *testing.T) {
 	rec := authedGet(t, router, "/api/hosts/remote/files/list?path=/tmp")
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected a non-local host to map to 404, got %d", rec.Code)
+	}
+}
+
+// The length that was checked against the limit is the length that is served.
+//
+// The bug this pins: the service measured the descriptor and the transport then
+// measured the file again, so a file that grew in between was sent at its new
+// size -- past a limit that had already passed, with X-File-Size describing a
+// length the body did not have.
+func TestReadRouteServesExactlyTheLengthItAuthorized(t *testing.T) {
+	result := openReadResult(t, "0123456789")
+	// The descriptor holds ten bytes; four is what was authorized.
+	result.Size = 4
+	svc := &mockFileService{readFn: func(string) (files.ReadResult, error) {
+		return result, nil
+	}}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+
+	rec := authedGet(t, router, "/api/hosts/local/files/read?path=/tmp/grew.log")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if got := rec.Body.String(); got != "0123" {
+		t.Errorf("expected the authorized bytes alone, got %q", got)
+	}
+	if got := rec.Header().Get("Content-Length"); got != "4" {
+		t.Errorf("expected Content-Length 4, got %q", got)
+	}
+	if got := rec.Header().Get("X-File-Size"); got != "4" {
+		t.Errorf("expected X-File-Size 4, got %q", got)
+	}
+}
+
+// The exact modification time is exposed for the client to carry back, and it is
+// a decimal string because the number would not survive the client's arithmetic.
+func TestReadRouteExposesTheExactModificationTime(t *testing.T) {
+	result := openReadResult(t, "contents")
+	result.Mtime = 1760000000123
+	result.MtimeNanos = 1760000000123456789
+	svc := &mockFileService{readFn: func(string) (files.ReadResult, error) {
+		return result, nil
+	}}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+
+	rec := authedGet(t, router, "/api/hosts/local/files/read?path=/tmp/a.txt")
+	if got := rec.Header().Get("X-File-Mtime"); got != "1760000000123" {
+		t.Errorf("expected the millisecond value, got %q", got)
+	}
+	if got := rec.Header().Get("X-File-Mtime-Nanos"); got != "1760000000123456789" {
+		t.Errorf("expected the exact value as a string, got %q", got)
+	}
+}
+
+// A file truncated between the size check and the transfer is served as what it
+// holds now, reported at that length.
+//
+// The bug this pins: the section handed to ServeContent was bounded by the
+// authorized length alone. A shortened file then produced a response whose
+// Content-Length promised ten bytes and whose body carried four -- a framing
+// error the browser reports as a failed transfer, which says nothing about the
+// file. A short body reported as short is simply what the file holds now.
+func TestReadRouteServesAShortenedFileAtItsNewLength(t *testing.T) {
+	result := openReadResult(t, "0123456789")
+	// The file loses six bytes after the service measured it.
+	if err := result.File.Truncate(4); err != nil {
+		t.Fatal(err)
+	}
+	svc := &mockFileService{readFn: func(string) (files.ReadResult, error) {
+		return result, nil
+	}}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+
+	rec := authedGet(t, router, "/api/hosts/local/files/read?path=/tmp/shrunk.log")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if got := rec.Body.String(); got != "0123" {
+		t.Errorf("expected what the file holds now, got %q", got)
+	}
+	if got := rec.Header().Get("Content-Length"); got != "4" {
+		t.Errorf("expected Content-Length 4, got %q", got)
+	}
+	if got := rec.Header().Get("X-File-Size"); got != "4" {
+		t.Errorf("expected X-File-Size 4, got %q", got)
 	}
 }

@@ -114,6 +114,114 @@ test('forgetDirectory drops what was cached for a path', async () => {
   assert.equal(calls.length, 2)
 })
 
+/**
+ * deferredList answers each listing only when the test says so, so two waits for
+ * one directory can be made to finish in the order the test chooses rather than
+ * the order they were sent.
+ */
+function deferredList() {
+  const waiting: { path: string; release: (entries: Entry[]) => void }[] = []
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input)
+    const path = new URL(url, 'http://localhost').searchParams.get('path') ?? ''
+    return await new Promise<Response>((resolve) => {
+      waiting.push({
+        path,
+        release: (entries) =>
+          resolve(
+            new Response(JSON.stringify({ path, entries, truncated: false }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }),
+          ),
+      })
+    })
+  }) as typeof fetch
+  return waiting
+}
+
+// Two waits for one directory overlap whenever a navigation and a refresh name
+// it, and the header stays live while a load is in flight. The older answer can
+// therefore land last, and it describes the disk as it was when it was read --
+// so what the tree renders is decided by which of the two is allowed to write.
+test('the older of two waits for one directory does not write it', async () => {
+  setup()
+  const waits = deferredList()
+  const state = createTreeState()
+
+  const older = loadDirectory(state, '/srv', true)
+  const newer = loadDirectory(state, '/srv', true)
+  assert.equal(waits.length, 2, 'both waits should have gone to the hub')
+
+  waits[1].release([entry('newer.txt')])
+  assert.deepEqual(await newer, [entry('newer.txt')])
+  waits[0].release([entry('older.txt')])
+  // The superseded wait still answers its caller -- what it read is what that
+  // caller asked for -- and only the cache is kept from it.
+  assert.deepEqual(await older, [entry('older.txt')])
+
+  assert.deepEqual(cachedChildren(state, '/srv'), [entry('newer.txt')])
+})
+
+// The other half of the same rule: a listing that was dropped while it was
+// travelling must not be put back by its own answer. What dropped it is what
+// knows the directory no longer describes anything.
+test('a directory forgotten while its listing travelled does not get it back', async () => {
+  setup()
+  const waits = deferredList()
+  const state = createTreeState()
+
+  const travelling = loadDirectory(state, '/srv', true)
+  forgetDirectory(state, '/srv')
+  waits[0].release([entry('gone.txt')])
+  await travelling
+
+  assert.equal(cachedChildren(state, '/srv'), undefined)
+  assert.equal(isExpanded(state, '/srv'), false)
+})
+
+// A call answered from the cache makes no claim about the disk, so it must not
+// retire a wait that does. Issuing the ticket before the cache check would leave
+// the stale listing in place and drop the answer that was coming.
+test('an answer from the cache does not retire a listing that is travelling', async () => {
+  setup()
+  const waits = deferredList()
+  const state = createTreeState()
+
+  const first = loadDirectory(state, '/srv')
+  waits[0].release([entry('old.txt')])
+  await first
+
+  const forced = loadDirectory(state, '/srv', true)
+  assert.deepEqual(
+    await loadDirectory(state, '/srv'),
+    [entry('old.txt')],
+    'the second read should have been served from the cache',
+  )
+
+  waits[1].release([entry('new.txt')])
+  await forced
+  assert.deepEqual(cachedChildren(state, '/srv'), [entry('new.txt')])
+})
+
+// And the rule does not outlive what it is for: a directory that was dropped and
+// then read again is written by the read that follows.
+test('a directory invalidated and read again is written by the later read', async () => {
+  setup()
+  const waits = deferredList()
+  const state = createTreeState()
+
+  const first = loadDirectory(state, '/srv', true)
+  waits[0].release([entry('before.txt')])
+  await first
+  invalidateDirectory(state, '/srv')
+
+  const again = loadDirectory(state, '/srv', true)
+  waits[1].release([entry('after.txt')])
+  await again
+  assert.deepEqual(cachedChildren(state, '/srv'), [entry('after.txt')])
+})
+
 // The tree is rendered from this, so it decides what a user can actually see.
 test('visibleRows shows the root plus whatever is expanded beneath it', () => {
   const state = createTreeState()

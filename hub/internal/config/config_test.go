@@ -891,6 +891,30 @@ func TestConfig_FilesRoots(t *testing.T) {
 			t.Fatal("expected a root that is not a directory to be rejected")
 		}
 	})
+
+	// A disabled file manager resolves nothing, so a root it could not resolve is
+	// not an error: nothing carries out a path operation, nothing opens a root,
+	// and a hub whose terminal and sessions work must not refuse to start over a
+	// directory it will never look at.
+	t.Run("a disabled file manager does not need a usable root", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "not-mounted")
+		cfg, err := load(t, "files:\n  enabled: false\n  roots:\n    - "+strconv.Quote(missing)+"\n")
+		if err != nil {
+			t.Fatalf("a root that cannot be resolved must not stop a disabled file manager: %v", err)
+		}
+		if len(cfg.Files.Roots) != 1 || cfg.Files.Roots[0] != missing {
+			t.Errorf("expected the root to stay as written, got %v", cfg.Files.Roots)
+		}
+	})
+
+	// And the check is only skipped, not dropped: the same root is still refused
+	// where it would be a boundary.
+	t.Run("an enabled file manager still needs a usable root", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "not-mounted")
+		if _, err := load(t, "files:\n  roots:\n    - "+strconv.Quote(missing)+"\n"); err == nil {
+			t.Fatal("expected an unusable root to be rejected while the file manager is on")
+		}
+	})
 }
 
 func TestConfig_ExtremeDurationsAndUnits(t *testing.T) {
