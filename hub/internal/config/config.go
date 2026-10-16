@@ -42,6 +42,7 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 
 // Config defines the complete strongly typed runtime configuration.
 type Config struct {
+	Hosts     HostsConfig     `yaml:"hosts"`
 	Version   int             `yaml:"version"`
 	Server    ServerConfig    `yaml:"server"`
 	Auth      AuthConfig      `yaml:"auth"`
@@ -141,4 +142,17 @@ type FilesConfig struct {
 	Roots         []string `yaml:"roots"`
 	MaxFileSize   int64    `yaml:"max_file_size"`
 	MaxDirEntries int      `yaml:"max_dir_entries"`
+}
+
+// HostsConfig configures private storage and bounded remote work. Empty paths
+// select lazy OS-user defaults; supplied paths are validated at startup.
+type HostsConfig struct {
+	StateDir          string   `yaml:"state_dir"`
+	MasterKeyFile     string   `yaml:"master_key_file"`
+	DialTimeout       Duration `yaml:"dial_timeout"`
+	HandshakeTimeout  Duration `yaml:"handshake_timeout"`
+	OperationTimeout  Duration `yaml:"operation_timeout"`
+	KeepaliveInterval Duration `yaml:"keepalive_interval"`
+	MaxBackoff        Duration `yaml:"max_backoff"`
+	MaxConnections    int      `yaml:"max_connections"`
 }

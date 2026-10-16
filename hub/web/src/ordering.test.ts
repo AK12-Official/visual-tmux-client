@@ -89,3 +89,61 @@ test('applyOrder in manual mode orders by pinned, specified order, and appends u
     ['pinned-2', 'pinned-1', 'beta', 'alpha', 'unseen-1', 'unseen-2'],
   )
 })
+
+test('ordering and pins are scoped by hostId', () => {
+  setupMockStorage()
+  localStorage.clear()
+
+  const localState: OrderState = {
+    mode: 'manual',
+    order: ['local-1', 'local-2'],
+    pinned: ['local-1'],
+  }
+  const remoteState: OrderState = {
+    mode: 'manual',
+    order: ['remote-a', 'remote-b'],
+    pinned: ['remote-b'],
+  }
+
+  saveOrder(localState, 'local')
+  saveOrder(remoteState, 'remote-1')
+
+  assert.deepEqual(loadOrder('local'), localState)
+  assert.deepEqual(loadOrder('remote-1'), remoteState)
+  // Non-configured remote host returns default empty state
+  assert.deepEqual(loadOrder('remote-2'), { mode: 'default', order: [], pinned: [] })
+})
+
+test('legacy pre-multi-host preferences migrate once to local host only', () => {
+  setupMockStorage()
+  localStorage.clear()
+
+  const legacyState: OrderState = {
+    mode: 'manual',
+    order: ['legacy-sess-1', 'legacy-sess-2'],
+    pinned: ['legacy-sess-1'],
+  }
+  // Store directly in legacy key 'vtc:order'
+  localStorage.setItem('vtc:order', JSON.stringify(legacyState))
+
+  // Calling loadOrder for a remote host does NOT adopt legacy preferences
+  const remoteLoaded = loadOrder('remote-host')
+  assert.deepEqual(remoteLoaded, { mode: 'default', order: [], pinned: [] })
+
+  // Calling loadOrder for local host migrates the preferences
+  const localLoaded = loadOrder('local')
+  assert.deepEqual(localLoaded, legacyState)
+
+  // Legacy key has been cleared / migrated
+  assert.equal(localStorage.getItem('vtc:order'), null)
+
+  // Modifying local preferences persists under vtc:order:local and does not resurrect legacy key
+  const updatedLocal: OrderState = {
+    mode: 'manual',
+    order: ['legacy-sess-2'],
+    pinned: [],
+  }
+  saveOrder(updatedLocal, 'local')
+  assert.deepEqual(loadOrder('local'), updatedLocal)
+  assert.equal(localStorage.getItem('vtc:order'), null)
+})

@@ -8,11 +8,13 @@ const props = defineProps<{
   alive: boolean
   /** Terminal font size in px, owned and persisted by App.vue. */
   fontSize?: number
+  /** Host identifier, defaults to 'local'. */
+  hostId?: string
 }>()
 const emit = defineEmits<{
-  (e: 'state', session: string, state: ConnState): void
+  (e: 'state', session: string, state: ConnState, hostId: string): void
   (e: 'notice', message: string, level?: NoticeLevel): void
-  (e: 'activity', session: string): void
+  (e: 'activity', session: string, hostId: string): void
 }>()
 
 const el = ref<HTMLDivElement | null>(null)
@@ -45,12 +47,13 @@ function attach(): void {
         onState: (s, detail) => {
           state.value = s
           endedDetail.value = s === 'ended' ? detail ?? null : null
-          emit('state', currentName(), s)
+          emit('state', currentName(), s, props.hostId ?? 'local')
         },
         onNotice: (message, level) => emit('notice', message, level),
-        onActivity: () => emit('activity', currentName()),
+        onActivity: () => emit('activity', currentName(), props.hostId ?? 'local'),
       },
       props.fontSize,
+      props.hostId ?? 'local',
     )
   } catch (err) {
     emit('notice', `Terminal init failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -86,7 +89,7 @@ watch(
   () => props.session,
   (name) => {
     session?.setSession(name)
-    emit('state', name, state.value)
+    emit('state', name, state.value, props.hostId ?? 'local')
   },
 )
 

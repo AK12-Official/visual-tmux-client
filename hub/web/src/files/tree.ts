@@ -164,6 +164,7 @@ export async function loadDirectory(
   state: TreeState,
   path: string,
   force = false,
+  hostId = 'local',
 ): Promise<Entry[]> {
   if (!force) {
     const cached = state.children.get(path)
@@ -172,7 +173,7 @@ export async function loadDirectory(
   // Issued after the cache check, because a call that answers from the cache
   // makes no claim about the disk and must not retire a wait that does.
   const ticket = issue(state, path)
-  const result = await listDirectory(path)
+  const result = await listDirectory(path, hostId)
   if (state.loads.get(path) !== ticket) return result.entries
   state.children.set(path, result.entries)
   if (result.truncated) {

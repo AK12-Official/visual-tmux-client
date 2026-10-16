@@ -7,10 +7,12 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/auth"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/config"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/files"
+	"github.com/AK12-Official/visual-tmux-client/hub/internal/host"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/session"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/terminal"
 	thttp "github.com/AK12-Official/visual-tmux-client/hub/internal/transport/http"
@@ -37,7 +39,9 @@ type App struct {
 	// files is held rather than only handed to the router, because it owns the
 	// descriptors the configured roots are acted through and is the only thing
 	// that can give them back. See Shutdown.
-	files *files.Service
+	files    *files.Service
+	registry *host.Registry
+	connMgr  *host.ConnectionManager
 }
 
 // BrowserURL turns a listen address into a clickable browser URL.
@@ -81,19 +85,7 @@ func New(cfg *config.Config, prov config.Provenance, staticFS fs.FS, opt ...Opti
 	terminalManager := terminal.NewManager(cfg.Shutdown.AttachmentTimeout.Duration())
 	ticketStore := auth.NewTicketStore(cfg.Auth.TicketTTL.Duration(), nil)
 
-	var procFact terminal.ProcessFactory
-	var sessBackend session.Backend
-
-	if opts.ProcessFact != nil && opts.Backend != nil {
-		procFact = opts.ProcessFact
-		sessBackend = opts.Backend
-	} else {
-		// Normal production tmux client
-		client := sessionBackendFactory(cfg.Tmux.Path, opts.Socket)
-		procFact = client
-		sessBackend = client
-	}
-
+	procFact, sessBackend := resolveLocalBackend(cfg, opts)
 	sessionService := session.NewService(sessBackend)
 
 	fileService, err := newFileService(cfg)
@@ -101,28 +93,31 @@ func New(cfg *config.Config, prov config.Provenance, staticFS fs.FS, opt ...Opti
 		return nil, err
 	}
 
-	termOpts := terminal.Options{
-		MaxDimension:             cfg.Terminal.MaxDimension,
-		StagingBufferBytes:       cfg.Terminal.StagingBufferBytes,
-		OutputHighWaterBytes:     cfg.Terminal.OutputHighWaterBytes,
-		OutputLowWaterBytes:      cfg.Terminal.OutputLowWaterBytes,
-		BackpressurePollInterval: cfg.Terminal.BackpressurePollInterval.Duration(),
-		ControlWriteTimeout:      cfg.WebSocket.ControlWriteTimeout.Duration(),
-		OutputWriteTimeout:       cfg.WebSocket.OutputWriteTimeout.Duration(),
-		ExitWriteTimeout:         cfg.WebSocket.ExitWriteTimeout.Duration(),
-		InputChunkSize:           defaultInputChunkSize,
+	registry, err := host.NewRegistry(context.Background(), cfg.Hosts.StateDir, cfg.Hosts.MasterKeyFile)
+	if err != nil {
+		fileService.Close()
+		return nil, fmt.Errorf("host registry: %w", err)
 	}
 
-	wsOpts := ws.Options{
-		Origin:          cfg.WebSocket.Origin,
-		MaxInputMessage: cfg.WebSocket.MaxInputMessageBytes,
-		MaxDimension:    cfg.Terminal.MaxDimension,
-		TerminalOptions: termOpts,
-	}
+	wsOpts := newWSOptions(cfg)
 
-	wsHandler := ws.NewHandler(
+	connMgr := host.NewConnectionManager(host.DefaultConnectionConfig(), registry)
+
+	localTarget := host.Target{
+		HostID:             host.LocalID,
+		Revision:           host.LocalRevision,
+		ConnectionRevision: host.LocalRevision,
+	}
+	localRuntime := host.Runtime{
+		Target:    localTarget,
+		Sessions:  sessionService,
+		Files:     fileService,
+		Processes: procFact,
+	}
+	runtimeResolver := host.NewMultiHostResolver(localRuntime, registry, connMgr)
+	wsHandler := ws.NewHandlerWithResolver(
 		ticketStore,
-		procFact,
+		runtimeResolver,
 		terminalManager,
 		wsOpts,
 		nil,
@@ -130,8 +125,12 @@ func New(cfg *config.Config, prov config.Provenance, staticFS fs.FS, opt ...Opti
 	)
 
 	routerCfg := newRouterConfig(cfg, staticFS)
+	routerCfg.Hosts = registry
+	routerCfg.OnHostChanged = connMgr.Invalidate
+	routerCfg.Capabilities = connMgr
+	routerCfg.TrustStore = host.NewTrustStore(defaultTrustStoreTTL)
 
-	router := thttp.NewRouter(routerCfg, sessionService, fileService, ticketStore, wsHandler)
+	router := thttp.NewRouterWithResolver(routerCfg, runtimeResolver, ticketStore, wsHandler)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Server.Addr,
@@ -149,6 +148,8 @@ func New(cfg *config.Config, prov config.Provenance, staticFS fs.FS, opt ...Opti
 		tmuxClient: procFact,
 		sessions:   sessionService,
 		files:      fileService,
+		registry:   registry,
+		connMgr:    connMgr,
 	}, nil
 }
 
@@ -266,5 +267,42 @@ func (a *App) Shutdown(ctx context.Context) error {
 		a.files.Close()
 	}
 
+	if a.connMgr != nil {
+		errs = append(errs, a.connMgr.Close())
+	}
+	if a.registry != nil {
+		errs = append(errs, a.registry.Close())
+	}
 	return errors.Join(errs...)
+}
+
+const defaultTrustStoreTTL = 5 * time.Minute
+
+func resolveLocalBackend(cfg *config.Config, opts Options) (terminal.ProcessFactory, session.Backend) {
+	if opts.ProcessFact != nil && opts.Backend != nil {
+		return opts.ProcessFact, opts.Backend
+	}
+	client := sessionBackendFactory(cfg.Tmux.Path, opts.Socket)
+	return client, client
+}
+
+func newWSOptions(cfg *config.Config) ws.Options {
+	termOpts := terminal.Options{
+		MaxDimension:             cfg.Terminal.MaxDimension,
+		StagingBufferBytes:       cfg.Terminal.StagingBufferBytes,
+		OutputHighWaterBytes:     cfg.Terminal.OutputHighWaterBytes,
+		OutputLowWaterBytes:      cfg.Terminal.OutputLowWaterBytes,
+		BackpressurePollInterval: cfg.Terminal.BackpressurePollInterval.Duration(),
+		ControlWriteTimeout:      cfg.WebSocket.ControlWriteTimeout.Duration(),
+		OutputWriteTimeout:       cfg.WebSocket.OutputWriteTimeout.Duration(),
+		ExitWriteTimeout:         cfg.WebSocket.ExitWriteTimeout.Duration(),
+		InputChunkSize:           defaultInputChunkSize,
+	}
+
+	return ws.Options{
+		Origin:          cfg.WebSocket.Origin,
+		MaxInputMessage: cfg.WebSocket.MaxInputMessageBytes,
+		MaxDimension:    cfg.Terminal.MaxDimension,
+		TerminalOptions: termOpts,
+	}
 }

@@ -63,10 +63,12 @@ export function isFileApiError(err: unknown, code: string): boolean {
   return err instanceof FileApiError && err.code === code
 }
 
-const BASE = '/api/hosts/local/files'
+function basePath(hostId = 'local'): string {
+  return `/api/hosts/${encodeURIComponent(hostId)}/files`
+}
 
-function withPath(route: string, path: string): string {
-  return `${BASE}/${route}?path=${encodeURIComponent(path)}`
+function withPath(route: string, path: string, hostId = 'local'): string {
+  return `${basePath(hostId)}/${route}?path=${encodeURIComponent(path)}`
 }
 
 async function request(target: string, init?: RequestInit): Promise<Response> {
@@ -75,8 +77,8 @@ async function request(target: string, init?: RequestInit): Promise<Response> {
   return res
 }
 
-export async function listDirectory(path: string): Promise<ListResult> {
-  const res = await request(withPath('list', path))
+export async function listDirectory(path: string, hostId = 'local'): Promise<ListResult> {
+  const res = await request(withPath('list', path, hostId))
   const data = (await res.json()) as Partial<ListResult> | null
   return {
     path: typeof data?.path === 'string' ? data.path : path,
@@ -210,8 +212,8 @@ async function releaseBody(res: Response): Promise<void> {
   }
 }
 
-export async function readFile(path: string): Promise<FileContents> {
-  const res = await request(withPath('read', path))
+export async function readFile(path: string, hostId = 'local'): Promise<FileContents> {
+  const res = await request(withPath('read', path, hostId))
   let stamp: Stamp
   try {
     stamp = stampOf(res)
@@ -264,8 +266,12 @@ export type ImageBytes = { blob: Blob } | { tooLarge: number }
  * that grew since it was listed is exactly the case this exists for, and the
  * listing cannot know about it.
  */
-export async function readFileBytes(path: string, limit: number): Promise<ImageBytes> {
-  const res = await request(withPath('read', path))
+export async function readFileBytes(
+  path: string,
+  limit: number,
+  hostId = 'local',
+): Promise<ImageBytes> {
+  const res = await request(withPath('read', path, hostId))
   const reported = headerSize(res)
   if (reported !== null && reported > limit) {
     await releaseBody(res)
@@ -312,8 +318,8 @@ export interface FileProbe {
  * anyway. A caller that goes on to read the file pays for that twice, which is
  * the price of asking before deciding rather than deciding from a name.
  */
-export async function probeFile(path: string): Promise<FileProbe> {
-  const res = await request(withPath('read', path), { method: 'HEAD' })
+export async function probeFile(path: string, hostId = 'local'): Promise<FileProbe> {
+  const res = await request(withPath('read', path, hostId), { method: 'HEAD' })
   await releaseBody(res)
   return {
     binary: res.headers.get('X-File-Binary') === '1',
@@ -326,8 +332,8 @@ export async function probeFile(path: string): Promise<FileProbe> {
  * plain link because the hub requires the bearer token, which a navigation
  * cannot carry.
  */
-export async function downloadFile(path: string): Promise<Blob> {
-  const res = await request(withPath('download', path))
+export async function downloadFile(path: string, hostId = 'local'): Promise<Blob> {
+  const res = await request(withPath('download', path, hostId))
   return await res.blob()
 }
 
@@ -352,6 +358,7 @@ export async function writeFile(
   body: string,
   expected: Stamp | null,
   allowOtherNames = false,
+  hostId = 'local',
 ): Promise<Stamp | null> {
   const query = new URLSearchParams({
     path,
@@ -367,7 +374,7 @@ export async function writeFile(
   // keep the contents they had. It is sent only when the user has confirmed.
   if (allowOtherNames) query.set('allow_other_names', '1')
 
-  const res = await request(`${BASE}/write?${query.toString()}`, {
+  const res = await request(`${basePath(hostId)}/write?${query.toString()}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/octet-stream' },
     body,
@@ -386,24 +393,32 @@ export async function writeFile(
   return optionalStamp(data?.mtime, data?.mtime_nanos)
 }
 
-async function post(route: string, payload: unknown): Promise<void> {
-  await request(`${BASE}/${route}`, {
+async function post(route: string, payload: unknown, hostId = 'local'): Promise<void> {
+  await request(`${basePath(hostId)}/${route}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
 }
 
-export async function createEntry(path: string, isDir: boolean): Promise<void> {
-  await post('create', { path, kind: isDir ? 'dir' : 'file' })
+export async function createEntry(path: string, isDir: boolean, hostId = 'local'): Promise<void> {
+  await post('create', { path, kind: isDir ? 'dir' : 'file' }, hostId)
 }
 
-export async function renameEntry(path: string, newPath: string): Promise<void> {
-  await post('rename', { path, new_path: newPath })
+export async function renameEntry(
+  path: string,
+  newPath: string,
+  hostId = 'local',
+): Promise<void> {
+  await post('rename', { path, new_path: newPath }, hostId)
 }
 
-export async function deleteEntry(path: string, recursive: boolean): Promise<void> {
-  await post('delete', { path, recursive })
+export async function deleteEntry(
+  path: string,
+  recursive: boolean,
+  hostId = 'local',
+): Promise<void> {
+  await post('delete', { path, recursive }, hostId)
 }
 
 /** StartDirectory is where the manager opens, and whether the hub substituted it. */
@@ -423,8 +438,11 @@ export interface StartDirectory {
  * read once, as a seed: the boundary is decided the same way wherever the user
  * navigates afterwards, so a later pane change never moves an open manager.
  */
-export async function fetchWorkingDirectory(session: string): Promise<StartDirectory> {
-  const target = `/api/hosts/local/sessions/${encodeURIComponent(session)}/working-directory`
+export async function fetchWorkingDirectory(
+  session: string,
+  hostId = 'local',
+): Promise<StartDirectory> {
+  const target = `/api/hosts/${encodeURIComponent(hostId)}/sessions/${encodeURIComponent(session)}/working-directory`
   const res = await request(target)
   const data = (await res.json()) as { path?: unknown; substituted?: unknown } | null
   return {

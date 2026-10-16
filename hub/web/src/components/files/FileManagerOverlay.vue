@@ -1,4 +1,5 @@
 <script setup lang="ts">
+defineOptions({ name: 'FileManagerOverlay' })
 // The file manager. It owns every piece of its own state -- the loaded tree, the
 // open tabs, the dirty set -- and discards all of it on close, so nothing here
 // outlives the panel and no store or route is needed.
@@ -24,11 +25,13 @@ import { createPathChanges } from '../../files/pathChanges'
 import { getConfig } from '../../config'
 import type { Classification } from '../../files/classification'
 import { choosePreview, editable, namesAnImage, presentation, wantsText } from '../../files/preview'
+import { testHostCapabilities, type HostCapabilities } from '../../api'
 import {
   anyDirty,
   beginSave,
   isDirty,
   panelElementId,
+  reconcileTab,
   saveOpenFile,
   settleSave,
   tabElementId,
@@ -53,12 +56,20 @@ import MarkdownPreview from './MarkdownPreview.vue'
 // filesystem through the API, which does not need the session to exist -- so a
 // null one means "no seed", not "close the manager". Killing the session the
 // manager was opened from must not take unsaved edits with it.
-const props = defineProps<{ session: string | null }>()
+const props = defineProps<{
+  session: string | null
+  hostId?: string
+  hostName?: string
+  hostRevision?: number
+  hostCapabilities?: HostCapabilities
+  availableHostIds?: string[]
+}>()
+const host = computed(() => props.hostId ?? 'local')
 const emit = defineEmits<{
   (e: 'close'): void
-  (e: 'notice', text: string, level: 'error' | 'warning'): void
-  (e: 'insert-path', text: string): void
-  (e: 'dirty-change', dirty: boolean): void
+  (e: 'notice', text: string, level: 'error' | 'warning' | 'info'): void
+  (e: 'insert-path', text: string, hostId?: string): void
+  (e: 'dirty-change', dirty: boolean, dirtyHosts?: string[]): void
 }>()
 
 const tree = reactive(createTreeState())
@@ -82,6 +93,7 @@ const failure = ref('')
 const navError = ref('')
 const tabs = ref<OpenFile[]>([])
 const activePath = ref<string | null>(null)
+const activeTabId = ref<number | null>(null)
 const markdownView = reactive(new Map<string, 'source' | 'preview'>())
 const menu = ref<{
   x: number
@@ -120,7 +132,13 @@ const deleting = createPending()
 // matched to a session rather than to a path.
 let nextTabId = 1
 
-const active = computed(() => tabs.value.find((tab) => tab.path === activePath.value) ?? null)
+const active = computed(() => {
+  if (activeTabId.value !== null) {
+    const found = tabs.value.find((tab) => tab.id === activeTabId.value)
+    if (found) return found
+  }
+  return tabs.value.find((tab) => tab.path === activePath.value) ?? null
+})
 const dirty = computed(() => anyDirty(tabs.value))
 const preview = computed(() =>
   active.value === null ? null : presentation(active.value.name, active.value.size, active.value.binary),
@@ -158,7 +176,122 @@ const notShown = computed(() => {
   return 'it is binary or too large to preview'
 })
 
-watch(dirty, (value) => emit('dirty-change', value), { immediate: true })
+const dirtyHosts = computed(() => {
+  const set = new Set<string>()
+  for (const tab of tabs.value) {
+    if (isDirty(tab)) {
+      set.add(tab.hostId ?? 'local')
+    }
+  }
+  return Array.from(set)
+})
+
+watch(
+  [dirty, dirtyHosts],
+  ([isD, dHosts]) => emit('dirty-change', isD, dHosts),
+  { immediate: true },
+)
+
+const capabilitiesByHost = reactive(new Map<string, HostCapabilities>())
+
+function loadHostCapabilities(h: string) {
+  if (h === 'local') {
+    capabilitiesByHost.set('local', {
+      hostId: 'local',
+      online: true,
+      files: { enabled: true, boundary: 'account_bound', rootHandleConfinement: false, atomicReplacement: true },
+    })
+    return
+  }
+  if (props.hostCapabilities && (props.hostCapabilities.hostId === h || !props.hostCapabilities.hostId)) {
+    capabilitiesByHost.set(h, props.hostCapabilities)
+    return
+  }
+  if (!capabilitiesByHost.has(h)) {
+    void testHostCapabilities(h)
+      .then((caps) => capabilitiesByHost.set(h, caps))
+      .catch(() => {})
+  }
+}
+
+watch(
+  () => props.hostCapabilities,
+  (caps) => {
+    if (caps) {
+      const target = caps.hostId ?? props.hostId ?? 'local'
+      capabilitiesByHost.set(target, caps)
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => props.hostId,
+  (newHost) => {
+    if (newHost) loadHostCapabilities(newHost)
+  },
+  { immediate: true },
+)
+
+const activeHost = computed(() => active.value?.hostId ?? host.value)
+
+const hostRemoved = computed(() => {
+  const h = activeHost.value
+  if (h === 'local') return false
+  if (!props.availableHostIds) return false
+  return !props.availableHostIds.includes(h)
+})
+
+const revisionStale = computed(() => {
+  const tab = active.value
+  if (!tab) return false
+  const h = tab.hostId ?? 'local'
+  if (h !== host.value) return false
+  if (tab.revision === undefined || props.hostRevision === undefined) return false
+  return tab.revision !== props.hostRevision
+})
+
+const replacementUnsupported = computed(() => {
+  const h = activeHost.value
+  if (h && h !== 'local') {
+    const caps = capabilitiesByHost.get(h)
+    if (caps?.files && caps.files.atomicReplacement === false) {
+      return true
+    }
+  }
+  return false
+})
+
+const canSaveActive = computed(() => {
+  if (!active.value) return false
+  if (!isDirty(active.value)) return false
+  if (hostRemoved.value) return false
+  if (revisionStale.value) return false
+  if (replacementUnsupported.value) return false
+  return true
+})
+
+const saveButtonTitle = computed(() => {
+  if (hostRemoved.value) {
+    return 'Host has been removed. Remote actions are disabled; drafts remain available for local copying.'
+  }
+  if (revisionStale.value) {
+    return 'Host configuration has changed (revision conflict). Reconcile before saving.'
+  }
+  if (replacementUnsupported.value) {
+    return 'Overwrite is unavailable on this host: remote server does not support atomic replacement (browse and download remain usable)'
+  }
+  return 'save (the hub refuses if the file changed since it was read)'
+})
+
+function discardHostDrafts(targetHostId: string) {
+  tabs.value = tabs.value.filter((t) => (t.hostId ?? 'local') !== targetHostId)
+  if ((active.value?.hostId ?? 'local') === targetHostId) {
+    activePath.value = null
+    activeTabId.value = null
+  }
+}
+
 
 /** REASONS and reasonFor live in files/reasons.ts, where a test can hold them
  * against the codes the hub's file routes actually answer with. A code with no
@@ -228,26 +361,29 @@ function openWithoutReading(
     reportRemoved(entry.name)
     return
   }
-  if (tabs.value.some((tab) => tab.path === at)) {
-    activePath.value = at
+  const existing = tabs.value.find((tab) => tab.path === at && (tab.hostId ?? 'local') === host.value)
+  if (existing) {
+    activePath.value = existing.path
+    activeTabId.value = existing.id
     return
   }
-  tabs.value = [
-    ...tabs.value,
-    {
-      id: nextTabId++,
-      path: at,
-      name: basename(at),
-      text: '',
-      saved: '',
-      // From the listing, which reports milliseconds only. These files are
-      // never saved, so the weaker precision costs nothing.
-      stamp: stampFromList(entry.mtime),
-      size,
-      binary,
-    },
-  ]
+  const newTab: OpenFile = {
+    id: nextTabId++,
+    hostId: host.value,
+    revision: props.hostRevision,
+    path: at,
+    name: basename(at),
+    text: '',
+    saved: '',
+    // From the listing, which reports milliseconds only. These files are
+    // never saved, so the weaker precision costs nothing.
+    stamp: stampFromList(entry.mtime),
+    size,
+    binary,
+  }
+  tabs.value = [...tabs.value, newTab]
   activePath.value = at
+  activeTabId.value = newTab.id
 }
 
 /** onImageTooLarge records the size an image preview refused to render.
@@ -278,7 +414,7 @@ async function goTo(path: string) {
   loading.value = true
   navError.value = ''
   try {
-    await loadDirectory(tree, path, true)
+    await loadDirectory(tree, path, true, host.value)
     if (attempt !== navigationAt) return
     current.value = path
     failure.value = ''
@@ -312,7 +448,7 @@ async function startDirectory(): Promise<void> {
     return
   }
   try {
-    seed = await fetchWorkingDirectory(props.session)
+    seed = await fetchWorkingDirectory(props.session, host.value)
   } catch {
     seed = { path: '', substituted: false }
   }
@@ -330,7 +466,7 @@ async function startDirectory(): Promise<void> {
   let probe = seed.path
   for (;;) {
     try {
-      await loadDirectory(tree, probe)
+      await loadDirectory(tree, probe, false, host.value)
       current.value = probe
       loading.value = false
       if (probe !== seed.path) {
@@ -370,9 +506,10 @@ async function startDirectory(): Promise<void> {
 async function openFile(entry: Entry, path: string) {
   // The path as asked for, not as some earlier rename moved it: nothing has
   // happened *during* this read yet, so there is nothing to correct for.
-  const existing = tabs.value.find((tab) => tab.path === path)
+  const existing = tabs.value.find((tab) => tab.path === path && (tab.hostId ?? 'local') === host.value)
   if (existing) {
     activePath.value = existing.path
+    activeTabId.value = existing.id
     return
   }
   // A second click while the first read is still in flight would otherwise open
@@ -399,7 +536,7 @@ async function openFile(entry: Entry, path: string) {
     // that ever said how big this file is.
     let size = entry.size
     if (kind === 'info') {
-      const probed = await probeFile(path)
+      const probed = await probeFile(path, host.value)
       // The listing's size stands in when the hub did not report one: it is only
       // ever displayed for a file that is not read as text.
       size = probed.size ?? entry.size
@@ -409,7 +546,7 @@ async function openFile(entry: Entry, path: string) {
       }
     }
 
-    const contents = await readFile(path)
+    const contents = await readFile(path, host.value)
     // A rename while this read was travelling moved the file. The tab belongs
     // where the file is now: built at the old name it would look openable and
     // then refuse to save, which is the stranding retargetTabs exists to avoid.
@@ -430,25 +567,28 @@ async function openFile(entry: Entry, path: string) {
     // Two paths can resolve to one name after a rename, and a click on the new
     // name during the flight arrives with a different one -- so the check at the
     // top has to happen again here, or two tabs end up sharing a path.
-    if (tabs.value.some((tab) => tab.path === at)) {
+    const duplicate = tabs.value.find((tab) => tab.path === at && (tab.hostId ?? 'local') === host.value)
+    if (duplicate) {
       activePath.value = at
+      activeTabId.value = duplicate.id
       return
     }
 
-    tabs.value = [
-      ...tabs.value,
-      {
-        id: nextTabId++,
-        path: at,
-        name: basename(at),
-        text: contents.text,
-        saved: contents.text,
-        stamp: contents.stamp,
-        size,
-        binary: contents.binary,
-      },
-    ]
+    const newTab: OpenFile = {
+      id: nextTabId++,
+      hostId: host.value,
+      revision: props.hostRevision,
+      path: at,
+      name: basename(at),
+      text: contents.text,
+      saved: contents.text,
+      stamp: contents.stamp,
+      size,
+      binary: contents.binary,
+    }
+    tabs.value = [...tabs.value, newTab]
     activePath.value = at
+    activeTabId.value = newTab.id
   } catch (err) {
     report(err, `Could not open ${entry.name}`)
   } finally {
@@ -465,7 +605,7 @@ async function toggleDirectory(path: string) {
     return
   }
   try {
-    await loadDirectory(tree, path)
+    await loadDirectory(tree, path, false, host.value)
     tree.expanded.add(path)
   } catch (err) {
     report(err, `Could not expand ${basename(path)}`)
@@ -489,6 +629,36 @@ async function save(
 ) {
   const tab = tabs.value.find((candidate) => candidate.id === tabId)
   if (!tab) return
+  const tabHost = tab.hostId ?? 'local'
+
+  if (hostRemoved.value && tab.id === active.value?.id) {
+    emit(
+      'notice',
+      'Cannot save: host has been removed. Drafts remain available for local copying.',
+      'error',
+    )
+    return
+  }
+  if (revisionStale.value && tab.id === active.value?.id) {
+    emit(
+      'notice',
+      'Cannot save: host configuration has changed (revision conflict). Reconcile before saving.',
+      'error',
+    )
+    return
+  }
+
+  if (tabHost !== 'local') {
+    const caps = capabilitiesByHost.get(tabHost)
+    if (caps?.files && caps.files.atomicReplacement === false) {
+      emit(
+        'notice',
+        'Overwrite is unavailable on this host: remote server does not support atomic replacement.',
+        'error',
+      )
+      return
+    }
+  }
 
   // A file on its way out is not one to write to. The delete below waits for the
   // saves it found travelling, and this is the other direction: a save started
@@ -498,7 +668,7 @@ async function save(
   // The query runs *upwards* -- it is true when this path, or a directory above
   // it, has a delete in flight -- so a file inside a directory being deleted is
   // refused as well as the entry itself.
-  if (deleting.isPending(tab.path)) {
+  if (deleting.isPending(tab.path, tabHost)) {
     // What is known, and no more: a delete of this file, or of a directory above
     // it, has been sent. Whether it will succeed is not known here, and saying
     // the file "is being deleted" and then failing to delete it would be the
@@ -519,12 +689,12 @@ async function save(
   saveTickets.set(tab.id, ticket)
 
   const request = beginSave(tab, force, allowOtherNames)
-  saving.begin(request.path)
+  saving.begin(request.path, tabHost)
   try {
-    const stamp = await saveOpenFile(request)
+    const stamp = await saveOpenFile(request, tabHost)
     if (!isSameTab(tab.id)) return
     if (saveTickets.get(tab.id) !== ticket) return
-    const settled = settleSave(tabs.value, request, stamp, renaming.isPending(request.path))
+    const settled = settleSave(tabs.value, request, stamp, renaming.isPending(request.path, tabHost))
     tabs.value = settled.files
     if (settled.outcome === 'raced') {
       emit(
@@ -557,6 +727,41 @@ async function save(
       report(err, `Could not save ${tab.name}, which moved to ${moved.path} while the save travelled`)
       return
     }
+    if (err instanceof FileApiError && err.code === 'outcome_unknown') {
+      emit(
+        'notice',
+        `Save outcome uncertain for ${tab.name}: the connection dropped during commit. Reconcile by rereading before saving again.`,
+        'warning',
+      )
+      return
+    }
+    if (
+      err instanceof FileApiError &&
+      (err.code === 'host_unsupported' || err.code === 'unsupported_operation')
+    ) {
+      emit(
+        'notice',
+        `Could not save ${tab.name}: overwrite is unavailable because the remote server does not support atomic replacement.`,
+        'error',
+      )
+      return
+    }
+    if (err instanceof FileApiError && err.code === 'host_revision_conflict') {
+      emit(
+        'notice',
+        `Could not save ${tab.name}: the host configuration has changed. Please reconcile before saving.`,
+        'error',
+      )
+      return
+    }
+    if (err instanceof FileApiError && err.code === 'host_not_found') {
+      emit(
+        'notice',
+        `Could not save ${tab.name}: host not found or removed. Drafts remain available for local copying.`,
+        'error',
+      )
+      return
+    }
     if (err instanceof FileApiError && err.code === 'conflict') {
       const overwrite = window.confirm(
         `${tab.name} changed on disk since it was opened. Overwrite it with your version?`,
@@ -572,17 +777,11 @@ async function save(
       // without being told that the user knows what that means: the replacement
       // is a new file, so every other name keeps the contents it had, and the
       // user is the only one who can decide to have it that way.
-      //
-      // The retry saves the tab as it stands when the answer arrives, with the
-      // agreement added -- not a replay of the request that was refused. That is
-      // deliberate: the first click meant "save this", and anything typed while
-      // the refused write travelled is part of what the user meant. The
-      // observation travels with it because the tab has not changed it, and it is
-      // the tab's own, so a save of the newest text is still checked against what
-      // the hub last reported.
+      const isRemote = (tab.hostId ?? host.value) !== 'local'
       const replace = window.confirm(
-        `${tab.name} is reachable under other names as well. Saving replaces this file, and ` +
-          `the other names keep the contents they have now. Save anyway?`,
+        isRemote
+          ? `${tab.name}: remote replacement does not preserve ACLs/xattrs or update other hard-link names (link count cannot be determined). Saving replaces this file, and other names keep the contents they have now. Save anyway?`
+          : `${tab.name} is reachable under other names as well. Saving replaces this file, and other names keep the contents they have now. Save anyway?`,
       )
       if (replace) await save(force, tab.id, true)
       return
@@ -591,7 +790,40 @@ async function save(
   } finally {
     // The path the write named, not the tab's: a rename during the flight moved
     // the tab, and it is the write that was outstanding.
-    saving.end(request.path)
+    saving.end(request.path, tabHost)
+  }
+}
+
+/** reconcile re-reads an open file from disk, reconciling state without silently
+ * discarding local edits. */
+async function reconcile(id: number) {
+  const tab = liveTab(id)
+  if (!tab) return
+  const tabHost = tab.hostId ?? 'local'
+  try {
+    const contents = await readFile(tab.path, tabHost)
+    const currentTab = liveTab(id)
+    if (!currentTab) return
+
+    let discardEdits = false
+    if (currentTab.text !== currentTab.saved && contents.text !== currentTab.text) {
+      discardEdits = window.confirm(
+        `${currentTab.name} has unsaved edits that differ from disk. Discard local edits and reload from disk?`,
+      )
+    }
+
+    const result = reconcileTab(currentTab, contents, discardEdits)
+    tabs.value = tabs.value.map((t) => (t.id === id ? { ...result.file, revision: props.hostRevision } : t))
+
+    if (result.outcome === 'matched') {
+      emit('notice', `${currentTab.name} matches remote file; marked clean.`, 'info')
+    } else if (result.outcome === 'preserved') {
+      emit('notice', `Preserved local edits for ${currentTab.name}.`, 'warning')
+    } else {
+      emit('notice', `Reloaded ${currentTab.name} from disk.`, 'info')
+    }
+  } catch (err) {
+    report(err, `Could not reconcile ${tab.name}`)
   }
 }
 
@@ -623,14 +855,16 @@ function isSameTab(id: number): boolean {
   return liveTab(id) !== undefined
 }
 
-function closeTab(path: string) {
-  const tab = tabs.value.find((candidate) => candidate.path === path)
+function closeTab(path: string, id?: number) {
+  const tab = tabs.value.find((candidate) => id !== undefined ? candidate.id === id : candidate.path === path)
   if (tab && isDirty(tab) && !window.confirm(`${tab.name} has unsaved changes. Close it anyway?`)) {
     return
   }
-  tabs.value = tabs.value.filter((candidate) => candidate.path !== path)
-  if (activePath.value === path) {
-    activePath.value = tabs.value.length > 0 ? tabs.value[tabs.value.length - 1].path : null
+  tabs.value = tabs.value.filter((candidate) => id !== undefined ? candidate.id !== id : candidate.path !== path)
+  if (activeTabId.value === tab?.id || (!activeTabId.value && activePath.value === path)) {
+    const nextTab = tabs.value.length > 0 ? tabs.value[tabs.value.length - 1] : null
+    activeTabId.value = nextTab ? nextTab.id : null
+    activePath.value = nextTab ? nextTab.path : null
   }
   void replaceTabFocus()
 }
@@ -697,7 +931,7 @@ async function resyncExpanded(root: string) {
 
   for (const path of open) {
     try {
-      await loadDirectory(tree, path, true)
+      await loadDirectory(tree, path, true, host.value)
     } catch (err) {
       // A transport failure says nothing about the directory -- it may be there
       // and simply unreachable -- so what is cached stays, and a later refresh
@@ -734,7 +968,7 @@ async function settleMutation(changed: string, destination = '') {
   invalidateDirectory(tree, parent)
   if (parent !== current.value && parentWasOpen) {
     try {
-      await loadDirectory(tree, parent, true)
+      await loadDirectory(tree, parent, true, host.value)
       tree.expanded.add(parent)
     } catch (err) {
       report(err, `Could not reload ${basename(parent)}`)
@@ -758,7 +992,7 @@ async function createHere(isDir: boolean) {
   if (!name) return
   const path = joinPath(current.value, name)
   try {
-    await createEntry(path, isDir)
+    await createEntry(path, isDir, host.value)
     await settleMutation(path)
     if (!isDir) await openFile({ name, is_dir: false, size: 0, mtime: 0 }, path)
   } catch (err) {
@@ -783,11 +1017,14 @@ function retargetTabs(path: string, target: string, name: string) {
   // one path make the editor show whichever was opened first.
   const moving = new Map<number, string>()
   for (const tab of tabs.value) {
+    if ((tab.hostId ?? 'local') !== host.value) continue
     if (tab.path === path) moving.set(tab.id, target)
     else if (tab.path.startsWith(prefix)) moving.set(tab.id, target + tab.path.slice(path.length))
   }
   const taken = new Set(moving.values())
-  const stale = tabs.value.filter((tab) => !moving.has(tab.id) && taken.has(tab.path))
+  const stale = tabs.value.filter(
+    (tab) => (tab.hostId ?? 'local') === host.value && !moving.has(tab.id) && taken.has(tab.path),
+  )
   const lost = stale.filter(isDirty)
   if (lost.length > 0) {
     const names = lost.map((tab) => tab.name).join(', ')
@@ -813,7 +1050,7 @@ function retargetTabs(path: string, target: string, name: string) {
     return [{ id: tab.id, path: destination }]
   })
   tabs.value = tabs.value
-    .filter((tab) => moving.has(tab.id) || !taken.has(tab.path))
+    .filter((tab) => (tab.hostId ?? 'local') !== host.value || moving.has(tab.id) || !taken.has(tab.path))
     .map((tab) => {
       const destination = moving.get(tab.id)
       if (destination === undefined) return tab
@@ -821,9 +1058,12 @@ function retargetTabs(path: string, target: string, name: string) {
     })
   for (const tab of unread) void readRenamedTab(tab.id, tab.path)
 
-  if (activePath.value === path) activePath.value = target
-  else if (activePath.value?.startsWith(prefix)) {
-    activePath.value = target + activePath.value.slice(path.length)
+  const activeTab = active.value
+  if (activeTab && (activeTab.hostId ?? 'local') === host.value) {
+    if (activePath.value === path) activePath.value = target
+    else if (activePath.value?.startsWith(prefix)) {
+      activePath.value = target + activePath.value.slice(path.length)
+    }
   }
 
   // The rendered-or-source choice is keyed by path too, so it moves with the
@@ -860,19 +1100,21 @@ function retargetTabs(path: string, target: string, name: string) {
  * and reopening it reports the same thing in the same words. */
 async function readRenamedTab(id: number, path: string) {
   try {
-    const contents = await readFile(path)
+    const tab = liveTab(id)
+    const tabHost = tab?.hostId ?? host.value
+    const contents = await readFile(path, tabHost)
     const live = liveTab(id)
-    if (!live || live.path !== path || live.binary !== null) return
-    tabs.value = tabs.value.map((tab) =>
-      tab.id === id
+    if (!live || live.path !== path || live.binary !== null || live.text !== live.saved) return
+    tabs.value = tabs.value.map((t) =>
+      t.id === id
         ? {
-            ...tab,
+            ...t,
             text: contents.text,
             saved: contents.text,
             stamp: contents.stamp,
             binary: contents.binary,
           }
-        : tab,
+        : t,
     )
   } catch (err) {
     report(err, `Could not open ${basename(path)}`)
@@ -883,8 +1125,8 @@ function renameTarget(entry: Entry, path: string) {
   const name = window.prompt('Rename to', entry.name)
   if (!name || name === entry.name) return
   const target = joinPath(dirname(path), name)
-  renaming.begin(path)
-  void renameEntry(path, target)
+  renaming.begin(path, host.value)
+  void renameEntry(path, target, host.value)
     .then(() => {
       retargetTabs(path, target, name)
       return settleMutation(path, target)
@@ -896,7 +1138,7 @@ function renameTarget(entry: Entry, path: string) {
       if (focusIsNowhere()) treeRef.value?.focusPath(target)
     })
     .catch((err: unknown) => report(err, `Could not rename ${entry.name}`))
-    .finally(() => renaming.end(path))
+    .finally(() => renaming.end(path, host.value))
 }
 
 async function deleteTarget(entry: Entry, path: string) {
@@ -904,7 +1146,9 @@ async function deleteTarget(entry: Entry, path: string) {
   // Tabs for the entry and for anything it contains: a deleted directory takes
   // its open files with it, and unsaved edits among them are not recoverable.
   const prefix = `${path}/`
-  const doomed = tabs.value.filter((tab) => tab.path === path || tab.path.startsWith(prefix))
+  const doomed = tabs.value.filter(
+    (tab) => (tab.hostId ?? 'local') === host.value && (tab.path === path || tab.path.startsWith(prefix)),
+  )
   const unsaved = doomed.filter(isDirty)
 
   let question = `Delete the ${kind} ${entry.name}? This cannot be undone.`
@@ -955,11 +1199,11 @@ async function deleteTarget(entry: Entry, path: string) {
   const neighbour = treeRef.value?.neighbourOf(path) ?? null
   const listing = current.value
 
-  deleting.begin(path)
+  deleting.begin(path, host.value)
   try {
-    await saving.idle(path)
+    await saving.idle(path, host.value)
 
-    await deleteEntry(path, entry.is_dir)
+    await deleteEntry(path, entry.is_dir, host.value)
 
     // The hub has answered that the entry is gone, and that is what the reads
     // still travelling need to know: one of them was granted before this delete
@@ -974,7 +1218,9 @@ async function deleteTarget(entry: Entry, path: string) {
     // the request: a tab opened while the delete travelled names a file that is
     // now gone, and would otherwise survive pointing at nothing. A tab renamed
     // out of the way during the flight no longer matches, and should survive.
-    const removed = tabs.value.filter((tab) => tab.path === path || tab.path.startsWith(prefix))
+    const removed = tabs.value.filter(
+      (tab) => (tab.hostId ?? 'local') === host.value && (tab.path === path || tab.path.startsWith(prefix)),
+    )
     // The warning named what was dirty when the user answered. A tab that
     // appeared or was edited while the delete travelled was not in it -- and
     // the file is gone by now, so it is said rather than asked.
@@ -985,15 +1231,19 @@ async function deleteTarget(entry: Entry, path: string) {
       emit('notice', `Unsaved changes in ${names} went with ${entry.name}.`, 'warning')
     }
 
-    tabs.value = tabs.value.filter((tab) => tab.path !== path && !tab.path.startsWith(prefix))
-    if (!tabs.value.some((tab) => tab.path === activePath.value)) {
-      activePath.value = tabs.value.length > 0 ? tabs.value[tabs.value.length - 1].path : null
+    tabs.value = tabs.value.filter(
+      (tab) => (tab.hostId ?? 'local') !== host.value || (tab.path !== path && !tab.path.startsWith(prefix)),
+    )
+    if (!tabs.value.some((tab) => (activeTabId.value !== null ? tab.id === activeTabId.value : tab.path === activePath.value))) {
+      const nextTab = tabs.value.length > 0 ? tabs.value[tabs.value.length - 1] : null
+      activeTabId.value = nextTab ? nextTab.id : null
+      activePath.value = nextTab ? nextTab.path : null
     }
     await settleMutation(path)
   } catch (err) {
     report(err, `Could not delete ${entry.name}`)
   } finally {
-    deleting.end(path)
+    deleting.end(path, host.value)
     // The confirmation took the focus and the entry is gone, so the row that
     // stands where it did is what gets it. Left alone when the focus is somewhere
     // else -- that is the user having moved it on purpose -- and when the tree is
@@ -1009,7 +1259,7 @@ async function deleteTarget(entry: Entry, path: string) {
 
 async function download(path: string, name: string) {
   try {
-    const blob = await downloadFile(path)
+    const blob = await downloadFile(path, host.value)
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -1045,7 +1295,7 @@ function insertPath(path: string) {
     emit('notice', 'That path cannot be inserted: it contains a control character.', 'warning')
     return
   }
-  emit('insert-path', text)
+  emit('insert-path', text, host.value)
 }
 
 function onMenuAction(action: string) {
@@ -1144,13 +1394,28 @@ function onKeydown(event: KeyboardEvent) {
   requestClose()
 }
 
+watch(
+  () => props.hostId,
+  () => {
+    // Reset file tree browsing for the new host, but preserve open tabs (drafts).
+    tree.children.clear()
+    tree.truncated.clear()
+    tree.expanded.clear()
+    tree.loads.clear()
+    current.value = ''
+    failure.value = ''
+    navError.value = ''
+    void startDirectory()
+  },
+)
+
 onMounted(() => {
   document.addEventListener('keydown', onKeydown)
   void startDirectory()
 })
 onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
 
-defineExpose({ hasUnsavedChanges: () => dirty.value })
+defineExpose({ hasUnsavedChanges: () => dirty.value, discardHostDrafts })
 </script>
 
 <template>
@@ -1163,6 +1428,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
         :disabled="current === '/' || current === ''"
         @click="goTo(dirname(current))"
       >↑</button>
+      <span class="fm__host" :title="`Host: ${hostName || hostId || 'local'}`">{{ hostName || hostId || 'local' }}</span>
       <span class="fm__path" :title="current">{{ current || '…' }}</span>
       <button class="fm__btn" type="button" title="new file" :disabled="current === ''" @click="createHere(false)">+ file</button>
       <button class="fm__btn" type="button" title="new directory" :disabled="current === ''" @click="createHere(true)">+ dir</button>
@@ -1199,8 +1465,9 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
           ref="tabsRef"
           :files="tabs"
           :active="activePath"
-          @select="activePath = $event"
-          @close="closeTab"
+          :active-id="activeTabId"
+          @select="(path, id) => { activePath = path; activeTabId = id ?? null }"
+          @close="(path, id) => closeTab(path, id)"
         />
 
         <div v-if="!active" class="fm__state">Select a file to open it.</div>
@@ -1210,10 +1477,17 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
             <button
               class="fm__btn"
               type="button"
-              :disabled="!isDirty(active)"
-              title="save (the hub refuses if the file changed since it was read)"
+              :disabled="!canSaveActive"
+              :title="saveButtonTitle"
               @click="save(false)"
             >Save</button>
+            <button
+              v-if="active && !active.binary"
+              class="fm__btn"
+              type="button"
+              title="re-read file from disk to reconcile"
+              @click="reconcile(active.id)"
+            >Reconcile</button>
             <button
               v-if="preview === 'markdown'"
               class="fm__btn"
@@ -1222,6 +1496,16 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
             >{{ activeIsMarkdownSource ? 'Preview' : 'Source' }}</button>
             <span class="fm__spacer"></span>
             <span v-if="isDirty(active)" class="fm__dirty" role="status">unsaved changes</span>
+          </div>
+
+          <div v-if="hostRemoved" class="fm__removed-banner" role="status">
+            This host has been removed. Remote actions are disabled; drafts remain available for local copying.
+          </div>
+          <div v-else-if="revisionStale" class="fm__stale-banner" role="status">
+            Host configuration has changed since this file was opened (revision conflict). Reconcile or reload before saving to the updated host.
+          </div>
+          <div v-else-if="replacementUnsupported" class="fm__unsupported-banner" role="status">
+            Overwrite is unavailable on this host: remote server does not support atomic replacement (browse and download remain usable).
           </div>
 
           <!--
@@ -1318,6 +1602,17 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
   padding: 6px 8px;
   background: var(--th-surface);
   border-bottom: 1px solid var(--th-border);
+}
+
+.fm__host {
+  padding: 2px 6px;
+  color: var(--th-accent, #60a5fa);
+  background: var(--th-raised);
+  border: 1px solid var(--th-border);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 .fm__path {
@@ -1438,6 +1733,16 @@ defineExpose({ hasUnsavedChanges: () => dirty.value })
   margin: 0 10px;
   color: var(--th-text-lo);
   font-family: var(--app-code-font);
+  font-size: 11px;
+}
+
+.fm__removed-banner,
+.fm__stale-banner,
+.fm__unsupported-banner {
+  padding: 6px 10px;
+  background: var(--th-bg-alt, #2d261e);
+  color: var(--th-warning, #e6a23c);
+  border-bottom: 1px solid var(--th-warning, #e6a23c);
   font-size: 11px;
 }
 </style>

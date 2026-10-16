@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/auth"
+	"github.com/AK12-Official/visual-tmux-client/hub/internal/host"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/terminal"
 	"github.com/coder/websocket"
 )
@@ -34,12 +35,12 @@ type errorMessage struct {
 
 // Handler handles WebSocket terminal attachment requests.
 type Handler struct {
-	redeemer    TicketRedeemer
-	procFactory terminal.ProcessFactory
-	manager     *terminal.Manager
-	opts        Options
-	checkTmux   func() error
-	onResize    func(session string, cols, rows int)
+	redeemer  TicketRedeemer
+	resolver  host.Resolver
+	manager   *terminal.Manager
+	opts      Options
+	checkTmux func() error
+	onResize  func(session string, cols, rows int)
 }
 
 // NewHandler constructs a new WebSocket attach Handler.
@@ -51,6 +52,19 @@ func NewHandler(
 	checkTmux func() error,
 	onResize func(session string, cols, rows int),
 ) *Handler {
+	localRes := host.NewLocalResolver(nil, nil, procFactory)
+	return NewHandlerWithResolver(redeemer, localRes, manager, opts, checkTmux, onResize)
+}
+
+// NewHandlerWithResolver resolves each attachment to a captured runtime.
+func NewHandlerWithResolver(
+	redeemer TicketRedeemer,
+	resolver host.Resolver,
+	manager *terminal.Manager,
+	opts Options,
+	checkTmux func() error,
+	onResize func(string, int, int),
+) *Handler {
 	if opts.MaxInputMessage <= 0 {
 		opts.MaxInputMessage = DefaultMaxInputMessage
 	}
@@ -58,12 +72,12 @@ func NewHandler(
 		opts.MaxDimension = DefaultMaxDimension
 	}
 	return &Handler{
-		redeemer:    redeemer,
-		procFactory: procFactory,
-		manager:     manager,
-		opts:        opts,
-		checkTmux:   checkTmux,
-		onResize:    onResize,
+		redeemer:  redeemer,
+		resolver:  resolver,
+		manager:   manager,
+		opts:      opts,
+		checkTmux: checkTmux,
+		onResize:  onResize,
 	}
 }
 
@@ -113,8 +127,10 @@ func (h *Handler) mapRedeemError(err error) string {
 	switch {
 	case errors.Is(err, auth.ErrTicketExpired):
 		return "ticket expired"
-	case errors.Is(err, auth.ErrTicketMismatch):
+	case errors.Is(err, auth.ErrTicketMismatch), errors.Is(err, auth.ErrTicketHostMismatch):
 		return "ticket does not match session"
+	case errors.Is(err, auth.ErrTicketSuperseded):
+		return "host configuration changed"
 	default:
 		return "invalid ticket"
 	}
@@ -122,7 +138,8 @@ func (h *Handler) mapRedeemError(err error) string {
 
 // ServeHTTP implements http.Handler for WebSocket attachments.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.PathValue("hostId") != localHostIdentifier {
+	runtime, resolveErr := h.resolver.Resolve(r.Context(), host.ID(r.PathValue("hostId")))
+	if resolveErr != nil {
 		http.Error(w, "host not found", http.StatusNotFound)
 		return
 	}
@@ -141,8 +158,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(h.opts.MaxInputMessage)
 
 	ticket := r.URL.Query().Get("ticket")
-	if err := h.redeemer.Redeem(ticket, session); err != nil {
-		sendErrorAndClose(conn, h.mapRedeemError(err), false)
+	var redeemErr error
+	if tr, ok := h.redeemer.(interface {
+		RedeemForTarget(string, string, uint64, string) error
+	}); ok {
+		hID := string(runtime.Target.HostID)
+		connRev := uint64(runtime.Target.ConnectionRevision)
+		redeemErr = tr.RedeemForTarget(ticket, hID, connRev, session)
+	} else {
+		redeemErr = h.redeemer.Redeem(ticket, session)
+	}
+	if redeemErr != nil {
+		sendErrorAndClose(conn, h.mapRedeemError(redeemErr), false)
 		return
 	}
 
@@ -155,7 +182,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	proc, err := h.procFactory.NewProcess(r.Context(), session, cols, rows)
+	proc, err := runtime.Processes.NewProcess(r.Context(), session, cols, rows)
 	if err != nil {
 		sendErrorAndClose(conn, "attach failed: "+err.Error(), true)
 		return

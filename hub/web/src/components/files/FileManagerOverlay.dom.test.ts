@@ -24,9 +24,9 @@ import FileManagerOverlay from './FileManagerOverlay.vue'
 
 type Responder = () => Response | Promise<Response>
 
-function json(body: unknown): Response {
+function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
-    status: 200,
+    status,
     headers: { 'Content-Type': 'application/json' },
   })
 }
@@ -66,6 +66,7 @@ function hubFetch(
     // The listing is asked about different directories, so its override is given
     // the path it was asked for rather than being a fixed answer.
     list: (path: string) => Response | Promise<Response>
+    capabilities: (url: string) => Response | Promise<Response>
   }> = {},
 ): Call[] {
   const calls: Call[] = []
@@ -74,6 +75,15 @@ function hubFetch(
     const method = init?.method ?? 'GET'
     calls.push({ url, method, body: typeof init?.body === 'string' ? init.body : '' })
 
+    if (url.includes('/capabilities')) {
+      if (overrides.capabilities) return overrides.capabilities(url)
+      return json({
+        hostId: 'remote-box',
+        revision: 1,
+        online: true,
+        files: { enabled: true, atomicReplacement: true },
+      })
+    }
     if (url.includes('/working-directory')) {
       return json({ path: '/srv/work', substituted: false })
     }
@@ -1668,3 +1678,397 @@ test('the editor stand-in applies a transaction the way the editor does', () => 
     'overlapping changes were applied as if they did not overlap',
   )
 })
+
+test('switching hosts preserves open tab drafts and refreshes directory', async () => {
+  resetEditors()
+  setToken('tok')
+  hubFetch({
+    list: (path) =>
+      json({
+        path,
+        entries: [{ name: 'file.txt', is_dir: false, size: 5, mtime: 1000 }],
+        truncated: false,
+      }),
+  })
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work', hostId: 'host-a' },
+    attachTo: document.body,
+  })
+  await flush()
+
+  await openFile(wrapper, 'file.txt')
+  await type(' draft edit')
+  assert.equal(wrapper.find('.fm__dirty').exists(), true)
+
+  // Switch to host-b
+  await wrapper.setProps({ hostId: 'host-b' })
+  await flush()
+
+  // Tab is still open with draft edit
+  assert.equal(wrapper.findAll('.tabs__tab').length, 1)
+  assert.equal(wrapper.find('.tabs__name').text(), 'file.txt')
+  assert.equal(instances[0].doc, 'hello draft edit')
+  assert.equal(wrapper.find('.fm__dirty').exists(), true)
+
+  wrapper.unmount()
+})
+
+test('saving a tab belonging to host A while viewing host B sends write to host A', async () => {
+  resetEditors()
+  setToken('tok')
+  const calls = hubFetch({
+    list: (path) =>
+      json({
+        path,
+        entries: [{ name: 'remote.txt', is_dir: false, size: 5, mtime: 1000 }],
+        truncated: false,
+      }),
+  })
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work', hostId: 'host-a' },
+    attachTo: document.body,
+  })
+  await flush()
+
+  await openFile(wrapper, 'remote.txt')
+  await type(' from host a')
+
+  // Switch overlay to host-b
+  await wrapper.setProps({ hostId: 'host-b' })
+  await flush()
+
+  // Click Save
+  const saveBtn = wrapper.findAll('.fm__btn').find((btn) => btn.text() === 'Save')
+  assert.ok(saveBtn, 'save button must exist')
+  await saveBtn.trigger('click')
+  await flush()
+
+  // Check write call URL
+  const writeCall = calls.find((c) => c.method === 'PUT' && c.url.includes('/files/write'))
+  assert.ok(writeCall, 'write call must be made')
+  assert.ok(
+    writeCall.url.includes('/api/hosts/host-a/files/write'),
+    `write must target host-a, but was sent to ${writeCall.url}`,
+  )
+
+  wrapper.unmount()
+})
+
+test('inserting path emits insert-path with current host', async () => {
+  resetEditors()
+  setToken('tok')
+  hubFetch()
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work', hostId: 'remote-box' },
+    attachTo: document.body,
+  })
+  await flush()
+
+  // Open context menu on a.txt
+  const label = row(wrapper, 'a.txt').find('.tree__label')
+  await label.trigger('contextmenu', { clientX: 10, clientY: 20 })
+  await flush()
+
+  const insertBtn = wrapper.findAll('.menu__item').find((btn) => btn.text().includes('Insert path'))
+  assert.ok(insertBtn, 'Insert path menu item should exist')
+  await insertBtn.trigger('click')
+  await flush()
+
+  const emitted = wrapper.emitted('insert-path')
+  assert.ok(emitted, 'insert-path should be emitted')
+  assert.deepEqual(emitted[0], ['/srv/work/a.txt', 'remote-box'])
+
+  wrapper.unmount()
+})
+
+test('remote host with unsupported atomic replacement disables overwrite and displays explanation', async () => {
+  resetEditors()
+  setToken('tok')
+  hubFetch()
+  const wrapper = mount(FileManagerOverlay, {
+    props: {
+      session: 'work',
+      hostId: 'unsupported-sftp',
+      hostCapabilities: {
+        hostId: 'unsupported-sftp',
+        online: true,
+        files: { enabled: true, atomicReplacement: false },
+      },
+    },
+    attachTo: document.body,
+  })
+  await flush()
+
+  await openFile(wrapper, 'a.txt')
+  await flush()
+  await type('new edit')
+  await flush()
+
+  const banner = wrapper.find('.fm__unsupported-banner')
+  assert.ok(banner.exists(), 'unsupported banner must exist')
+  assert.match(banner.text(), /Overwrite is unavailable on this host/)
+
+  const saveBtn = await saveButton(wrapper)
+  assert.equal(saveBtn.attributes('disabled') !== undefined, true, 'save button must be disabled')
+  assert.match(saveBtn.attributes('title') ?? '', /remote server does not support atomic replacement/)
+
+  wrapper.unmount()
+})
+
+test('lost commit acknowledgement (outcome_unknown) keeps tab dirty and warns without replay', async () => {
+  resetEditors()
+  setToken('tok')
+  let writeCalls = 0
+  hubFetch({
+    write: () => {
+      writeCalls++
+      return json({ error: 'outcome_unknown' }, 502)
+    },
+  })
+  const wrapper = await mountManager()
+  await openFile(wrapper, 'a.txt')
+  await type('unacknowledged content')
+
+  const saveBtn = await saveButton(wrapper)
+  await saveBtn.trigger('click')
+  await flush()
+
+  assert.equal(writeCalls, 1, 'must not automatically replay write')
+  assert.equal(wrapper.find('.fm__dirty').exists(), true, 'tab must remain dirty')
+
+  const notices = (wrapper.emitted('notice') ?? []).flat()
+  assert.ok(
+    notices.some((msg) => String(msg).includes('Save outcome uncertain') || String(msg).includes('outcome uncertain')),
+    `expected uncertain outcome warning, got: ${JSON.stringify(notices)}`,
+  )
+
+  wrapper.unmount()
+})
+
+test('reconcile after uncertain outcome marks tab clean when disk matches editor text', async () => {
+  resetEditors()
+  setToken('tok')
+  let diskContent = 'hello'
+  hubFetch({
+    write: () => json({ error: 'outcome_unknown' }, 502),
+    read: () => text(diskContent),
+  })
+  const wrapper = await mountManager()
+  await openFile(wrapper, 'a.txt')
+  await type('updated text')
+
+  // Save fails with outcome_unknown
+  const saveBtn = await saveButton(wrapper)
+  await saveBtn.trigger('click')
+  await flush()
+  assert.equal(wrapper.find('.fm__dirty').exists(), true)
+
+  // Remote commit actually succeeded on server
+  diskContent = 'helloupdated text'
+  const reconcileBtn = wrapper.findAll('.fm__btn').find((btn) => btn.text() === 'Reconcile')
+  assert.ok(reconcileBtn, 'reconcile button must exist')
+  await reconcileBtn.trigger('click')
+  await flush()
+
+  assert.equal(wrapper.find('.fm__dirty').exists(), false, 'tab must become clean after matching disk')
+  const notices = (wrapper.emitted('notice') ?? []).flat()
+  assert.ok(
+    notices.some((msg) => String(msg).includes('matches remote file')),
+    `expected match notification, got: ${JSON.stringify(notices)}`,
+  )
+
+  wrapper.unmount()
+})
+
+test('reconcile does not silently discard later edits when disk differs and user declines discard', async () => {
+  resetEditors()
+  setToken('tok')
+  hubFetch({
+    read: () => text('remote disk content'),
+  })
+  const wrapper = await mountManager()
+  await openFile(wrapper, 'a.txt')
+  await type('unsaved local edit')
+  assert.equal(wrapper.find('.fm__dirty').exists(), true)
+
+  // User declines discarding edits
+  const original = window.confirm
+  let asked = false
+  window.confirm = (msg?: string) => {
+    asked = true
+    assert.match(String(msg), /Discard local edits/)
+    return false
+  }
+
+  try {
+    const reconcileBtn = wrapper.findAll('.fm__btn').find((btn) => btn.text() === 'Reconcile')
+    assert.ok(reconcileBtn, 'reconcile button must exist')
+    await reconcileBtn.trigger('click')
+    await flush()
+  } finally {
+    window.confirm = original
+  }
+
+  assert.equal(asked, true, 'user must be prompted before discarding edits')
+  assert.equal(wrapper.find('.fm__dirty').exists(), true, 'tab must remain dirty with edits preserved')
+  const notices = (wrapper.emitted('notice') ?? []).flat()
+  assert.ok(
+    notices.some((msg) => String(msg).includes('Preserved local edits')),
+    `expected preserved notice, got: ${JSON.stringify(notices)}`,
+  )
+
+  wrapper.unmount()
+})
+
+test('remote hard-link acknowledgement explains replacement semantics', async () => {
+  resetEditors()
+  setToken('tok')
+  let writeCount = 0
+  hubFetch({
+    write: () => {
+      writeCount++
+      if (writeCount === 1) {
+        return json({ error: 'other_names' }, 409)
+      }
+      return json({ mtime: 3000, mtime_nanos: '3000000000' })
+    },
+  })
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work', hostId: 'remote-srv' },
+    attachTo: document.body,
+  })
+  await flush()
+
+  await openFile(wrapper, 'a.txt')
+  await type('data')
+
+  const original = window.confirm
+  const prompts: string[] = []
+  window.confirm = (msg?: string) => {
+    prompts.push(String(msg))
+    return true
+  }
+
+  try {
+    const saveBtn = await saveButton(wrapper)
+    await saveBtn.trigger('click')
+    await flush(3)
+  } finally {
+    window.confirm = original
+  }
+
+  assert.equal(prompts.length, 1)
+  assert.match(prompts[0], /remote replacement does not preserve ACLs\/xattrs or update other hard-link names/)
+  assert.match(prompts[0], /other names keep the contents they have now/)
+
+  wrapper.unmount()
+})
+
+test('host removed externally preserves dirty drafts, disables saving, and shows removed banner', async () => {
+  resetEditors()
+  setToken('tok')
+  hubFetch()
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work', hostId: 'remote-1', availableHostIds: ['local', 'remote-1'] },
+    attachTo: document.body,
+  })
+  await flush()
+
+  await openFile(wrapper, 'a.txt')
+  await type('unwritten work')
+  assert.equal(wrapper.find('.fm__dirty').exists(), true)
+
+  // External host removal: availableHostIds no longer includes remote-1
+  await wrapper.setProps({ availableHostIds: ['local'] })
+  await flush()
+
+  // Removed banner must be visible
+  const banner = wrapper.find('.fm__removed-banner')
+  assert.ok(banner.exists(), 'removed banner must exist')
+  assert.ok(banner.text().includes('This host has been removed'))
+
+  // Save button must be disabled
+  const saveBtn = await saveButton(wrapper)
+  assert.equal(saveBtn.attributes('disabled'), '')
+  assert.ok(saveBtn.attributes('title')?.includes('Host has been removed'))
+
+  // Drafts remain preserved in the editor
+  assert.equal(wrapper.find('.fm__dirty').exists(), true)
+  assert.ok(instances[instances.length - 1].doc.toString().includes('unwritten work'))
+
+  wrapper.unmount()
+})
+
+test('host edited externally (stale revision) blocks saving until reconciled', async () => {
+  resetEditors()
+  setToken('tok')
+  hubFetch({
+    read: () => text('updated remote text'),
+  })
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work', hostId: 'remote-1', hostRevision: 1 },
+    attachTo: document.body,
+  })
+  await flush()
+
+  await openFile(wrapper, 'a.txt')
+  await type('my draft')
+  assert.equal(wrapper.find('.fm__dirty').exists(), true)
+
+  // Host configuration updated externally: revision bumped from 1 to 2
+  await wrapper.setProps({ hostRevision: 2 })
+  await flush()
+
+  // Stale revision banner must be visible
+  const staleBanner = wrapper.find('.fm__stale-banner')
+  assert.ok(staleBanner.exists(), 'stale revision banner must exist')
+  assert.ok(staleBanner.text().includes('revision conflict'))
+
+  // Save button disabled
+  const saveBtn = await saveButton(wrapper)
+  assert.equal(saveBtn.attributes('disabled'), '')
+  assert.ok(saveBtn.attributes('title')?.includes('revision conflict'))
+
+  // User reconciles
+  const original = window.confirm
+  window.confirm = () => true // accept discard to adopt remote
+  try {
+    const reconcileBtn = wrapper.findAll('.fm__btn').find((btn) => btn.text() === 'Reconcile')
+    assert.ok(reconcileBtn, 'reconcile button must exist')
+    await reconcileBtn.trigger('click')
+    await flush()
+  } finally {
+    window.confirm = original
+  }
+
+  // Stale banner cleared, tab revision updated to 2
+  assert.equal(wrapper.find('.fm__stale-banner').exists(), false)
+
+  wrapper.unmount()
+})
+
+test('discardHostDrafts drops tabs belonging to the specified host', async () => {
+  resetEditors()
+  setToken('tok')
+  hubFetch()
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work', hostId: 'remote-1' },
+    attachTo: document.body,
+  })
+  await flush()
+
+  await openFile(wrapper, 'a.txt')
+  assert.ok(wrapper.find('.tabs__label').exists())
+
+  // Discard drafts for remote-1
+  wrapper.vm.discardHostDrafts('remote-1')
+  await flush()
+
+  // Tab for remote-1 is removed
+  assert.equal(wrapper.find('.tabs__label').exists(), false)
+  assert.ok(wrapper.text().includes('Select a file to open it.'))
+
+  wrapper.unmount()
+})
+
+

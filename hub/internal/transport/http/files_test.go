@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/files"
+	"github.com/AK12-Official/visual-tmux-client/hub/internal/host"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/session"
 )
 
@@ -854,5 +855,152 @@ func TestReadRouteServesAShortenedFileAtItsNewLength(t *testing.T) {
 	}
 	if got := rec.Header().Get("X-File-Size"); got != "4" {
 		t.Errorf("expected X-File-Size 4, got %q", got)
+	}
+}
+
+type mockResolver struct {
+	resolveFn func(ctx context.Context, id host.ID) (host.Runtime, error)
+	calls     []host.ID
+}
+
+func (m *mockResolver) Resolve(ctx context.Context, id host.ID) (host.Runtime, error) {
+	m.calls = append(m.calls, id)
+	if m.resolveFn != nil {
+		return m.resolveFn(ctx, id)
+	}
+	return host.Runtime{}, host.ErrNotFound
+}
+
+func TestHostScopedRemoteFileRoutesAndGlobalDisablement(t *testing.T) {
+	remoteFiles := &mockFileService{
+		listFn: func(p string) (files.ListResult, error) {
+			return files.ListResult{Path: p}, nil
+		},
+		readFn: func(p string) (files.ReadResult, error) {
+			return openReadResult(t, "remote content"), nil
+		},
+		writeFn: func(p string, body io.Reader, size int64, mtime *files.ExpectedMtime, allowOtherNames bool) (files.WriteResult, error) {
+			if strings.Contains(p, "uncertain") {
+				return files.WriteResult{}, &host.Error{Target: host.Target{HostID: "r1"}, Code: host.ErrOutcomeUnknown}
+			}
+			if strings.Contains(p, "offline") {
+				return files.WriteResult{}, &host.Error{Target: host.Target{HostID: "r1"}, Code: host.ErrUnavailable}
+			}
+			return files.WriteResult{Mtime: 123456, MtimeNanos: 123456000000}, nil
+		},
+		createFn: func(p string, isDir bool) error { return nil },
+		renameFn: func(p, np string) error { return nil },
+		deleteFn: func(p string, rec bool) error { return nil },
+	}
+
+	remoteHostID := host.ID("remote-box")
+	resolver := &mockResolver{
+		resolveFn: func(ctx context.Context, id host.ID) (host.Runtime, error) {
+			if id == remoteHostID {
+				return host.Runtime{
+					Target:   host.Target{HostID: remoteHostID, Revision: 1},
+					Sessions: &mockSessionService{},
+					Files:    remoteFiles,
+				}, nil
+			}
+			return host.Runtime{}, host.ErrNotFound
+		},
+	}
+
+	cfg := testRouterConfig("tok", nil)
+	cfg.FilesEnabled = true
+	router := NewRouterWithResolver(cfg, resolver, &mockTicketIssuer{}, nil)
+
+	// 1. Verify remote file operations route to remoteFiles
+	rec := authedGet(t, router, "/api/hosts/remote-box/files/list?path=/home/user")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for remote list, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = authedGet(t, router, "/api/hosts/remote-box/files/read?path=/home/user/file.txt")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for remote read, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = authedPut(t, router, "/api/hosts/remote-box/files/write?path=/home/user/file.txt&size=4&allow_other_names=1", "data")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for remote write, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 2. Verify typed host errors mapped accurately
+	// ErrOutcomeUnknown -> 502 Bad Gateway
+	rec = authedPut(t, router, "/api/hosts/remote-box/files/write?path=/home/user/uncertain.txt&size=4&allow_other_names=1", "data")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 for outcome_unknown, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "outcome_unknown") {
+		t.Fatalf("expected outcome_unknown error envelope, got: %s", rec.Body.String())
+	}
+
+	// ErrUnavailable -> 503 Service Unavailable
+	rec = authedPut(t, router, "/api/hosts/remote-box/files/write?path=/home/user/offline.txt&size=4&allow_other_names=1", "data")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 for host_unavailable, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Unknown host -> 404 host_not_found
+	rec = authedGet(t, router, "/api/hosts/nonexistent/files/list?path=/home")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown host, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "host_not_found") {
+		t.Fatalf("expected host_not_found error envelope, got: %s", rec.Body.String())
+	}
+
+	// 3. Global Disablement: FilesEnabled = false
+	disabledCfg := testRouterConfig("tok", nil)
+	disabledCfg.FilesEnabled = false
+
+	noTouchResolver := &mockResolver{
+		resolveFn: func(ctx context.Context, id host.ID) (host.Runtime, error) {
+			t.Fatalf("Resolver.Resolve MUST NOT be called when files are globally disabled, called with id: %s", id)
+			return host.Runtime{}, nil
+		},
+	}
+	disabledRouter := NewRouterWithResolver(disabledCfg, noTouchResolver, &mockTicketIssuer{}, nil)
+
+	routesToTest := []struct {
+		method string
+		target string
+		body   string
+	}{
+		{http.MethodGet, "/api/hosts/local/files/list?path=/tmp", ""},
+		{http.MethodGet, "/api/hosts/local/files/read?path=/tmp/a", ""},
+		{http.MethodGet, "/api/hosts/local/files/download?path=/tmp/a", ""},
+		{http.MethodPut, "/api/hosts/local/files/write?path=/tmp/a&size=1", "x"},
+		{http.MethodPost, "/api/hosts/local/files/create", `{"path":"/tmp/a","kind":"file"}`},
+		{http.MethodPost, "/api/hosts/local/files/rename", `{"path":"/tmp/a","new_path":"/tmp/b"}`},
+		{http.MethodPost, "/api/hosts/local/files/delete", `{"path":"/tmp/a"}`},
+		{http.MethodGet, "/api/hosts/local/sessions/sess1/working-directory", ""},
+		{http.MethodGet, "/api/hosts/remote-box/files/list?path=/remote", ""},
+		{http.MethodGet, "/api/hosts/remote-box/files/read?path=/remote/a", ""},
+		{http.MethodGet, "/api/hosts/remote-box/files/download?path=/remote/a", ""},
+		{http.MethodPut, "/api/hosts/remote-box/files/write?path=/remote/a&size=1", "x"},
+		{http.MethodPost, "/api/hosts/remote-box/files/create", `{"path":"/remote/a","kind":"file"}`},
+		{http.MethodPost, "/api/hosts/remote-box/files/rename", `{"path":"/remote/a","new_path":"/remote/b"}`},
+		{http.MethodPost, "/api/hosts/remote-box/files/delete", `{"path":"/remote/a"}`},
+		{http.MethodGet, "/api/hosts/remote-box/sessions/sess1/working-directory", ""},
+	}
+
+	for _, route := range routesToTest {
+		t.Run(route.method+"_"+route.target, func(t *testing.T) {
+			resp := authedRequest(t, disabledRouter, route.method, route.target, route.body)
+			if resp.Code != http.StatusNotFound {
+				t.Fatalf("expected 404 for disabled files on %s %s, got %d: %s", route.method, route.target, resp.Code, resp.Body.String())
+			}
+			if !strings.Contains(resp.Body.String(), "not_found") {
+				t.Fatalf("expected not_found error envelope, got: %s", resp.Body.String())
+			}
+		})
+	}
+
+	// Verify no calls reached the resolver
+	if len(noTouchResolver.calls) != 0 {
+		t.Fatalf("expected 0 resolver calls when files are globally disabled, got: %v", noTouchResolver.calls)
 	}
 }

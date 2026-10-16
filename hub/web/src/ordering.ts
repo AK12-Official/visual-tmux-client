@@ -14,12 +14,12 @@ export interface OrderState {
   pinned: string[]
 }
 
-const ORDER_KEY = 'vtc:order'
+const LEGACY_ORDER_KEY = 'vtc:order'
+const HOST_ORDER_PREFIX = 'vtc:order:'
 
-export function loadOrder(): OrderState {
+function parseOrderState(raw: string | null): OrderState | null {
+  if (!raw) return null
   try {
-    const raw = localStorage.getItem(ORDER_KEY)
-    if (!raw) return { mode: 'default', order: [], pinned: [] }
     const v = JSON.parse(raw) as unknown
     if (v && typeof v === 'object') {
       const parsed = v as Partial<OrderState>
@@ -36,14 +36,56 @@ export function loadOrder(): OrderState {
       }
     }
   } catch {
+    // Malformed JSON falls back
+  }
+  return null
+}
+
+export function loadOrder(hostId = 'local'): OrderState {
+  try {
+    const hostKey = HOST_ORDER_PREFIX + hostId
+    const hostRaw = localStorage.getItem(hostKey)
+    if (hostRaw !== null) {
+      const parsed = parseOrderState(hostRaw)
+      if (parsed) return parsed
+      return { mode: 'default', order: [], pinned: [] }
+    }
+
+    // One-time migration for legacy pre-multi-host preferences:
+    // migrate to local host only, and never apply to remote hosts.
+    if (hostId === 'local') {
+      const legacyRaw = localStorage.getItem(LEGACY_ORDER_KEY)
+      if (legacyRaw !== null) {
+        const legacyParsed = parseOrderState(legacyRaw)
+        if (legacyParsed) {
+          saveOrder(legacyParsed, 'local')
+          try {
+            localStorage.removeItem(LEGACY_ORDER_KEY)
+          } catch {
+            /* ignore */
+          }
+          return legacyParsed
+        }
+      }
+    }
+  } catch {
     // A corrupted entry falls back to defaults rather than breaking the list.
   }
   return { mode: 'default', order: [], pinned: [] }
 }
 
-export function saveOrder(state: OrderState): void {
+export function saveOrder(state: OrderState, hostId = 'local'): void {
   try {
-    localStorage.setItem(ORDER_KEY, JSON.stringify(state))
+    const hostKey = HOST_ORDER_PREFIX + hostId
+    localStorage.setItem(hostKey, JSON.stringify(state))
+    if (hostId === 'local') {
+      // Clear legacy key to guarantee migration never runs again or overwrites later edits
+      try {
+        localStorage.removeItem(LEGACY_ORDER_KEY)
+      } catch {
+        /* ignore */
+      }
+    }
   } catch {
     /* ignore storage quota / restricted storage */
   }

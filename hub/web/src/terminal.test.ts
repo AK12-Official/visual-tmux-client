@@ -8,6 +8,9 @@ import {
 } from './config'
 import {
   computeReconnectDelay,
+  disposeTerminalSession,
+  insertIntoTerminal,
+  renameTerminalSession,
   shouldThrottleActivity,
   TerminalSession,
   type TerminalHooks,
@@ -282,3 +285,306 @@ test('TerminalSession registers online/offline listeners and cleans them up on d
     resetConfigForTest()
   }
 })
+
+test('attaching same-named sessions on two hosts targets the selected host', async () => {
+  setConfig(nonDefaultConfig)
+
+  const originalResizeObserver = globalThis.ResizeObserver
+  const originalWebSocket = globalThis.WebSocket
+  const originalLocation = globalThis.location
+  const originalFetch = globalThis.fetch
+  const originalLocalStorage = globalThis.localStorage
+
+  const store = new Map<string, string>()
+  store.set('vtc:token', 'test-token')
+  globalThis.localStorage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, val: string) => store.set(key, val),
+    removeItem: (key: string) => store.delete(key),
+    clear: () => store.clear(),
+  } as any
+
+  const openedSockets: { url: string }[] = []
+
+  class MockResizeObserver {
+    observe() {}
+    disconnect() {}
+  }
+  class MockWebSocket {
+    static OPEN = 1
+    static CONNECTING = 0
+    static CLOSING = 2
+    static CLOSED = 3
+    binaryType = 'blob'
+    readyState = 1
+    onopen: (() => void) | null = null
+    onmessage: ((ev: any) => void) | null = null
+    onclose: (() => void) | null = null
+    onerror: (() => void) | null = null
+    url: string
+    sent: any[] = []
+    constructor(url: string) {
+      this.url = url
+      openedSockets.push({ url })
+      setTimeout(() => {
+        if (this.onopen) this.onopen()
+      }, 0)
+    }
+    close() {}
+    send(data: any) {
+      this.sent.push(data)
+    }
+  }
+
+  globalThis.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver
+  globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
+  globalThis.location = { protocol: 'http:', host: 'localhost:8080' } as any
+
+  const ticketsIssued: { session: string; hostId: string }[] = []
+  globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const body = init?.body ? JSON.parse(String(init.body)) : {}
+    ticketsIssued.push({ session: body.session, hostId: body.hostId })
+    return new Response(JSON.stringify({ ticket: `ticket-for-${body.hostId}-${body.session}` }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const mockContainerA = { clientWidth: 640, clientHeight: 480 } as HTMLElement
+    const mockContainerB = { clientWidth: 640, clientHeight: 480 } as HTMLElement
+    const hooksA: TerminalHooks = { onState: () => {}, onNotice: () => {} }
+    const hooksB: TerminalHooks = { onState: () => {}, onNotice: () => {} }
+
+    // Create session "dev" on host "host-a" and session "dev" on host "host-b"
+    const sessionA = new TerminalSession(mockContainerA, 'dev', hooksA, 16, 'host-a')
+    const sessionB = new TerminalSession(mockContainerB, 'dev', hooksB, 16, 'host-b')
+
+    assert.equal(sessionA.host, 'host-a')
+    assert.equal(sessionB.host, 'host-b')
+    assert.equal(sessionA.name, 'dev')
+    assert.equal(sessionB.name, 'dev')
+
+    // Wait for async ticket issue and WebSocket connection
+    await new Promise((r) => setTimeout(r, 20))
+
+    assert.equal(ticketsIssued.length, 2)
+    assert.deepEqual(ticketsIssued[0], { session: 'dev', hostId: 'host-a' })
+    assert.deepEqual(ticketsIssued[1], { session: 'dev', hostId: 'host-b' })
+
+    assert.equal(openedSockets.length, 2)
+    assert.ok(openedSockets[0].url.includes('/ws/host-a/dev?ticket=ticket-for-host-a-dev'))
+    assert.ok(openedSockets[1].url.includes('/ws/host-b/dev?ticket=ticket-for-host-b-dev'))
+
+    // Test text insertion targeted by hostId
+    assert.equal(insertIntoTerminal('dev', 'echo hello-a\n', 'host-a'), true)
+    assert.equal(insertIntoTerminal('dev', 'echo hello-b\n', 'host-b'), true)
+    assert.equal(insertIntoTerminal('dev', 'echo hello-c\n', 'non-existent-host'), false)
+
+    // Test rename session targeted by hostId
+    renameTerminalSession('dev', 'renamed-dev', 'host-a')
+    assert.equal(sessionA.name, 'renamed-dev')
+    assert.equal(sessionB.name, 'dev') // host-b's dev must NOT be renamed
+
+    // Test disposal targeted by hostId
+    disposeTerminalSession('renamed-dev', 'host-a')
+    assert.equal((sessionA as any).disposed, true)
+    assert.equal((sessionB as any).disposed, false)
+
+    sessionB.dispose()
+  } finally {
+    globalThis.ResizeObserver = originalResizeObserver
+    globalThis.WebSocket = originalWebSocket
+    globalThis.location = originalLocation
+    globalThis.fetch = originalFetch
+    globalThis.localStorage = originalLocalStorage
+    resetConfigForTest()
+  }
+})
+
+test("output on host A's dev never triggers activity on host B's same-named session", async () => {
+  setConfig(nonDefaultConfig)
+
+  const originalResizeObserver = globalThis.ResizeObserver
+  const originalWebSocket = globalThis.WebSocket
+  const originalLocation = globalThis.location
+  const originalFetch = globalThis.fetch
+  const originalLocalStorage = globalThis.localStorage
+
+  const store = new Map<string, string>()
+  store.set('vtc:token', 'test-token')
+  globalThis.localStorage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, val: string) => store.set(key, val),
+    removeItem: (key: string) => store.delete(key),
+    clear: () => store.clear(),
+  } as any
+
+  let socketA: any = null
+  let socketB: any = null
+
+  class MockResizeObserver {
+    observe() {}
+    disconnect() {}
+  }
+  class MockWebSocket {
+    static OPEN = 1
+    static CONNECTING = 0
+    static CLOSING = 2
+    static CLOSED = 3
+    binaryType = 'blob'
+    readyState = 1
+    onopen: (() => void) | null = null
+    onmessage: ((ev: any) => void) | null = null
+    onclose: (() => void) | null = null
+    onerror: (() => void) | null = null
+    url: string
+    constructor(url: string) {
+      this.url = url
+      if (url.includes('/ws/host-a/')) socketA = this
+      if (url.includes('/ws/host-b/')) socketB = this
+      setTimeout(() => {
+        if (this.onopen) this.onopen()
+      }, 0)
+    }
+    close() {}
+    send() {}
+  }
+
+  globalThis.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver
+  globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
+  globalThis.location = { protocol: 'http:', host: 'localhost:8080' } as any
+  globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const body = init?.body ? JSON.parse(String(init.body)) : {}
+    return new Response(JSON.stringify({ ticket: `ticket-${body.hostId}-${body.session}` }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const mockContainerA = { clientWidth: 640, clientHeight: 480 } as HTMLElement
+    const mockContainerB = { clientWidth: 640, clientHeight: 480 } as HTMLElement
+    let activityCountA = 0
+    let activityCountB = 0
+
+    const hooksA: TerminalHooks = {
+      onState: () => {},
+      onNotice: () => {},
+      onActivity: () => {
+        activityCountA++
+      },
+    }
+    const hooksB: TerminalHooks = {
+      onState: () => {},
+      onNotice: () => {},
+      onActivity: () => {
+        activityCountB++
+      },
+    }
+
+    const sessionA = new TerminalSession(mockContainerA, 'dev', hooksA, 16, 'host-a')
+    const sessionB = new TerminalSession(mockContainerB, 'dev', hooksB, 16, 'host-b')
+
+    await new Promise((r) => setTimeout(r, 20))
+    assert.ok(socketA !== null, 'socketA should be connected')
+    assert.ok(socketB !== null, 'socketB should be connected')
+
+    // Simulate binary output arriving from host-a's tmux session
+    const payloadA = new Uint8Array([104, 101, 108, 108, 111]).buffer
+    socketA.onmessage({ data: payloadA })
+
+    // Verify activity fired ONLY for host-a, not host-b
+    assert.equal(activityCountA, 1)
+    assert.equal(activityCountB, 0)
+
+    sessionA.dispose()
+    sessionB.dispose()
+  } finally {
+    globalThis.ResizeObserver = originalResizeObserver
+    globalThis.WebSocket = originalWebSocket
+    globalThis.location = originalLocation
+    globalThis.fetch = originalFetch
+    globalThis.localStorage = originalLocalStorage
+    resetConfigForTest()
+  }
+})
+
+test('TerminalSession ends reconnection when host revision conflict occurs', async () => {
+  setConfig(nonDefaultConfig)
+
+  const originalResizeObserver = globalThis.ResizeObserver
+  const originalWebSocket = globalThis.WebSocket
+  const originalLocation = globalThis.location
+  const originalFetch = globalThis.fetch
+  const originalLocalStorage = globalThis.localStorage
+
+  class MockResizeObserver {
+    observe() {}
+    disconnect() {}
+  }
+
+  class MockWebSocket {
+    static OPEN = 1
+    static CONNECTING = 0
+    static CLOSING = 2
+    static CLOSED = 3
+    binaryType = 'blob'
+    readyState = 1
+    onopen: (() => void) | null = null
+    onmessage: ((ev: any) => void) | null = null
+    onclose: (() => void) | null = null
+    onerror: (() => void) | null = null
+    url: string
+    constructor(url: string) {
+      this.url = url
+    }
+    close() {}
+    send() {}
+  }
+
+  globalThis.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver
+  globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
+  globalThis.location = { protocol: 'http:', host: 'localhost:8080' } as any
+
+  const store = new Map<string, string>()
+  store.set('visual-tmux-client-token', 'test-token')
+  globalThis.localStorage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, val: string) => store.set(key, val),
+    removeItem: (key: string) => store.delete(key),
+    clear: () => store.clear(),
+  } as any
+
+  globalThis.fetch = async (): Promise<Response> => {
+    return new Response(JSON.stringify({ error: 'host_revision_conflict' }), {
+      status: 409,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  const states: string[] = []
+  const notices: string[] = []
+  const hooks: TerminalHooks = {
+    onState: (state) => states.push(state),
+    onNotice: (notice) => notices.push(notice),
+  }
+
+  const session = new TerminalSession({ clientWidth: 640, clientHeight: 480 } as HTMLElement, 'main', hooks, 16, 'remote-1')
+
+  try {
+    await new Promise((r) => setTimeout(r, 40))
+
+    assert.ok(states.includes('ended'), 'session should transition to ended')
+    assert.ok(notices.some((n) => n.includes('Host configuration changed')), 'notice should report host configuration change')
+  } finally {
+    session.dispose()
+    globalThis.ResizeObserver = originalResizeObserver
+    globalThis.WebSocket = originalWebSocket
+    globalThis.location = originalLocation
+    globalThis.fetch = originalFetch
+    globalThis.localStorage = originalLocalStorage
+    resetConfigForTest()
+  }
+})
+

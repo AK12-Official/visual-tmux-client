@@ -73,22 +73,26 @@ export function shouldThrottleActivity(
 const liveSessions = new Set<TerminalSession>()
 
 /** renameTerminalSession retargets every live attachment currently bound to
- * `oldName`, including any whose view is cached rather than mounted. Session
- * names are unique server-side, so at most one live view is affected. */
-export function renameTerminalSession(oldName: string, newName: string): void {
+ * `oldName` on `hostId`, including any whose view is cached rather than mounted.
+ * Session names are unique per host server-side, so at most one live view is affected. */
+export function renameTerminalSession(
+  oldName: string,
+  newName: string,
+  hostId = 'local',
+): void {
   for (const s of liveSessions) {
-    if (s.name === oldName) s.setSession(newName)
+    if (s.name === oldName && s.host === hostId) s.setSession(newName)
   }
 }
 
-/** disposeTerminalSession tears down the attachment bound to `name`. It is for
- * a panel that has been retired (its session was killed, so nothing can ever
+/** disposeTerminalSession tears down the attachment bound to `name` on `hostId`.
+ * It is for a panel that has been retired (its session was killed, so nothing can ever
  * reach the view again): a KeepAlive-cached component is never unmounted, so
  * without this its xterm instance, scrollback and ResizeObserver would be
  * retained for the life of the page. */
-export function disposeTerminalSession(name: string): void {
+export function disposeTerminalSession(name: string, hostId = 'local'): void {
   for (const s of [...liveSessions]) {
-    if (s.name === name) s.dispose()
+    if (s.name === name && s.host === hostId) s.dispose()
   }
 }
 
@@ -100,9 +104,9 @@ export function disposeTerminalSession(name: string): void {
  * The text is inserted verbatim. It is the caller's job to make sure it carries
  * no line terminator -- an insertion must never be able to run a command on its
  * own -- and the file manager quotes a path a shell would otherwise interpret. */
-export function insertIntoTerminal(name: string, text: string): boolean {
+export function insertIntoTerminal(name: string, text: string, hostId = 'local'): boolean {
   for (const s of liveSessions) {
-    if (s.name === name) return s.insertText(text)
+    if (s.name === name && s.host === hostId) return s.insertText(text)
   }
   return false
 }
@@ -121,6 +125,7 @@ export class TerminalSession {
   private lastActivityAt = 0
   private container: HTMLElement
   private session: string
+  private hostId: string
   private hooks: TerminalHooks
 
   constructor(
@@ -128,10 +133,12 @@ export class TerminalSession {
     session: string,
     hooks: TerminalHooks,
     fontSize?: number,
+    hostId = 'local',
   ) {
     this.container = container
     this.session = session
     this.hooks = hooks
+    this.hostId = hostId
     liveSessions.add(this)
     const termCfg = getConfig().web.terminal
     const resolvedFontSize = fontSize ?? termCfg.font_size
@@ -276,6 +283,11 @@ export class TerminalSession {
     return this.session
   }
 
+  /** The host this attachment is currently bound to. */
+  get host(): string {
+    return this.hostId
+  }
+
   private fireActivity(): void {
     if (!this.hooks.onActivity) return
     const now = Date.now()
@@ -318,13 +330,13 @@ export class TerminalSession {
     this.ended = false
     this.hooks.onState(this.attempt === 0 ? 'connecting' : 'reconnecting')
     try {
-      const ticket = await issueTicket(this.session)
+      const ticket = await issueTicket(this.session, this.hostId)
       if (this.disposed || gen !== this.generation) return
       const { cols, rows } = this.proposedSize()
       const proto = location.protocol === 'https:' ? 'wss' : 'ws'
       // The long-lived token never appears here: only the single-use ticket.
       const url =
-        `${proto}://${location.host}/ws/local/${encodeURIComponent(this.session)}` +
+        `${proto}://${location.host}/ws/${encodeURIComponent(this.hostId)}/${encodeURIComponent(this.session)}` +
         `?ticket=${encodeURIComponent(ticket)}&cols=${cols}&rows=${rows}`
       if (this.ws) {
         this.ws.onopen = null
@@ -385,6 +397,18 @@ export class TerminalSession {
         this.ended = true
         this.hooks.onState('ended', `Session "${this.session}" no longer exists.`)
         this.hooks.onNotice(`Session "${this.session}" no longer exists.`)
+        return
+      }
+      if (message.includes('host_revision_conflict')) {
+        this.ended = true
+        this.hooks.onState('ended', 'Host configuration changed.')
+        this.hooks.onNotice('Host configuration changed; reconnection stopped.')
+        return
+      }
+      if (message.includes('host_not_found')) {
+        this.ended = true
+        this.hooks.onState('ended', 'Host no longer exists.')
+        this.hooks.onNotice('Host no longer exists.')
         return
       }
       if (this.attempt === 0) {
@@ -490,7 +514,7 @@ export class TerminalSession {
     this.generation++
     if (this.resizeTimer) clearTimeout(this.resizeTimer)
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
-    this.observer.disconnect()
+    this.observer?.disconnect()
     if (typeof window !== 'undefined') {
       window.removeEventListener('online', this.handleOnline)
       window.removeEventListener('offline', this.handleOffline)

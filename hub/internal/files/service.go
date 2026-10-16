@@ -274,6 +274,11 @@ func compareEntries(a, b Entry) int {
 	return cmp.Compare(a.Name, b.Name)
 }
 
+// CompareEntries orders entries: directories first, then by name.
+func CompareEntries(a, b Entry) int {
+	return compareEntries(a, b)
+}
+
 // readListing reads a directory until one entry past the listing bound has been
 // kept, and reports whether it stopped with entries left unread.
 //
@@ -454,6 +459,11 @@ const scanChunk = 32 * 1024
 //
 // Reading uses ReadAt, which does not move the file offset, so the caller still
 // streams the whole file from the beginning.
+// LooksBinary reports whether a file's contents are not text.
+func LooksBinary(ctx context.Context, file *os.File, size int64) (bool, error) {
+	return looksBinary(ctx, file, size)
+}
+
 func looksBinary(ctx context.Context, file *os.File, size int64) (bool, error) {
 	if size == 0 {
 		return false, nil

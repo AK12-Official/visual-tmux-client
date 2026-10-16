@@ -120,13 +120,13 @@ func (c *Client) EnsureGlobalOptions(ctx context.Context) error {
 
 // HasSession checks whether a session exists by exact name.
 func (c *Client) HasSession(ctx context.Context, name string) bool {
-	_, _, code, err := c.Exec(ctx, "has-session", "-t", ExactTarget(name))
+	_, _, code, err := c.Exec(ctx, HasSessionArgs(name)...)
 	return err == nil && code == 0
 }
 
 // List returns all active tmux sessions. If no server is running, returns an empty slice.
 func (c *Client) List(ctx context.Context) ([]session.Session, error) {
-	stdout, stderr, code, err := c.Exec(ctx, "list-sessions", "-F", SessionFormat)
+	stdout, stderr, code, err := c.Exec(ctx, ListArgs()...)
 	if err != nil {
 		return nil, fmt.Errorf("exec list-sessions: %w", err)
 	}
@@ -199,11 +199,7 @@ func (c *Client) Create(ctx context.Context, name string) (*session.Session, err
 
 	// One command queue keeps a newly started server alive and installs defaults
 	// before its first pane can exit. A failed set-option aborts the queue.
-	args := []string{"start-server"}
-	for _, option := range globalOptions {
-		args = append(args, ";", "set-option", option.scope, option.name, option.value)
-	}
-	args = append(args, ";", "new-session", "-d", "-s", name, "-c", homeDirectory())
+	args := CreateArgs(name, homeDirectory())
 	c.optionsMu.Lock()
 	_, stderr, code, err := c.Exec(ctx, args...)
 	c.optionsMu.Unlock()
@@ -234,7 +230,7 @@ func (c *Client) Rename(ctx context.Context, oldName, newName string) error {
 		return session.ErrNameInUse
 	}
 
-	_, stderr, code, err := c.Exec(ctx, "rename-session", "-t", ExactTarget(oldName), "--", newName)
+	_, stderr, code, err := c.Exec(ctx, RenameArgs(oldName, newName)...)
 	if err != nil {
 		return fmt.Errorf("exec rename-session: %w", err)
 	}
@@ -259,7 +255,7 @@ func (c *Client) Kill(ctx context.Context, name string) error {
 		return session.ErrNotFound
 	}
 
-	_, stderr, code, err := c.Exec(ctx, "kill-session", "-t", ExactTarget(name))
+	_, stderr, code, err := c.Exec(ctx, KillArgs(name)...)
 	if err != nil {
 		return fmt.Errorf("exec kill-session: %w", err)
 	}
@@ -279,7 +275,7 @@ func (c *Client) AttachCommand(name string) *exec.Cmd {
 	if c.socket != "" {
 		args = append(args, "-L", c.socket)
 	}
-	args = append(args, "attach-session", "-t", ExactTarget(name))
+	args = append(args, AttachArgs(name)...)
 	cmd := exec.Command(c.path, args...)
 	cmd.Env = ChildEnv()
 	return cmd

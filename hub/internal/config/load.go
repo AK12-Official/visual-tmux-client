@@ -16,6 +16,7 @@ var ErrVersion = errors.New("version requested")
 const DefaultImplicitConfigFile = "visual-tmux-client.yaml"
 
 type rawConfig struct {
+	Hosts     *rawHostsConfig     `yaml:"hosts"`
 	Version   *int                `yaml:"version"`
 	Server    *rawServerConfig    `yaml:"server"`
 	Auth      *rawAuthConfig      `yaml:"auth"`
@@ -263,6 +264,7 @@ func applyYAML(cfg *Config, prov *Provenance, data []byte, configDir string) err
 	applyShutdownYAML(cfg, raw.Shutdown)
 	applyWebYAML(cfg, raw.Web)
 	applyFilesYAML(cfg, raw.Files)
+	applyHostsYAML(cfg, raw.Hosts, configDir)
 	return nil
 }
 
@@ -474,5 +476,64 @@ func applyEnv(cfg *Config, prov *Provenance, lookupEnv EnvLookup, workDir string
 		}
 		cfg.Tmux.Path = val
 		prov.TmuxPathSource = SourceEnvironment
+	}
+	if val, ok := lookupEnv("VISUAL_TMUX_CLIENT_HOSTS_STATE_DIR"); ok {
+		if val != "" && !filepath.IsAbs(val) {
+			val = filepath.Clean(filepath.Join(workDir, val))
+		}
+		cfg.Hosts.StateDir = val
+	}
+	if val, ok := lookupEnv("VISUAL_TMUX_CLIENT_HOSTS_MASTER_KEY_FILE"); ok {
+		if val != "" && !filepath.IsAbs(val) {
+			val = filepath.Clean(filepath.Join(workDir, val))
+		}
+		cfg.Hosts.MasterKeyFile = val
+	}
+}
+
+type rawHostsConfig struct {
+	StateDir          *string   `yaml:"state_dir"`
+	MasterKeyFile     *string   `yaml:"master_key_file"`
+	DialTimeout       *Duration `yaml:"dial_timeout"`
+	HandshakeTimeout  *Duration `yaml:"handshake_timeout"`
+	OperationTimeout  *Duration `yaml:"operation_timeout"`
+	KeepaliveInterval *Duration `yaml:"keepalive_interval"`
+	MaxBackoff        *Duration `yaml:"max_backoff"`
+	MaxConnections    *int      `yaml:"max_connections"`
+}
+
+func applyHostsYAML(cfg *Config, h *rawHostsConfig, dir string) {
+	if h == nil {
+		return
+	}
+	resolve := func(p string) string {
+		if p != "" && !filepath.IsAbs(p) {
+			return filepath.Join(dir, p)
+		}
+		return p
+	}
+	if h.StateDir != nil {
+		cfg.Hosts.StateDir = resolve(*h.StateDir)
+	}
+	if h.MasterKeyFile != nil {
+		cfg.Hosts.MasterKeyFile = resolve(*h.MasterKeyFile)
+	}
+	if h.DialTimeout != nil {
+		cfg.Hosts.DialTimeout = *h.DialTimeout
+	}
+	if h.HandshakeTimeout != nil {
+		cfg.Hosts.HandshakeTimeout = *h.HandshakeTimeout
+	}
+	if h.OperationTimeout != nil {
+		cfg.Hosts.OperationTimeout = *h.OperationTimeout
+	}
+	if h.KeepaliveInterval != nil {
+		cfg.Hosts.KeepaliveInterval = *h.KeepaliveInterval
+	}
+	if h.MaxBackoff != nil {
+		cfg.Hosts.MaxBackoff = *h.MaxBackoff
+	}
+	if h.MaxConnections != nil {
+		cfg.Hosts.MaxConnections = *h.MaxConnections
 	}
 }

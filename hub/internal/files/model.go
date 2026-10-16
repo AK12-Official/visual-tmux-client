@@ -76,13 +76,21 @@ type ExpectedMtime struct {
 	// report it. A caller that reports only milliseconds is compared against
 	// those instead -- weaker, but it is what the caller gave us to compare.
 	Nanos *int64
+	// Digest is the content-derived revision/digest of the file when last observed.
+	Digest string
+}
+
+// Matches reports whether a file's observed modification time is still the one
+// this expectation was taken from.
+func (e *ExpectedMtime) Matches(info os.FileInfo) bool {
+	if e.Nanos != nil {
+		return info.ModTime().UnixNano() == *e.Nanos
+	}
+	return info.ModTime().UnixMilli() == e.Millis
 }
 
 // matches reports whether a file's observed modification time is still the one
 // this expectation was taken from.
 func (e *ExpectedMtime) matches(info os.FileInfo) bool {
-	if e.Nanos != nil {
-		return info.ModTime().UnixNano() == *e.Nanos
-	}
-	return info.ModTime().UnixMilli() == e.Millis
+	return e.Matches(info)
 }

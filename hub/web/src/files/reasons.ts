@@ -33,7 +33,12 @@ export const REASONS: Record<string, string> = {
   other_names: 'other names for the same file keep the contents they have',
   write_failed: 'the hub could not complete the write',
   mtime_unavailable: 'the hub did not say when the file last changed',
+  host_unavailable: 'the host is unreachable or disconnected',
+  host_unsupported: 'this file operation is not supported on this host',
+  outcome_unknown: 'the write outcome is uncertain; the connection dropped during commit',
+  host_revision_conflict: 'the host configuration has changed; please refresh',
 }
+
 
 /**
  * reasonFor explains a refusal, or reports the code itself when it has none.

@@ -103,16 +103,16 @@ interface SessionsResponse {
   sessions?: Session[]
 }
 
-export async function listSessions(): Promise<Session[]> {
-  const res = await authFetch('/api/hosts/local/sessions')
+export async function listSessions(hostId = 'local'): Promise<Session[]> {
+  const res = await authFetch(`/api/hosts/${encodeURIComponent(hostId)}/sessions`)
   if (!res.ok) throw new Error(await errorText(res))
   const data = (await res.json()) as SessionsResponse | null
   return Array.isArray(data?.sessions) ? data.sessions : []
 }
 
-export async function createSession(name?: string): Promise<Session> {
+export async function createSession(name?: string, hostId = 'local'): Promise<Session> {
   const trimmed = name?.trim()
-  const res = await authFetch('/api/hosts/local/sessions', {
+  const res = await authFetch(`/api/hosts/${encodeURIComponent(hostId)}/sessions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(trimmed ? { name: trimmed } : {}),
@@ -121,20 +121,30 @@ export async function createSession(name?: string): Promise<Session> {
   return (await res.json()) as Session
 }
 
-export async function renameSession(oldName: string, newName: string): Promise<Session> {
-  const res = await authFetch(`/api/hosts/local/sessions/${encodeURIComponent(oldName)}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: newName }),
-  })
+export async function renameSession(
+  oldName: string,
+  newName: string,
+  hostId = 'local',
+): Promise<Session> {
+  const res = await authFetch(
+    `/api/hosts/${encodeURIComponent(hostId)}/sessions/${encodeURIComponent(oldName)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newName }),
+    },
+  )
   if (!res.ok) throw new Error(await errorText(res))
   return (await res.json()) as Session
 }
 
-export async function killSession(name: string): Promise<void> {
-  const res = await authFetch(`/api/hosts/local/sessions/${encodeURIComponent(name)}`, {
-    method: 'DELETE',
-  })
+export async function killSession(name: string, hostId = 'local'): Promise<void> {
+  const res = await authFetch(
+    `/api/hosts/${encodeURIComponent(hostId)}/sessions/${encodeURIComponent(name)}`,
+    {
+      method: 'DELETE',
+    },
+  )
   if (!res.ok) throw new Error(await errorText(res))
 }
 
@@ -143,11 +153,11 @@ interface TicketResponse {
 }
 
 /** Issue a single-use, 30s, session-bound WebSocket ticket. */
-export async function issueTicket(session: string): Promise<string> {
+export async function issueTicket(session: string, hostId = 'local'): Promise<string> {
   const res = await authFetch('/api/ws-ticket', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ hostId: 'local', session }),
+    body: JSON.stringify({ hostId, session }),
   })
   if (!res.ok) throw new Error(await errorText(res))
   const data = (await res.json()) as TicketResponse | null
@@ -156,3 +166,154 @@ export async function issueTicket(session: string): Promise<string> {
   }
   return data.ticket
 }
+
+export interface HostItem {
+  id: string
+  revision: number
+  connectionRevision: number
+  name: string
+  address?: string
+  port?: number
+  username?: string
+  credentialType?: string
+  hasCredential: boolean
+  trusted: boolean
+}
+
+export interface ProbeResult {
+  challengeToken: string
+  fingerprint: string
+  keyType: string
+}
+
+export interface CapabilityStatus {
+  available: boolean
+  error?: string
+}
+
+export interface FileCapability {
+  enabled: boolean
+  boundary?: string
+  rootHandleConfinement?: boolean
+  atomicReplacement?: boolean
+  error?: string
+}
+
+export interface HostCapabilities {
+  hostId?: string
+  revision?: number
+  online?: boolean
+  ssh?: CapabilityStatus | boolean
+  tmux?: CapabilityStatus | boolean
+  sftp?: CapabilityStatus | boolean
+  files?: FileCapability
+  posixRename?: boolean
+  error?: string
+}
+
+export interface HostCredentials {
+  password?: string
+  privateKey?: string
+  passphrase?: string
+}
+
+export interface HostInput {
+  id?: string
+  revision?: number
+  name: string
+  address: string
+  port: number
+  username: string
+  credentialType?: 'password' | 'private_key'
+  credentials?: HostCredentials
+  challengeToken?: string
+}
+
+interface HostsResponse {
+  hosts?: HostItem[]
+}
+
+export async function listHosts(): Promise<HostItem[]> {
+  const res = await authFetch('/api/hosts')
+  if (!res.ok) throw new Error(await errorText(res))
+  const data = (await res.json()) as HostsResponse | null
+  return Array.isArray(data?.hosts) ? data.hosts : []
+}
+
+export async function getHost(id: string): Promise<HostItem> {
+  const res = await authFetch(`/api/hosts/${encodeURIComponent(id)}`)
+  if (!res.ok) throw new Error(await errorText(res))
+  return (await res.json()) as HostItem
+}
+
+export async function createHost(input: HostInput): Promise<HostItem> {
+  const res = await authFetch('/api/hosts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!res.ok) throw new Error(await errorText(res))
+  return (await res.json()) as HostItem
+}
+
+export async function updateHost(
+  id: string,
+  input: HostInput,
+  expectedRevision: number,
+): Promise<HostItem> {
+  const res = await authFetch(
+    `/api/hosts/${encodeURIComponent(id)}?revision=${expectedRevision}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...input, revision: expectedRevision }),
+    },
+  )
+  if (!res.ok) throw new Error(await errorText(res))
+  return (await res.json()) as HostItem
+}
+
+export async function deleteHost(id: string, expectedRevision: number): Promise<void> {
+  const res = await authFetch(
+    `/api/hosts/${encodeURIComponent(id)}?revision=${expectedRevision}`,
+    {
+      method: 'DELETE',
+    },
+  )
+  if (!res.ok) throw new Error(await errorText(res))
+}
+
+export async function probeDraftHost(address: string, port: number): Promise<ProbeResult> {
+  const res = await authFetch('/api/hosts/probe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address, port }),
+  })
+  if (!res.ok) throw new Error(await errorText(res))
+  return (await res.json()) as ProbeResult
+}
+
+export async function probeExistingHost(id: string): Promise<ProbeResult> {
+  const res = await authFetch(`/api/hosts/${encodeURIComponent(id)}/probe`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(await errorText(res))
+  return (await res.json()) as ProbeResult
+}
+
+export async function confirmHostTrust(id: string, challengeToken: string): Promise<HostItem> {
+  const res = await authFetch(`/api/hosts/${encodeURIComponent(id)}/trust`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ challengeToken }),
+  })
+  if (!res.ok) throw new Error(await errorText(res))
+  return (await res.json()) as HostItem
+}
+
+export async function testHostCapabilities(id: string): Promise<HostCapabilities> {
+  const res = await authFetch(`/api/hosts/${encodeURIComponent(id)}/capabilities`)
+  if (!res.ok) throw new Error(await errorText(res))
+  return (await res.json()) as HostCapabilities
+}
+

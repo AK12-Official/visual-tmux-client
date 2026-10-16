@@ -8,10 +8,10 @@ import { ref } from 'vue'
 
 import { isDirty, panelElementId, tabElementId, type OpenFile } from '../../files/tabs'
 
-defineProps<{ files: OpenFile[]; active: string | null }>()
+defineProps<{ files: OpenFile[]; active: string | null; activeId?: number | null }>()
 const emit = defineEmits<{
-  (e: 'select', path: string): void
-  (e: 'close', path: string): void
+  (e: 'select', path: string, id?: number): void
+  (e: 'close', path: string, id?: number): void
 }>()
 
 const root = ref<HTMLElement | null>(null)
@@ -56,8 +56,10 @@ function onKeydown(event: KeyboardEvent) {
   const current = found.findIndex((tab) => tab === document.activeElement)
   if (current < 0) return
   const path = found[current].dataset.path
+  const idStr = found[current].dataset.id
+  const id = idStr ? Number(idStr) : undefined
   if (event.key === 'Delete') {
-    if (path !== undefined) emit('close', path)
+    if (path !== undefined) emit('close', path, id)
     return
   }
   const move: Record<string, number> = {
@@ -72,7 +74,8 @@ function onKeydown(event: KeyboardEvent) {
   const at = ((to % found.length) + found.length) % found.length
   found[at].focus()
   const next = found[at].dataset.path
-  if (next !== undefined) emit('select', next)
+  const nextId = found[at].dataset.id ? Number(found[at].dataset.id) : undefined
+  if (next !== undefined) emit('select', next, nextId)
 }
 defineExpose({ focusActiveTab })
 </script>
@@ -81,9 +84,9 @@ defineExpose({ focusActiveTab })
   <div ref="root" class="tabs" role="tablist" @keydown="onKeydown">
     <div
       v-for="file in files"
-      :key="file.path"
+      :key="file.id"
       class="tabs__tab"
-      :class="{ 'tabs__tab--active': file.path === active }"
+      :class="{ 'tabs__tab--active': (activeId !== undefined && activeId !== null ? file.id === activeId : file.path === active) }"
     >
       <button
         class="tabs__label"
@@ -91,12 +94,14 @@ defineExpose({ focusActiveTab })
         role="tab"
         :id="tabElementId(file.id)"
         :data-path="file.path"
-        :tabindex="file.path === active ? 0 : -1"
+        :data-id="file.id"
+        :tabindex="(activeId !== undefined && activeId !== null ? file.id === activeId : file.path === active) ? 0 : -1"
         :aria-controls="panelElementId"
-        :aria-selected="file.path === active"
-        :title="file.path"
-        @click="emit('select', file.path)"
+        :aria-selected="(activeId !== undefined && activeId !== null ? file.id === activeId : file.path === active)"
+        :title="file.hostId && file.hostId !== 'local' ? `[${file.hostId}] ${file.path}` : file.path"
+        @click="emit('select', file.path, file.id)"
       >
+        <span v-if="file.hostId && file.hostId !== 'local'" class="tabs__host">{{ file.hostId }}</span>
         <span class="tabs__name">{{ file.name }}</span>
         <!-- The marker is the only thing outside the editor that says a file has
              unsaved edits, so it is announced rather than merely drawn. -->
@@ -113,7 +118,7 @@ defineExpose({ focusActiveTab })
         type="button"
         tabindex="-1"
         :aria-label="`Close ${file.name}`"
-        @click="emit('close', file.path)"
+        @click="emit('close', file.path, file.id)"
       >×</button>
     </div>
   </div>

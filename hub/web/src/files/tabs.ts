@@ -20,6 +20,8 @@ export interface OpenFile {
    * when the path is the same.
    */
   id: number
+  hostId?: string
+  revision?: number
   path: string
   name: string
   /** text is the current editor contents. Empty for a file never read as text. */
@@ -105,6 +107,8 @@ export function anyDirty(files: OpenFile[]): boolean {
 export interface SaveRequest {
   /** id is the editing session that asked, which survives a rename. */
   id: number
+  hostId?: string
+  revision?: number
   /** path is the file the write names. */
   path: string
   /** text is the exact contents the write carries. */
@@ -135,6 +139,8 @@ export interface SaveRequest {
 export function beginSave(file: OpenFile, force = false, allowOtherNames = false): SaveRequest {
   return {
     id: file.id,
+    hostId: file.hostId,
+    revision: file.revision,
     path: file.path,
     text: file.text,
     expected: force ? null : file.stamp,
@@ -148,8 +154,11 @@ export function beginSave(file: OpenFile, force = false, allowOtherNames = false
  * The caller must adopt a returned value. Guessing it instead -- which is what a
  * client that assumed the current time would do -- dates the file behind itself
  * and makes the very next save look like a conflict. */
-export async function saveOpenFile(request: SaveRequest): Promise<Stamp | null> {
-  return writeFile(request.path, request.text, request.expected, request.allowOtherNames)
+export async function saveOpenFile(
+  request: SaveRequest,
+  hostId = request.hostId ?? 'local',
+): Promise<Stamp | null> {
+  return writeFile(request.path, request.text, request.expected, request.allowOtherNames, hostId)
 }
 
 /** applySaved folds a successful save back into the file's state.
@@ -210,6 +219,16 @@ export function settleSave(
 ): SaveSettlement {
   const tab = files.find((candidate) => candidate.id === request.id)
   if (!tab) return { files, outcome: 'closed' }
+  const reqHost = request.hostId ?? 'local'
+  const tabHost = tab.hostId ?? 'local'
+  if (reqHost !== tabHost) return { files, outcome: 'moved' }
+  if (
+    request.revision !== undefined &&
+    tab.revision !== undefined &&
+    request.revision !== tab.revision
+  ) {
+    return { files, outcome: 'moved' }
+  }
   if (tab.path !== request.path) return { files, outcome: 'moved' }
   // A rename of this path, or of a directory above it, is outstanding, so this
   // answer and that rename crossed on the wire and the browser cannot tell which
@@ -228,3 +247,49 @@ export function settleSave(
     outcome: 'saved',
   }
 }
+
+/** ReconcileResult is what became of reconciling an open tab with disk. */
+export interface ReconcileResult {
+  file: OpenFile
+  /**
+   * outcome describes how the reread was reconciled:
+   *   'matched'    -- disk contents matched the tab text (e.g. uncertain save actually committed); tab is clean
+   *   'reloaded'   -- tab was clean or edits were confirmed discarded; tab is updated to disk contents
+   *   'preserved'  -- tab had later unsaved edits that differ from disk; edits were preserved and not discarded
+   */
+  outcome: 'matched' | 'reloaded' | 'preserved'
+}
+
+/**
+ * reconcileTab reconciles an open file with fresh disk observations.
+ *
+ * If disk content matches the current tab text, the tab is marked clean with the
+ * new observation stamp.
+ * If the tab has uncommitted edits (file.text !== file.saved) that differ from disk
+ * and discardEdits is false, the user's edits are preserved without being silently
+ * overwritten by disk contents.
+ * Otherwise, the tab content is reloaded from disk.
+ */
+export function reconcileTab(
+  file: OpenFile,
+  disk: { text: string; stamp: Stamp | null },
+  discardEdits = false,
+): ReconcileResult {
+  if (disk.text === file.text) {
+    return {
+      file: { ...file, saved: disk.text, stamp: disk.stamp ?? file.stamp },
+      outcome: 'matched',
+    }
+  }
+  if (file.text !== file.saved && !discardEdits) {
+    return {
+      file: { ...file, stamp: disk.stamp ?? file.stamp },
+      outcome: 'preserved',
+    }
+  }
+  return {
+    file: { ...file, text: disk.text, saved: disk.text, stamp: disk.stamp ?? file.stamp },
+    outcome: 'reloaded',
+  }
+}
+

@@ -1,7 +1,6 @@
 package http
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,22 +11,11 @@ import (
 	"time"
 
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/files"
+	"github.com/AK12-Official/visual-tmux-client/hub/internal/host"
 )
 
 // FileService specifies the file operations the HTTP router needs.
-type FileService interface {
-	Enabled() bool
-	StartDirectory(candidate string) (string, bool)
-	List(ctx context.Context, path string) (files.ListResult, error)
-	Read(ctx context.Context, path string) (files.ReadResult, error)
-	Write(
-		ctx context.Context, path string, body io.Reader, declaredSize int64,
-		expected *files.ExpectedMtime, allowOtherNames bool,
-	) (files.WriteResult, error)
-	Create(ctx context.Context, path string, isDir bool) error
-	Rename(ctx context.Context, path, newPath string) error
-	Delete(ctx context.Context, path string, recursive bool) error
-}
+type FileService = host.Files
 
 // fileContentType is what every read is served as. The browser classifies a file
 // by its extension and reads the bytes through an explicit blob or text call, so
@@ -38,31 +26,44 @@ const fileContentType = "application/octet-stream"
 // mapFileError turns the service's error vocabulary into the wire codes the
 // browser matches on. The browser needs the code rather than the status: the
 // conflict flow in particular has to tell a lost race from any other failure.
+var fileErrorMappings = []struct {
+	target error
+	status int
+	code   string
+}{
+	{host.ErrNotFound, http.StatusNotFound, "host_not_found"},
+	{host.ErrUnavailable, http.StatusServiceUnavailable, "host_unavailable"},
+	{host.ErrUnsupported, http.StatusNotImplemented, "host_unsupported"},
+	{host.ErrOutcomeUnknown, http.StatusBadGateway, "outcome_unknown"},
+	{host.ErrStaleRevision, http.StatusConflict, "host_revision_conflict"},
+	{files.ErrInvalidPath, http.StatusBadRequest, "invalid_path"},
+	{files.ErrInvalidBody, http.StatusBadRequest, "invalid_body"},
+	{files.ErrPathNotAllowed, http.StatusForbidden, "path_not_allowed"},
+	{files.ErrCrossRoot, http.StatusForbidden, "cross_root_move"},
+	{files.ErrPermissionDenied, http.StatusForbidden, "permission_denied"},
+	{files.ErrNotFound, http.StatusNotFound, "not_found"},
+	{files.ErrConflict, http.StatusConflict, "conflict"},
+	{files.ErrDirNotEmpty, http.StatusConflict, "dir_not_empty"},
+	{files.ErrHasOtherNames, http.StatusConflict, "other_names"},
+	{files.ErrFileTooLarge, http.StatusRequestEntityTooLarge, "file_too_large"},
+}
+
 func mapFileError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, files.ErrInvalidPath):
-		writeError(w, http.StatusBadRequest, "invalid_path")
-	case errors.Is(err, files.ErrInvalidBody):
-		writeError(w, http.StatusBadRequest, "invalid_body")
-	case errors.Is(err, files.ErrPathNotAllowed):
-		writeError(w, http.StatusForbidden, "path_not_allowed")
-	case errors.Is(err, files.ErrCrossRoot):
-		writeError(w, http.StatusForbidden, "cross_root_move")
-	case errors.Is(err, files.ErrPermissionDenied):
-		writeError(w, http.StatusForbidden, "permission_denied")
-	case errors.Is(err, files.ErrNotFound):
-		writeError(w, http.StatusNotFound, "not_found")
-	case errors.Is(err, files.ErrConflict):
-		writeError(w, http.StatusConflict, "conflict")
-	case errors.Is(err, files.ErrDirNotEmpty):
-		writeError(w, http.StatusConflict, "dir_not_empty")
-	case errors.Is(err, files.ErrHasOtherNames):
-		writeError(w, http.StatusConflict, "other_names")
-	case errors.Is(err, files.ErrFileTooLarge):
-		writeError(w, http.StatusRequestEntityTooLarge, "file_too_large")
-	default:
-		writeError(w, http.StatusInternalServerError, "write_failed")
+	for _, m := range fileErrorMappings {
+		if errors.Is(err, m.target) {
+			writeError(w, m.status, m.code)
+			return
+		}
 	}
+	writeError(w, http.StatusInternalServerError, "write_failed")
+}
+
+func (s *handlerState) filesGloballyEnabled(w http.ResponseWriter) bool {
+	if !s.cfg.FilesEnabled {
+		writeError(w, http.StatusNotFound, "not_found")
+		return false
+	}
+	return true
 }
 
 // filesAvailable answers a request against a hub whose file manager is turned
@@ -70,7 +71,7 @@ func mapFileError(w http.ResponseWriter, err error) {
 // an unknown host gets: the caller learns nothing about paths, and nothing
 // touches the filesystem on behalf of a capability that is disabled.
 func (s *handlerState) filesAvailable(w http.ResponseWriter) bool {
-	if s.files == nil || !s.files.Enabled() {
+	if !s.cfg.FilesEnabled || s.files == nil || !s.files.Enabled() {
 		writeError(w, http.StatusNotFound, "not_found")
 		return false
 	}
@@ -108,7 +109,12 @@ func (s *handlerState) decodeFileRequest(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *handlerState) listFiles(w http.ResponseWriter, r *http.Request) {
-	if !requireLocalHost(w, r) || !s.filesAvailable(w) {
+	if !s.filesGloballyEnabled(w) {
+		return
+	}
+	var ok bool
+	s, ok = s.resolve(w, r, r.PathValue("hostId"))
+	if !ok || !s.filesAvailable(w) {
 		return
 	}
 	result, err := s.files.List(r.Context(), r.URL.Query().Get("path"))
@@ -131,9 +137,15 @@ func (s *handlerState) downloadFile(w http.ResponseWriter, r *http.Request) {
 // they stay separate routes so the browser's intent is legible in the request
 // and the download path can be exercised on its own.
 func (s *handlerState) serveFile(w http.ResponseWriter, r *http.Request, attachment bool) {
-	if !requireLocalHost(w, r) || !s.filesAvailable(w) {
+	if !s.filesGloballyEnabled(w) {
 		return
 	}
+	var ok bool
+	s, ok = s.resolve(w, r, r.PathValue("hostId"))
+	if !ok || !s.filesAvailable(w) {
+		return
+	}
+
 	path := r.URL.Query().Get("path")
 	result, err := s.files.Read(r.Context(), path)
 	if err != nil {
@@ -199,7 +211,12 @@ func (s *handlerState) serveFile(w http.ResponseWriter, r *http.Request, attachm
 }
 
 func (s *handlerState) writeFile(w http.ResponseWriter, r *http.Request) {
-	if !requireLocalHost(w, r) || !s.filesAvailable(w) {
+	if !s.filesGloballyEnabled(w) {
+		return
+	}
+	var ok bool
+	s, ok = s.resolve(w, r, r.PathValue("hostId"))
+	if !ok || !s.filesAvailable(w) {
 		return
 	}
 
@@ -246,7 +263,12 @@ func (s *handlerState) writeFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *handlerState) createEntry(w http.ResponseWriter, r *http.Request) {
-	if !requireLocalHost(w, r) || !s.filesAvailable(w) {
+	if !s.filesGloballyEnabled(w) {
+		return
+	}
+	var ok bool
+	s, ok = s.resolve(w, r, r.PathValue("hostId"))
+	if !ok || !s.filesAvailable(w) {
 		return
 	}
 	var req createFileRequest
@@ -285,7 +307,12 @@ func createKind(kind string) (isDir bool, ok bool) {
 }
 
 func (s *handlerState) renameEntry(w http.ResponseWriter, r *http.Request) {
-	if !requireLocalHost(w, r) || !s.filesAvailable(w) {
+	if !s.filesGloballyEnabled(w) {
+		return
+	}
+	var ok bool
+	s, ok = s.resolve(w, r, r.PathValue("hostId"))
+	if !ok || !s.filesAvailable(w) {
 		return
 	}
 	var req renameFileRequest
@@ -300,7 +327,12 @@ func (s *handlerState) renameEntry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *handlerState) deleteEntry(w http.ResponseWriter, r *http.Request) {
-	if !requireLocalHost(w, r) || !s.filesAvailable(w) {
+	if !s.filesGloballyEnabled(w) {
+		return
+	}
+	var ok bool
+	s, ok = s.resolve(w, r, r.PathValue("hostId"))
+	if !ok || !s.filesAvailable(w) {
 		return
 	}
 	var req deleteFileRequest
@@ -322,9 +354,15 @@ func (s *handlerState) deleteEntry(w http.ResponseWriter, r *http.Request) {
 // with one that is inside it and flags the substitution. Only the hub can: a
 // browser has no way to discover which directories the boundary permits.
 func (s *handlerState) sessionWorkingDirectory(w http.ResponseWriter, r *http.Request) {
-	if !requireLocalHost(w, r) {
+	if !s.filesGloballyEnabled(w) {
 		return
 	}
+	var ok bool
+	s, ok = s.resolve(w, r, r.PathValue("hostId"))
+	if !ok {
+		return
+	}
+
 	dir, err := s.sessions.PaneWorkingDirectory(r.Context(), r.PathValue("name"))
 	if err != nil {
 		mapSessionError(w, err)
@@ -356,10 +394,14 @@ func parseExpectedMtime(query url.Values) (*files.ExpectedMtime, bool) {
 	if !ok {
 		return nil, false
 	}
-	if millis == nil && nanos == nil {
+	digest := query.Get("expected_digest")
+	if digest == "" {
+		digest = query.Get("expected_revision")
+	}
+	if millis == nil && nanos == nil && digest == "" {
 		return nil, true
 	}
-	expected := files.ExpectedMtime{Nanos: nanos}
+	expected := files.ExpectedMtime{Nanos: nanos, Digest: digest}
 	if millis != nil {
 		expected.Millis = *millis
 	}

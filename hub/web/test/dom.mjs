@@ -61,3 +61,14 @@ Object.defineProperty(globalThis, 'cancelAnimationFrame', {
   configurable: true,
   writable: true,
 })
+
+class MockResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+Object.defineProperty(globalThis, 'ResizeObserver', {
+  value: MockResizeObserver,
+  configurable: true,
+  writable: true,
+})

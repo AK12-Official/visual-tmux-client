@@ -94,3 +94,39 @@ files:
   # Largest number of entries one directory listing returns, after which the
   # result is reported as truncated. Hard cap: 10000.
   max_dir_entries: 1000
+
+hosts:
+  # Multi-Host SSH Registry and Remote Transport Configuration.
+  #
+  # Directory where the durable SQLite database (hosts.db) is stored.
+  # If left empty, defaults to the OS user configuration directory:
+  #   - Linux: ~/.config/visual-tmux-client
+  #   - macOS: ~/Library/Application Support/visual-tmux-client
+  # For Docker/containerized deployments, mount a persistent volume at this path.
+  # Can also be set via VISUAL_TMUX_CLIENT_HOSTS_STATE_DIR environment variable.
+  state_dir: ""
+
+  # File path to the 32-byte AES-256 master encryption key used to encrypt
+  # stored credentials at rest. If left empty, defaults to "master.key" inside state_dir.
+  # Automatically generated with 0600 permissions if it does not exist.
+  # Can also be set via VISUAL_TMUX_CLIENT_HOSTS_MASTER_KEY_FILE environment variable.
+  master_key_file: ""
+
+  # Timeout for establishing TCP connections to remote SSH hosts.
+  dial_timeout: "10s"
+
+  # Timeout for completing SSH cryptographic handshakes.
+  handshake_timeout: "10s"
+
+  # Timeout budget for remote control commands and session queries.
+  operation_timeout: "30s"
+
+  # Interval between SSH transport keepalive heartbeat probes.
+  keepalive_interval: "15s"
+
+  # Maximum backoff interval between reconnect attempts on failing hosts.
+  max_backoff: "30s"
+
+  # Maximum concurrent connection budget per enrolled host.
+  max_connections: 16
+

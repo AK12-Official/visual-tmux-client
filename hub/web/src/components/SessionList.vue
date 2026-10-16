@@ -19,9 +19,14 @@ const props = withDefaults(
     /** Sessions with terminal output in the last few seconds. */
     active: Record<string, boolean>
     creating?: boolean
+    hostId?: string
+    hostName?: string
+    stale?: boolean
   }>(),
   {
     creating: false,
+    hostId: 'local',
+    stale: false,
   },
 )
 
@@ -32,15 +37,23 @@ const emit = defineEmits<{
   (e: 'kill', name: string): void
   (e: 'bulkKill', names: string[]): void
   (e: 'retry'): void
+  (e: 'repair'): void
 }>()
 
 // --- Ordering (manual mode persists per browser) ---
 
-const order = ref<OrderState>(loadOrder())
+const order = ref<OrderState>(loadOrder(props.hostId))
+
+watch(
+  () => props.hostId,
+  (newHost) => {
+    order.value = loadOrder(newHost)
+  },
+)
 
 function setMode(mode: OrderMode): void {
   order.value = { ...order.value, mode }
-  saveOrder(order.value)
+  saveOrder(order.value, props.hostId)
 }
 
 const ordered = computed(() => applyOrder(props.sessions, order.value))
@@ -61,7 +74,7 @@ watch(
     const pinned2 = [...new Set(order.value.pinned.filter((n) => names.has(n)))]
     if (order2.length !== order.value.order.length || pinned2.length !== order.value.pinned.length) {
       order.value = { ...order.value, order: order2, pinned: pinned2 }
-      saveOrder(order.value)
+      saveOrder(order.value, props.hostId)
     }
   },
 )
@@ -87,7 +100,7 @@ function togglePin(name: string): void {
       pinned,
     }
   }
-  saveOrder(order.value)
+  saveOrder(order.value, props.hostId)
 }
 
 // --- Drag reorder (manual mode only) ---
@@ -124,7 +137,7 @@ function onDrop(target: string): void {
   if (from < 0 || to < 0) return
   list.splice(to, 0, ...list.splice(from, 1))
   order.value = { ...order.value, order: list }
-  saveOrder(order.value)
+  saveOrder(order.value, props.hostId)
 }
 
 // Dragging is convenient with a pointer, but must not be the only way to
@@ -148,7 +161,7 @@ function moveBy(name: string, delta: -1 | 1): void {
   const to = list.indexOf(target)
   ;[list[from], list[to]] = [list[to], list[from]]
   order.value = { ...order.value, order: list }
-  saveOrder(order.value)
+  saveOrder(order.value, props.hostId)
 }
 
 // --- Select mode (batch management) ---
@@ -226,7 +239,7 @@ function submitRename(oldName: string): void {
     order: order.value.order.flatMap(carry),
     pinned: order.value.pinned.flatMap(carry),
   }
-  saveOrder(order.value)
+  saveOrder(order.value, props.hostId)
   emit('rename', oldName, name)
 }
 
@@ -265,6 +278,7 @@ watch(
 )
 
 const manualMode = computed(() => order.value.mode === 'manual')
+const isRepairable = computed(() => props.hostId !== 'local' && (props.stale || !!props.error))
 </script>
 
 <template>
@@ -300,16 +314,25 @@ const manualMode = computed(() => order.value.mode === 'manual')
       >Select</button>
     </div>
 
-    <div v-if="error" class="session-list__error" role="alert" aria-live="polite">
+    <div v-if="error && sessions.length === 0" class="session-list__error" role="alert" aria-live="polite">
       <span>{{ error }}</span>
       <button class="session-list__btn" type="button" @click="emit('retry')">Retry</button>
+      <button v-if="isRepairable" class="session-list__btn session-list__btn--repair" type="button" @click="emit('repair')">Edit host</button>
     </div>
 
     <div v-else-if="sessions.length === 0" class="session-list__empty" role="status">
       No sessions. Create one above.
     </div>
 
-    <ul v-else class="session-list__items">
+    <template v-else>
+      <div v-if="stale || error" class="session-list__stale" role="status" aria-live="polite">
+        <span class="session-list__stale-badge">Stale</span>
+        <span class="session-list__stale-msg">{{ error || 'Cached sessions (offline/stale)' }}</span>
+        <button class="session-list__btn" type="button" @click="emit('retry')">Retry</button>
+        <button v-if="isRepairable" class="session-list__btn session-list__btn--repair" type="button" @click="emit('repair')">Edit host</button>
+      </div>
+
+      <ul class="session-list__items" :class="{ 'session-list__items--stale': stale || !!error }">
       <li
         v-for="s in ordered"
         :key="s.name"
@@ -411,6 +434,7 @@ const manualMode = computed(() => order.value.mode === 'manual')
         </template>
       </li>
     </ul>
+    </template>
 
     <div v-if="selecting" class="session-list__batch" role="region" aria-label="Batch actions">
       <template v-if="!confirmingBulk">
@@ -424,14 +448,14 @@ const manualMode = computed(() => order.value.mode === 'manual')
         <button class="session-list__btn" type="button" @click="toggleSelectMode">Cancel</button>
       </template>
       <template v-else>
-        <span>Kill {{ checked.size }} session{{ checked.size === 1 ? '' : 's' }}?</span>
+        <span>Kill {{ checked.size }} session{{ checked.size === 1 ? '' : 's' }} on {{ hostName || hostId }}?</span>
         <button class="session-list__btn session-list__btn--danger" type="button" @click="confirmBulkKill">Kill</button>
         <button class="session-list__btn" type="button" @click="confirmingBulk = false">Cancel</button>
       </template>
     </div>
 
     <div v-else-if="confirmingKill" class="session-list__confirm" role="alertdialog" aria-label="Confirm session termination">
-      <span>Kill session "{{ confirmingKill }}"?</span>
+      <span>Kill session "{{ confirmingKill }}" on {{ hostName || hostId }}?</span>
       <button class="session-list__btn session-list__btn--danger" type="button" @click="confirmKill">Kill</button>
       <button class="session-list__btn" type="button" @click="confirmingKill = null">Cancel</button>
     </div>
@@ -533,6 +557,39 @@ const manualMode = computed(() => order.value.mode === 'manual')
   display: flex;
   align-items: center;
   gap: 0.5rem;
+}
+.session-list__stale {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.4rem;
+  background: rgba(234, 179, 8, 0.12);
+  border: 1px solid var(--th-warning, #eab308);
+  border-radius: 4px;
+  font-size: 0.75rem;
+  color: var(--th-warning, #eab308);
+}
+.session-list__stale-badge {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.65rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  background: var(--th-warning, #eab308);
+  color: #000;
+}
+.session-list__stale-msg {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-list__btn--repair {
+  border-color: var(--th-warning, #eab308);
+  color: var(--th-warning, #eab308);
+}
+.session-list__items--stale {
+  opacity: 0.75;
 }
 .session-list__empty {
   color: var(--th-text-lo);

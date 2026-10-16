@@ -114,6 +114,7 @@ func testRouterConfig(token string, staticFS fstest.MapFS) RouterConfig {
 		Token:               token,
 		MaxRequestBodyBytes: 64 * 1024,
 		MaxFileSize:         1 << 20,
+		FilesEnabled:        true,
 		WebConfig: config.WebConfig{
 			SessionPollInterval: config.Duration(5 * time.Second),
 			ActivityDecay:       config.Duration(2 * time.Second),

@@ -7,12 +7,14 @@ import {
   getToken,
   isHeaderSafeToken,
   killSession,
+  listHosts,
   listSessions,
   renameSession,
   setToken,
+  type HostItem,
   type Session,
 } from './api'
-import { notify } from './toasts'
+import { notify, type ToastLevel } from './toasts'
 import {
   disposeTerminalSession,
   insertIntoTerminal,
@@ -24,6 +26,7 @@ import SessionList from './components/SessionList.vue'
 import TerminalView from './components/TerminalView.vue'
 import ToastStack from './components/ToastStack.vue'
 import HelpModal from './components/HelpModal.vue'
+import HostManagerModal from './components/HostManagerModal.vue'
 
 // The file manager is loaded when it is first opened. It carries the editor,
 // which is by far the largest dependency in the application and is of no use to
@@ -39,9 +42,49 @@ const tokenInput = ref('')
 const authError = ref('')
 const authBusy = ref(false)
 
+const availableHosts = ref<HostItem[]>([
+  { id: 'local', revision: 0, connectionRevision: 0, name: 'Local', trusted: true, hasCredential: false } as HostItem,
+])
+const currentHostId = ref('local')
+
+const currentHost = computed<HostItem>(() =>
+  availableHosts.value.find((h) => h.id === currentHostId.value) || {
+    id: currentHostId.value,
+    revision: 0,
+    connectionRevision: 0,
+    name: currentHostId.value,
+    trusted: true,
+    hasCredential: false,
+  },
+)
+const currentHostName = computed(() => currentHost.value.name || currentHost.value.id)
+
+async function loadAvailableHosts(): Promise<void> {
+  if (!hasToken.value) return
+  try {
+    const list = await listHosts()
+    if (Array.isArray(list) && list.length > 0) {
+      availableHosts.value = list
+      if (!list.some((h) => h.id === currentHostId.value)) {
+        currentHostId.value = 'local'
+      }
+    }
+  } catch {
+    /* ignore network failure */
+  }
+}
+
 const sessions = ref<Session[]>([])
 const listError = ref('')
+const listStale = ref(false)
 const selected = ref<string | null>(null)
+const managerInitialHostId = ref<string | null>(null)
+const cachedSessionsByHost = shallowRef<Record<string, Session[]>>(nameMap())
+
+function openHostManagerFor(hostId: string): void {
+  managerInitialHostId.value = hostId
+  hostManagerOpen.value = true
+}
 
 // Every map keyed by session name uses this, and a session name is arbitrary
 // user text: the hub accepts anything that is valid UTF-8 without `:`, `.`,
@@ -78,18 +121,25 @@ const hasToken = computed(() => !!token.value)
 // longer exists while a second attachment mounts beside it. Keying by a stable
 // per-session id that renames carry over keeps one panel per session, so a
 // rename reuses the existing attachment instead of leaking it.
+// Panel keys are scoped by host so same-named sessions on different hosts have
+// separate panel identities in KeepAlive.
 const panelIds = shallowRef<Record<string, number>>(nameMap())
 let nextPanelId = 1
 
+function panelKey(name: string, hostId = currentHostId.value): string {
+  return `${hostId}:${name}`
+}
+
 function select(name: string): void {
-  if (panelIds.value[name] === undefined) {
-    panelIds.value = nameMap(panelIds.value, { [name]: nextPanelId++ })
+  const key = panelKey(name)
+  if (panelIds.value[key] === undefined) {
+    panelIds.value = nameMap(panelIds.value, { [key]: nextPanelId++ })
   }
   selected.value = name
 }
 
 const selectedPanelId = computed(() =>
-  selected.value === null ? null : panelIds.value[selected.value] ?? null,
+  selected.value === null ? null : panelIds.value[panelKey(selected.value)] ?? null,
 )
 
 // Whether the selected session still exists server-side, from the same polled
@@ -159,6 +209,18 @@ function toggleFullscreen(): void {
 // warns first.
 const fileManagerOpen = ref(false)
 const filesDirty = ref(false)
+const dirtyHostIds = ref<string[]>([])
+const fileManagerRef = ref<{ discardHostDrafts: (id: string) => void } | null>(null)
+
+function onDirtyChange(d: boolean, hosts?: string[]) {
+  filesDirty.value = d
+  dirtyHostIds.value = hosts ?? []
+}
+
+function onHostDeleted(id: string) {
+  fileManagerRef.value?.discardHostDrafts(id)
+  void loadAvailableHosts()
+}
 
 // The hub publishes whether it offers a file manager at all. A button that
 // always answers "not found" invites a support question, so the entry point is
@@ -174,6 +236,7 @@ const filesAvailable = computed(() => getConfig().files.enabled)
 function closeFileManager(): void {
   fileManagerOpen.value = false
   filesDirty.value = false
+  dirtyHostIds.value = []
 }
 
 /** toggleFileManager warns before discarding unsaved edits.
@@ -200,8 +263,15 @@ function toggleFileManager(): void {
  * already quoted it and made sure it carries no line terminator; all that is left
  * is to find a live attachment, and to say so when there is none rather than
  * letting the insertion look like it worked. */
-function insertPathIntoTerminal(text: string): void {
-  if (selected.value === null || !insertIntoTerminal(selected.value, text)) {
+function insertPathIntoTerminal(text: string, sourceHostId = currentHostId.value): void {
+  if (sourceHostId !== currentHostId.value) {
+    notify(
+      'warning',
+      `Cannot insert path across hosts: file belongs to ${sourceHostId} but active terminal is on ${currentHostId.value}.`,
+    )
+    return
+  }
+  if (selected.value === null || !insertIntoTerminal(selected.value, text, currentHostId.value)) {
     notify('warning', 'No live terminal to insert into.')
   }
 }
@@ -230,25 +300,37 @@ function closePanel(): void {
 const activity = shallowRef<Record<string, boolean>>(nameMap())
 const activityTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-function onActivity(name: string): void {
-  if (!activity.value[name]) {
-    activity.value = nameMap(activity.value, { [name]: true })
+function onActivity(name: string, hostId = currentHostId.value): void {
+  const key = panelKey(name, hostId)
+  if (!activity.value[key]) {
+    activity.value = nameMap(activity.value, { [key]: true })
   }
-  const timer = activityTimers.get(name)
+  const timer = activityTimers.get(key)
   if (timer) clearTimeout(timer)
   activityTimers.set(
-    name,
+    key,
     setTimeout(() => {
-      activityTimers.delete(name)
+      activityTimers.delete(key)
       const next = nameMap(activity.value)
-      delete next[name]
+      delete next[key]
       activity.value = next
     }, getConfig().web.activity_decay),
   )
 }
 
+const currentHostActivity = computed(() => {
+  const prefix = `${currentHostId.value}:`
+  const result = nameMap<boolean>()
+  for (const [key, val] of Object.entries(activity.value)) {
+    if (key.startsWith(prefix) && val) {
+      result[key.slice(prefix.length)] = true
+    }
+  }
+  return result
+})
+
 const selectedActive = computed(
-  () => selected.value !== null && !!activity.value[selected.value],
+  () => selected.value !== null && !!activity.value[panelKey(selected.value, currentHostId.value)],
 )
 
 // The tab-title mark is the only signal visible when the browser tab itself
@@ -275,6 +357,7 @@ function toggleSidebar(): void {
 // --- In-app help ---
 
 const helpOpen = ref(false)
+const hostManagerOpen = ref(false)
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -295,45 +378,88 @@ let refreshSeq = 0
 async function refresh() {
   if (!hasToken.value) return
   const seq = ++refreshSeq
+  const targetHostId = currentHostId.value
+  const targetRevision = currentHost.value?.revision
   try {
-    const list = await listSessions()
+    const list = await listSessions(targetHostId)
     if (seq !== refreshSeq) return
+    if (currentHostId.value !== targetHostId) return
+    if (
+      targetRevision !== undefined &&
+      currentHost.value?.revision !== undefined &&
+      currentHost.value.revision !== targetRevision
+    ) {
+      // Stale response from a superseded host revision dropped
+      return
+    }
+    cachedSessionsByHost.value = nameMap(cachedSessionsByHost.value, {
+      [targetHostId]: list,
+    })
     sessions.value = list
     listError.value = ''
+    listStale.value = false
     startPolling()
 
     // Prune dead panels for sessions that disappeared externally (e.g. killed via CLI).
     const liveNames = new Set(list.map((s) => s.name))
-    const deadNames = new Set<string>()
-    for (const name of Object.keys(panelIds.value)) {
-      if (!liveNames.has(name) && selected.value !== name) deadNames.add(name)
+    const deadKeys = new Set<string>()
+    for (const key of Object.keys(panelIds.value)) {
+      const colon = key.indexOf(':')
+      const host = colon >= 0 ? key.slice(0, colon) : 'local'
+      const name = colon >= 0 ? key.slice(colon + 1) : key
+      if (host === targetHostId && !liveNames.has(name) && selected.value !== name) {
+        deadKeys.add(key)
+      }
     }
-    for (const name of Object.keys(connStates.value)) {
-      if (!liveNames.has(name) && selected.value !== name) deadNames.add(name)
-    }
-    for (const name of Object.keys(activity.value)) {
-      if (!liveNames.has(name) && selected.value !== name) deadNames.add(name)
-    }
-    for (const name of deadNames) {
-      dropPanel(name)
+    for (const key of deadKeys) {
+      const colon = key.indexOf(':')
+      const host = colon >= 0 ? key.slice(0, colon) : 'local'
+      const name = colon >= 0 ? key.slice(colon + 1) : key
+      dropPanel(name, host)
     }
   } catch (err) {
     if (seq !== refreshSeq) return
-    if (err instanceof AuthError) {
+    if (currentHostId.value !== targetHostId) return
+    if (
+      targetRevision !== undefined &&
+      currentHost.value?.revision !== undefined &&
+      currentHost.value.revision !== targetRevision
+    ) {
+      return
+    }
+
+    if (targetHostId === 'local' && err instanceof AuthError) {
       handleAuthFailure()
-    } else {
-      listError.value = err instanceof Error ? err.message : String(err)
+      return
+    }
+
+    const msg = err instanceof Error ? err.message : String(err)
+    listError.value = msg
+    listStale.value = true
+
+    // Remote authentication, trust, or unavailable errors stop automatic polling retries
+    // to prevent hammering the server and offer host repair.
+    const isRemoteAuthOrTrust =
+      targetHostId !== 'local' &&
+      (msg.includes('auth') || msg.includes('trust') || msg.includes('unavailable') || msg.includes('conflict'))
+    if (isRemoteAuthOrTrust) {
+      stopPolling()
     }
   }
 }
 
 function cleanupSessionState() {
-  for (const name of Object.keys(panelIds.value)) {
-    disposeTerminalSession(name)
+  for (const key of Object.keys(panelIds.value)) {
+    const colon = key.indexOf(':')
+    const host = colon >= 0 ? key.slice(0, colon) : 'local'
+    const name = colon >= 0 ? key.slice(colon + 1) : key
+    disposeTerminalSession(name, host)
   }
   panelIds.value = nameMap()
   connStates.value = nameMap()
   activity.value = nameMap()
+  cachedSessionsByHost.value = nameMap()
+  listStale.value = false
   for (const timer of activityTimers.values()) clearTimeout(timer)
   activityTimers.clear()
 }
@@ -369,11 +495,16 @@ async function submitToken() {
   authError.value = ''
   try {
     setToken(t)
-    const list = await listSessions()
+    await loadAvailableHosts()
+    const list = await listSessions(currentHostId.value)
     token.value = t
     tokenInput.value = ''
+    cachedSessionsByHost.value = nameMap(cachedSessionsByHost.value, {
+      [currentHostId.value]: list,
+    })
     sessions.value = list
     listError.value = ''
+    listStale.value = false
     startPolling()
   } catch (err) {
     clearToken()
@@ -398,6 +529,22 @@ function logout() {
   cleanupSessionState()
 }
 
+function onHostChange(): void {
+  selected.value = null
+  listError.value = ''
+  listStale.value = false
+  sessions.value = cachedSessionsByHost.value[currentHostId.value] || []
+  void refresh()
+}
+
+function onSelectHostFromModal(id: string): void {
+  hostManagerOpen.value = false
+  if (currentHostId.value !== id) {
+    currentHostId.value = id
+    onHostChange()
+  }
+}
+
 // One-click creation: the hub assigns the default name (made unique by its
 // suffix retry); renaming is how the user personalizes it afterwards.
 const creating = ref(false)
@@ -405,15 +552,24 @@ async function onCreate() {
   if (creating.value) return
   creating.value = true
   try {
-    const sess = await createSession()
+    const sess = await createSession(undefined, currentHostId.value)
     await refresh()
     select(sess.name)
   } catch (err) {
     if (err instanceof AuthError) {
-      handleAuthFailure()
+      if (currentHostId.value === 'local') {
+        handleAuthFailure()
+        return
+      }
+      notify('error', 'Remote host authentication failed. Check host credentials.')
       return
     }
-    notify('error', err instanceof Error ? err.message : String(err))
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('outcome_unknown')) {
+      notify('warning', `Creation outcome uncertain on ${currentHostName.value}. Verify sessions before retrying.`)
+      return
+    }
+    notify('error', msg)
   } finally {
     creating.value = false
   }
@@ -421,36 +577,38 @@ async function onCreate() {
 
 async function onRename(oldName: string, newName: string) {
   try {
-    await renameSession(oldName, newName)
+    await renameSession(oldName, newName, currentHostId.value)
     // Carry the panel identity across the rename, so the live attachment for
     // this session is reused rather than stranded in the KeepAlive cache under
     // a name that no longer exists (see panelIds).
-    const id = panelIds.value[oldName]
+    const oldKey = panelKey(oldName)
+    const newKey = panelKey(newName)
+    const id = panelIds.value[oldKey]
     if (id !== undefined) {
-      const next = nameMap(panelIds.value, { [newName]: id })
-      delete next[oldName]
+      const next = nameMap(panelIds.value, { [newKey]: id })
+      delete next[oldKey]
       panelIds.value = next
     }
-    if (connStates.value[oldName] !== undefined) {
-      const nextStates = nameMap(connStates.value, { [newName]: connStates.value[oldName] })
-      delete nextStates[oldName]
+    if (connStates.value[oldKey] !== undefined) {
+      const nextStates = nameMap(connStates.value, { [newKey]: connStates.value[oldKey] })
+      delete nextStates[oldKey]
       connStates.value = nextStates
     }
-    if (activity.value[oldName] !== undefined) {
-      const nextAct = nameMap(activity.value, { [newName]: activity.value[oldName] })
-      delete nextAct[oldName]
+    if (activity.value[oldKey] !== undefined) {
+      const nextAct = nameMap(activity.value, { [newKey]: activity.value[oldKey] })
+      delete nextAct[oldKey]
       activity.value = nextAct
     }
-    const timer = activityTimers.get(oldName)
+    const timer = activityTimers.get(oldKey)
     if (timer) {
       clearTimeout(timer)
-      activityTimers.delete(oldName)
+      activityTimers.delete(oldKey)
       activityTimers.set(
-        newName,
+        newKey,
         setTimeout(() => {
-          activityTimers.delete(newName)
+          activityTimers.delete(newKey)
           const next = nameMap(activity.value)
-          delete next[newName]
+          delete next[newKey]
           activity.value = next
         }, getConfig().web.activity_decay),
       )
@@ -464,14 +622,23 @@ async function onRename(oldName: string, newName: string) {
     // change would reach it, but a panel parked in the KeepAlive cache never
     // re-renders, so no prop can: without this its terminal keeps the old name
     // and its next reconnect asks the hub for a session that no longer exists.
-    renameTerminalSession(oldName, newName)
+    renameTerminalSession(oldName, newName, currentHostId.value)
     await refresh()
   } catch (err) {
     if (err instanceof AuthError) {
-      handleAuthFailure()
+      if (currentHostId.value === 'local') {
+        handleAuthFailure()
+        return
+      }
+      notify('error', 'Remote host authentication failed. Check host credentials.')
       return
     }
-    notify('error', err instanceof Error ? err.message : String(err))
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('outcome_unknown')) {
+      notify('warning', `Rename outcome uncertain on ${currentHostName.value}. Verify session before retrying.`)
+      return
+    }
+    notify('error', msg)
   }
 }
 
@@ -482,42 +649,52 @@ async function onRename(oldName: string, newName: string) {
 // gone — KeepAlive only unmounts on eviction, and nothing evicts here — so its
 // terminal is disposed explicitly, or its xterm instance, scrollback and
 // ResizeObserver would be retained for the life of the page.
-function dropPanel(name: string): void {
-  if (panelIds.value[name] !== undefined) {
+function dropPanel(name: string, hostId = currentHostId.value): void {
+  const key = panelKey(name, hostId)
+  if (panelIds.value[key] !== undefined) {
     const next = nameMap(panelIds.value)
-    delete next[name]
+    delete next[key]
     panelIds.value = next
   }
-  if (connStates.value[name] !== undefined) {
+  if (connStates.value[key] !== undefined) {
     const nextStates = nameMap(connStates.value)
-    delete nextStates[name]
+    delete nextStates[key]
     connStates.value = nextStates
   }
-  if (activity.value[name] !== undefined) {
+  if (activity.value[key] !== undefined) {
     const nextAct = nameMap(activity.value)
-    delete nextAct[name]
+    delete nextAct[key]
     activity.value = nextAct
   }
-  const timer = activityTimers.get(name)
+  const timer = activityTimers.get(key)
   if (timer) {
     clearTimeout(timer)
-    activityTimers.delete(name)
+    activityTimers.delete(key)
   }
-  disposeTerminalSession(name)
+  disposeTerminalSession(name, hostId)
 }
 
 async function onKill(name: string) {
   try {
-    await killSession(name)
+    await killSession(name, currentHostId.value)
     if (selected.value === name) selected.value = null
-    dropPanel(name)
+    dropPanel(name, currentHostId.value)
     await refresh()
   } catch (err) {
     if (err instanceof AuthError) {
-      handleAuthFailure()
+      if (currentHostId.value === 'local') {
+        handleAuthFailure()
+        return
+      }
+      notify('error', 'Remote host authentication failed. Check host credentials.')
       return
     }
-    notify('error', err instanceof Error ? err.message : String(err))
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('outcome_unknown')) {
+      notify('warning', `Kill outcome uncertain on ${currentHostName.value}. Verify session before retrying.`)
+      return
+    }
+    notify('error', msg)
   }
 }
 
@@ -527,13 +704,21 @@ async function onBulkKill(names: string[]) {
   const failed: string[] = []
   for (const name of names) {
     try {
-      await killSession(name)
+      await killSession(name, currentHostId.value)
       if (selected.value === name) selected.value = null
-      dropPanel(name)
+      dropPanel(name, currentHostId.value)
     } catch (err) {
       if (err instanceof AuthError) {
-        handleAuthFailure()
+        if (currentHostId.value === 'local') {
+          handleAuthFailure()
+          return
+        }
+        notify('error', 'Remote host authentication failed. Check host credentials.')
         return
+      }
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('outcome_unknown')) {
+        notify('warning', `Kill outcome uncertain for "${name}" on ${currentHostName.value}.`)
       }
       failed.push(name)
     }
@@ -544,11 +729,12 @@ async function onBulkKill(names: string[]) {
   await refresh()
 }
 
-function onState(session: string, state: ConnState) {
-  connStates.value = nameMap(connStates.value, { [session]: state })
+function onState(session: string, state: ConnState, hostId = currentHostId.value) {
+  const key = panelKey(session, hostId)
+  connStates.value = nameMap(connStates.value, { [key]: state })
 }
 
-function onNotice(message: string, level: 'error' | 'warning' = 'error') {
+function onNotice(message: string, level: ToastLevel = 'error') {
   notify(level, message)
 }
 
@@ -563,7 +749,9 @@ function onOffline() {
 }
 
 onMounted(() => {
-  if (hasToken.value) void refresh()
+  if (hasToken.value) {
+    void loadAvailableHosts().then(() => refresh())
+  }
   window.addEventListener('online', onOnline)
   window.addEventListener('offline', onOffline)
 })
@@ -604,7 +792,24 @@ onBeforeUnmount(() => {
     <template v-else>
       <header class="app__bar">
         <span class="app__title">Visual Tmux Client</span>
-        <button class="app__logout" type="button" aria-label="Disconnect and clear credentials" @click="logout">Disconnect</button>
+        <div class="app__host-select-wrapper">
+          <label for="host-select" class="sr-only">Select Host</label>
+          <select
+            id="host-select"
+            v-model="currentHostId"
+            class="app__host-select"
+            aria-label="Target Host"
+            @change="onHostChange"
+          >
+            <option v-for="h in availableHosts" :key="h.id" :value="h.id">
+              {{ h.name || h.id }}{{ h.address ? ` (${h.address})` : '' }}
+            </option>
+          </select>
+        </div>
+        <div class="app__bar-actions">
+          <button class="app__bar-btn" type="button" aria-label="Manage remote hosts" @click="hostManagerOpen = true">Hosts</button>
+          <button class="app__logout" type="button" aria-label="Disconnect and clear credentials" @click="logout">Disconnect</button>
+        </div>
       </header>
 
       <div class="app__body">
@@ -622,15 +827,19 @@ onBeforeUnmount(() => {
               <SessionList
                 :sessions="sessions"
                 :error="listError"
+                :stale="listStale"
                 :selected="selected"
-                :active="activity"
+                :active="currentHostActivity"
                 :creating="creating"
+                :host-id="currentHostId"
+                :host-name="currentHostName"
                 @select="select($event)"
                 @create="onCreate"
                 @rename="onRename"
                 @kill="onKill"
                 @bulk-kill="onBulkKill"
                 @retry="refresh"
+                @repair="openHostManagerFor(currentHostId)"
               />
             </div>
             <button class="app__help-btn" type="button" title="tmux 使用指南" @click="helpOpen = true">
@@ -663,13 +872,14 @@ onBeforeUnmount(() => {
               :title="selectedActive ? 'producing output' : 'idle'"
               aria-hidden="true"
             ></span>
+            <span class="app__term-host" :title="`Host: ${currentHostName} (${currentHostId})`">{{ currentHostName }}</span>
             <span class="app__term-title">{{ selected }}</span>
             <span
               class="app__term-state"
-              :class="`app__term-state--${connStates[selected] ?? 'connecting'}`"
+              :class="`app__term-state--${connStates[panelKey(selected)] ?? 'connecting'}`"
               role="status"
               aria-live="polite"
-            >{{ connStates[selected] ?? 'connecting' }}</span>
+            >{{ connStates[panelKey(selected)] ?? 'connecting' }}</span>
             <span class="app__term-spacer"></span>
             <button
               class="app__term-btn"
@@ -720,6 +930,7 @@ onBeforeUnmount(() => {
               :session="selected"
               :alive="selectedAlive"
               :font-size="fontSize"
+              :host-id="currentHostId"
               @state="onState"
               @notice="onNotice"
               @activity="onActivity"
@@ -727,11 +938,16 @@ onBeforeUnmount(() => {
           </KeepAlive>
           <div v-if="fileManagerOpen" class="app__files">
             <FileManagerOverlay
+              ref="fileManagerRef"
               :session="selected"
+              :host-id="currentHostId"
+              :host-name="currentHostName"
+              :host-revision="currentHost.revision"
+              :available-host-ids="availableHosts.map((h) => h.id)"
               @close="closeFileManager"
               @notice="onNotice"
               @insert-path="insertPathIntoTerminal"
-              @dirty-change="filesDirty = $event"
+              @dirty-change="onDirtyChange"
             />
           </div>
           <ToastStack />
@@ -740,6 +956,15 @@ onBeforeUnmount(() => {
     </template>
 
     <HelpModal :open="helpOpen" @close="helpOpen = false" />
+    <HostManagerModal
+      :open="hostManagerOpen"
+      :initial-host-id="managerInitialHostId"
+      :dirty-hosts="dirtyHostIds"
+      @close="hostManagerOpen = false; managerInitialHostId = null"
+      @hosts-changed="loadAvailableHosts"
+      @host-deleted="onHostDeleted"
+      @select-host="onSelectHostFromModal"
+    />
   </div>
 </template>
 
@@ -768,8 +993,42 @@ onBeforeUnmount(() => {
   font-weight: 600;
   font-size: 0.95rem;
 }
-.app__logout {
+.app__host-select-wrapper {
+  display: flex;
+  align-items: center;
+}
+.app__host-select {
+  background: var(--th-raised);
+  color: var(--th-text-hi);
+  border: 1px solid var(--th-border);
+  border-radius: 4px;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.app__host-select:focus {
+  border-color: var(--th-focus);
+  outline: none;
+}
+.app__bar-actions {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.app__bar-btn {
+  background: var(--th-raised);
+  color: var(--th-text-hi);
+  border: 1px solid var(--th-border);
+  border-radius: 4px;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.app__bar-btn:hover {
+  border-color: var(--th-text-lo);
+}
+.app__logout {
   background: var(--th-raised);
   color: var(--th-text-hi);
   border: 1px solid var(--th-border);
@@ -822,6 +1081,16 @@ onBeforeUnmount(() => {
   .app__sidebar {
     transition: none;
   }
+}
+.app__term-host {
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.15rem 0.4rem;
+  background: var(--th-raised);
+  color: var(--th-text-lo);
+  border: 1px solid var(--th-border);
+  border-radius: 3px;
+  white-space: nowrap;
 }
 .app__term-title {
   font-family: var(--app-code-font);

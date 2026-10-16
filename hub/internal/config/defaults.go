@@ -55,6 +55,14 @@ const (
 // DefaultConfig returns a complete Config populated with all design defaults.
 func DefaultConfig() Config {
 	return Config{
+		Hosts: HostsConfig{
+			DialTimeout:       Duration(10 * time.Second),
+			HandshakeTimeout:  Duration(10 * time.Second),
+			OperationTimeout:  Duration(30 * time.Second),
+			KeepaliveInterval: Duration(15 * time.Second),
+			MaxBackoff:        Duration(30 * time.Second),
+			MaxConnections:    16,
+		},
 		Version: DefaultVersion,
 		Server: ServerConfig{
 			Addr:                DefaultServerAddr,

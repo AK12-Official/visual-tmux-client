@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/auth"
+	"github.com/AK12-Official/visual-tmux-client/hub/internal/host"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/terminal"
 	"github.com/coder/websocket"
 )
@@ -574,4 +575,150 @@ func TestWSControlMessageHandling(t *testing.T) {
 		t.Errorf("invalid resize should have been ignored, got cols=%d, rows=%d", resizedCols, resizedRows)
 	}
 	mu.Unlock()
+}
+
+type mapResolver struct {
+	mu       sync.Mutex
+	runtimes map[host.ID]host.Runtime
+}
+
+func (m *mapResolver) Resolve(ctx context.Context, id host.ID) (host.Runtime, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rt, ok := m.runtimes[id]
+	if !ok {
+		return host.Runtime{}, host.ErrNotFound
+	}
+	return rt, nil
+}
+
+func (m *mapResolver) set(id host.ID, rt host.Runtime) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.runtimes[id] = rt
+}
+
+func TestWSTargetBoundTickets(t *testing.T) {
+	baseTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	currentTime := baseTime
+	nowFunc := func() time.Time { return currentTime }
+
+	store := auth.NewTicketStore(30*time.Second, nowFunc)
+	factory := &mockFactory{}
+	resolver := &mapResolver{
+		runtimes: map[host.ID]host.Runtime{
+			"host-a": {
+				Target:    host.Target{HostID: "host-a", Revision: 1, ConnectionRevision: 1},
+				Processes: factory,
+			},
+			"host-b": {
+				Target:    host.Target{HostID: "host-b", Revision: 1, ConnectionRevision: 1},
+				Processes: factory,
+			},
+		},
+	}
+	mgr := terminal.NewManager(time.Second)
+	handler := NewHandlerWithResolver(store, resolver, mgr, DefaultOptions(), nil, nil)
+	mux := http.NewServeMux()
+	mux.Handle("GET /ws/{hostId}/{session}", handler)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// 1. Cross-host same-name refusal
+	// Issue ticket for host-a, session "dev"
+	tkt1, _, err := store.IssueForTarget("host-a", 1, "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Attempt to connect to host-b with session "dev"
+	connCross, _, err := websocket.Dial(ctx, wsURL(ts, "/ws/host-b/dev?ticket="+tkt1), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeConn(connCross)
+	emCross := readErrorFrame(t, connCross)
+	if emCross.Message != "ticket does not match session" || emCross.Retryable {
+		t.Fatalf("expected non-retryable mismatch error for cross-host, got %+v", emCross)
+	}
+
+	// Single-use check: ticket cannot be used on host-a anymore
+	connReusedCross, _, err := websocket.Dial(ctx, wsURL(ts, "/ws/host-a/dev?ticket="+tkt1), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeConn(connReusedCross)
+	emReusedCross := readErrorFrame(t, connReusedCross)
+	if emReusedCross.Message != "invalid ticket" || emReusedCross.Retryable {
+		t.Fatalf("expected non-retryable invalid ticket error after cross-host attempt, got %+v", emReusedCross)
+	}
+
+	// 2. Superseded-host ticket refusal
+	tktRev, _, err := store.IssueForTarget("host-a", 1, "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Bump host-a connection revision to 2
+	resolver.set("host-a", host.Runtime{
+		Target:    host.Target{HostID: "host-a", Revision: 2, ConnectionRevision: 2},
+		Processes: factory,
+	})
+	connSuperseded, _, err := websocket.Dial(ctx, wsURL(ts, "/ws/host-a/dev?ticket="+tktRev), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeConn(connSuperseded)
+	emSuperseded := readErrorFrame(t, connSuperseded)
+	if emSuperseded.Message != "host configuration changed" || emSuperseded.Retryable {
+		t.Fatalf("expected non-retryable host configuration changed error, got %+v", emSuperseded)
+	}
+
+	// 3. Expired ticket refusal
+	tktExp, _, err := store.IssueForTarget("host-a", 2, "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentTime = baseTime.Add(31 * time.Second) // expired
+	connExp, _, err := websocket.Dial(ctx, wsURL(ts, "/ws/host-a/dev?ticket="+tktExp), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeConn(connExp)
+	emExp := readErrorFrame(t, connExp)
+	if emExp.Message != "ticket expired" || emExp.Retryable {
+		t.Fatalf("expected non-retryable ticket expired error, got %+v", emExp)
+	}
+
+	// 4. Reused ticket refusal after successful redemption
+	currentTime = baseTime // reset time
+	tktValid, _, err := store.IssueForTarget("host-a", 2, "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	connValid, _, err := websocket.Dial(ctx, wsURL(ts, "/ws/host-a/dev?ticket="+tktValid), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeConn(connValid)
+	// Read ready frame to confirm success
+	msgType, _, err := connValid.Read(ctx)
+	if err != nil {
+		t.Fatalf("failed reading ready frame: %v", err)
+	}
+	if msgType != websocket.MessageText {
+		t.Fatalf("expected text frame, got %v", msgType)
+	}
+
+	// Now try redeeming the same ticket a second time
+	connReused, _, err := websocket.Dial(ctx, wsURL(ts, "/ws/host-a/dev?ticket="+tktValid), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeConn(connReused)
+	emReused := readErrorFrame(t, connReused)
+	if emReused.Message != "invalid ticket" || emReused.Retryable {
+		t.Fatalf("expected non-retryable invalid ticket error on reused ticket, got %+v", emReused)
+	}
 }

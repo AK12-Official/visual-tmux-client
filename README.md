@@ -2,9 +2,7 @@
 
 [简体中文](README.zh-CN.md) | English
 
-**Visual Tmux Client** is a small, self-hosted web interface for managing and using tmux sessions from a browser. The Vue frontend is embedded in a single Go binary, so deployment only needs the binary and a local `tmux` installation.
-
-> The project is currently an early `v0.3` release. It manages tmux on the same machine where Visual Tmux Client runs; remote-host aggregation is not implemented.
+**Visual Tmux Client** is a small, self-hosted web interface for managing and using tmux sessions and files from a browser across your local machine and remote SSH servers. The Vue frontend is embedded in a single Go binary, requiring no external runtime dependencies beyond standard `tmux` and SSH/SFTP on remote targets.
 
 ## Session preservation defaults
 
@@ -21,15 +19,19 @@ Tests use isolated sockets and target only their own server during cleanup.
 
 ## Features
 
-- List, create (one click, auto-named), rename, and terminate local tmux sessions — individually or in batches.
+- Manage both the local machine and multiple remote SSH hosts from a unified web interface.
+- List, create (one click, auto-named), rename, and terminate tmux sessions — individually or in batches.
 - Attach to a session in a full browser terminal powered by xterm.js, and re-attach after a detach or a disconnect.
 - Native mouse wheel scrolling enabled by default for attached terminals.
 - See which session is talking: background sessions with recent output get a highlighted card; the viewed session is marked in the terminal header and the browser tab title.
 - Terminal header with font-size controls, fullscreen, and panel close.
 - Manual session ordering with drag reorder and pin-to-top, plus a collapsible session sidebar.
 - Leveled, auto-expiring toast notifications for action results and terminal events.
-- Browse, preview, edit, and organize files on the host from the terminal: directory tree, multi-tab editor, Markdown and image preview, and a context menu for create/rename/delete/download.
+- Browse, preview, edit, and organize files locally or remotely via SFTP: directory tree, multi-tab editor, Markdown and image preview, and a context menu for create/rename/delete/download.
 - Insert a file's path into the terminal input line without leaving the manager.
+- Secure remote host enrollment with SSH password or ed25519/RSA private key (with passphrase support) and strict Trust On First Use (TOFU) host key pinning.
+- Encrypted credential storage at rest using AES-256-GCM with an authenticated master key.
+- Per-host isolated session workspaces, independent connection pools, and automatic keepalives.
 - Built-in Chinese tmux guide available from the in-app help button.
 - Session names accept non-ASCII text such as Chinese (up to 64 characters); `:`, `.`, `/`, `\`, `;`, full-width lookalikes (`：`, `．`, `；`), edge whitespace, and control characters are reserved/disallowed.
 - Preserve terminal state across browser disconnects by leaving tmux sessions running.
@@ -103,6 +105,8 @@ If configuration values are changed in YAML, restart the server to apply backend
 | `VISUAL_TMUX_CLIENT_TOKEN` | Generated at startup | Shared bearer token used by the browser UI |
 | `VISUAL_TMUX_CLIENT_ORIGIN` | Unset | Allowed WebSocket origin; defaults to matching request host |
 | `VISUAL_TMUX_CLIENT_TMUX_PATH` | Resolved from `PATH` | Path to the tmux executable binary |
+| `VISUAL_TMUX_CLIENT_HOSTS_STATE_DIR` | OS user config dir (`~/.config/visual-tmux-client` on Linux) | Directory where the durable SQLite host database (`hosts.db`) is stored |
+| `VISUAL_TMUX_CLIENT_HOSTS_MASTER_KEY_FILE` | Derived from state dir (`master.key`) | Path to the 32-byte AES-256 master encryption key used for stored credentials |
 
 ### YAML Configuration File
 
@@ -169,6 +173,17 @@ files:
   #   - "/srv/projects"
   max_file_size: 104857600 # 100 MiB
   max_dir_entries: 1000
+
+hosts:
+  # Multi-Host SSH Registry and Remote Transport Configuration.
+  state_dir: "" # Defaults to user config dir (~/.config/visual-tmux-client on Linux)
+  master_key_file: "" # Defaults to master.key inside state_dir
+  dial_timeout: "10s"
+  handshake_timeout: "10s"
+  operation_timeout: "30s"
+  keepalive_interval: "15s"
+  max_backoff: "30s"
+  max_connections: 16
 ```
 
 ### File access
@@ -206,6 +221,46 @@ A save refuses a target that is not a regular file -- a named pipe, a socket, a 
 The file manager opens at the working directory of the session's active pane. That directory is a starting point only, read once: navigating afterwards is unrestricted, and changing the active pane does not move an already-open manager.
 
 When `roots` is configured and the pane's directory lies outside them, the manager opens at the first configured root instead and says so — a browser has no way to work out which directories the boundary permits, so the hub names one. If the pane's directory is unusable for any other reason, such as having been removed, the nearest ancestor that can still be opened is used, and that substitution is reported too.
+
+### Remote host file access (SFTP)
+
+When accessing files on an enrolled remote host:
+- Operations run over SFTP (v3) as the authenticated SSH user. File access is bounded by that remote user's operating system permissions; the local `files.roots` configuration applies strictly to the local host and does not restrict remote hosts.
+- **Atomic replacement**: When the remote SFTP server supports the OpenSSH `posix-rename@openssh.com` extension, saving a file uses atomic replacement with optimistic concurrency verification. If atomic replacement is not supported by the remote SFTP server, saving to an existing target is refused unless forced, protecting existing files from partial write corruption.
+- **Hard links**: Replacing a remote file that has a hard link count greater than 1 requires explicit confirmation, as replacing the target unlinks that specific name from the underlying inode.
+- **Timestamp precision**: Standard SFTP v3 transmits timestamps in integer seconds. Concurrency checks on remote files evaluate coarse 1-second timestamps.
+- **Temporary upload files**: Saves stage new contents to a temporary sibling file (`.vtc-tmp.*`) before renaming into place, ensuring incomplete network transfers leave existing files untouched.
+
+## Multi-host Deployment and Security
+
+### Single-Admin Authority and Server Trust
+Visual Tmux Client operates under a single-admin security model. Possession of the shared Bearer token grants full administrative authority to manage sessions, access files, enroll remote hosts, and execute arbitrary commands both locally and across all enrolled remote machines.
+
+When enrolling a remote host, VTC employs Trust-On-First-Use (TOFU) host key pinning:
+1. The remote host's public key fingerprint (SHA-256) is presented for admin confirmation prior to initial connection.
+2. Once confirmed, the host key is securely pinned in the persistent SQLite database (`hosts.db`).
+3. Subsequent connections strictly verify the pinned key. Any key mismatch or unannounced change causes the connection to be immediately aborted.
+
+### Containerized Deployments and Persistent Mounts
+When deploying in Docker or Kubernetes:
+- The host registry database (`hosts.db`) and master encryption key (`master.key`) are stored in `hosts.state_dir` (or `VISUAL_TMUX_CLIENT_HOSTS_STATE_DIR`).
+- **You must mount a persistent volume** to this state directory so that enrolled hosts and encrypted credentials survive container restarts or image upgrades.
+- Ensure the state directory is secured with `0700` permissions and the master key file with `0600` permissions.
+
+Example Docker volume mount:
+```sh
+docker run -d \
+  -p 7690:7690 \
+  -v /var/lib/visual-tmux-client/hosts:/data/hosts \
+  -e VISUAL_TMUX_CLIENT_HOSTS_STATE_DIR=/data/hosts \
+  -e VISUAL_TMUX_CLIENT_TOKEN="secret-admin-token" \
+  visual-tmux-client:latest
+```
+
+### Key and State Backup & Disaster Recovery
+- **Backup**: Regularly back up both `hosts.db` and `master.key` from your state directory. Both files must be backed up together; credentials in `hosts.db` are encrypted using AES-256-GCM keyed by `master.key`.
+- **Restoration**: To restore to a fresh machine or container, restore `hosts.db` and `master.key` to the designated `state_dir` with `0600`/`0700` permissions before starting the service.
+- **Lost Master Key**: If `master.key` is lost or corrupted, `hosts.db` cannot decrypt stored SSH passwords or private keys. The host metadata and pinned host keys remain accessible, but each host will need to have its credentials re-entered.
 
 The default loopback binding is intentional. If you expose the service to another machine, put it behind HTTPS, use a strong stable token, and set `origin` to the exact public origin. See [SECURITY.md](SECURITY.md) before exposing it to a network.
 
@@ -245,6 +300,7 @@ hub/cmd/visual-tmux-client/  Entry point, CLI flag parsing, and exit code handli
 hub/internal/app/            Application composition root, signals, and two-phase shutdown
 hub/internal/config/         Configuration models, strict YAML decoding, loader, and provenance
 hub/internal/auth/           Bearer token verification, timing-safe equality, ticket store
+hub/internal/host/           Remote SSH host registry, connection pooling, encrypted credentials, SFTP bridge, and remote tmux adapter
 hub/internal/session/        Session domain model, name validation, service, Backend interface
 hub/internal/tmux/           Tmux command runner, PTY allocation, socket isolation, environment scrubbing
 hub/internal/terminal/       Terminal backpressure buffer, ring staging, attachment pump
@@ -261,7 +317,8 @@ The browser UI fetches public runtime parameters from `GET /api/client-config` p
 Visual Tmux Client retains full backwards compatibility:
 - Starting the binary without a YAML configuration file automatically operates with the documented built-in defaults.
 - All command-line flags and environment variables from previous versions continue to function identically.
-- If rolling back to an earlier binary release, simply stop the server, replace the executable, and restart. Running tmux sessions are fully preserved across restarts and downgrades.
+- If rolling back to an earlier binary release, simply stop the server, replace the executable, and restart. Running local tmux sessions are fully preserved across restarts and downgrades.
+- The host registry database (`hosts.db`) schema maintains backwards compatibility; rolling back the binary preserves existing host enrollments. Restoring backed-up `hosts.db` and `master.key` files provides an immediate clean recovery point if necessary.
 
 ## Contributing
 

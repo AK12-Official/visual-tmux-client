@@ -7,6 +7,8 @@ Lets an authenticated browser user browse, preview, edit, and organize files on 
 
 ### Requirement: Filesystem access boundary
 
+The following filesystem-handle, identity and local metadata guarantees apply to the built-in local host and remain unchanged there. Remote SFTP operations follow Remote file access boundary and Remote file replacement semantics instead.
+
 By default the hub SHALL allow file operations on any regular path its own operating-system user can access, mirroring the access that user already has through an attached terminal. When an operator configures a set of root directories, the hub SHALL confine every caller-supplied operation to those roots instead. The hub SHALL authorize each operation against the canonical, symlink-resolved form of the target path, not the caller-supplied lexical form, so that a symbolic link cannot be used to reach a target outside a root. The hub SHALL reject `/proc`, `/sys`, and `/dev` before applying any root check, so that no configuration can expose them. A target that does not yet exist SHALL be validated by resolving the canonical form of its nearest existing ancestor and re-appending the remaining segments. A caller SHALL supply absolute, platform-native paths of at most 4096 characters.
 
 Roots govern what a **caller** may name, and no path supplied through this API reaches outside them: each operation is authorized against the target's resolved form, and one that resolves outside every root is refused.
@@ -81,7 +83,7 @@ Roots are therefore a boundary against a caller, and against a replaced path com
 
 The hub SHALL return the immediate children of a directory, each carrying at least its name, whether it is a directory, its size, and its modification time. A child that is a symbolic link SHALL be described by what it points at, within the boundary: a link to a directory SHALL be reported as a directory, so the browser offers it for expanding rather than for opening. A link whose target lies outside every configured root SHALL NOT be described by that target, so a listing never answers with the size or modification time of a path the caller may not name. An entry that cannot be described at all SHALL be reported as present without a size or modification time, rather than failing the listing or reporting the link's own size in place of a target's; a link whose target is missing is one of those. Listing SHALL order directories before files, and each group by name. Listing SHALL be bounded by the configured maximum number of entries and SHALL report whether the result was truncated. Listing a directory with no children SHALL succeed and return an empty result, not an error.
 
-Reading SHALL be bounded by the same configured maximum, plus the entries the hub is itself holding back from the listing -- the staging files of writes in flight, of which there are as many as there are concurrent writes. The cost of listing a directory is therefore the cost of the listing rather than the cost of the directory. A directory holding more entries than that bound SHALL be reported as truncated, and which of its entries appear in a truncated listing is not specified. The hub SHALL abandon a listing when the caller's request is cancelled.
+For local directories, reading SHALL be bounded by the same configured maximum, plus the entries the hub is itself holding back from the listing -- the staging files of writes in flight, of which there are as many as there are concurrent writes. The cost of listing a directory is therefore the cost of the listing rather than the cost of the directory. A directory holding more entries than that bound SHALL be reported as truncated, and which of its entries appear in a truncated listing is not specified. The hub SHALL abandon a listing when the caller's request is cancelled.
 
 #### Scenario: Directory with contents
 
@@ -122,6 +124,8 @@ Reading SHALL be bounded by the same configured maximum, plus the entries the hu
 
 - **WHEN** a caller lists a path that is a regular file, or that does not exist
 - **THEN** the hub refuses the operation with an error distinguishing the two cases from an empty directory
+
+For remote directories, the same result limit, ordering and truncation indication SHALL apply; a bounded SFTP response batch of lookahead is permitted as specified under Bounded remote transfer and capability reporting.
 
 ### Requirement: Bounded file reading
 
@@ -175,6 +179,8 @@ The hub SHALL NOT serve more bytes than the size it checked against the limit, a
 - **THEN** the hub reports the contents as binary, because decoding them as text is what would replace those bytes on the next save
 
 ### Requirement: Optimistic concurrent writes
+
+The following filesystem-handle, identity and local metadata guarantees apply to the built-in local host and remain unchanged there. Remote SFTP operations follow Remote file access boundary and Remote file replacement semantics instead.
 
 A write SHALL carry the modification time the caller last observed for the target. The hub SHALL refuse the write with a conflict error when that value does not match the file's current modification time. A caller MAY omit the observed modification time to force an overwrite. The hub SHALL write through a temporary file created in the target's own directory and then atomically replace the target, so that a failed, interrupted, or oversized write never leaves a partially written or truncated file at the target path. The hub SHALL remove the temporary file when a write fails. A write whose received body length differs from the declared length SHALL be refused. When a caller supplies an observed modification time for a file that does not exist, the hub SHALL report not-found rather than creating it.
 
@@ -643,3 +649,77 @@ The hub SHALL therefore start, and serve its terminal and session operations, wi
 
 - **WHEN** the hub is configured with the file capability enabled and a root that does not exist
 - **THEN** the configuration is refused and the root is reported
+
+### Requirement: Host-scoped file workspace
+
+All file operations and working-directory queries SHALL target an explicit host. Remote hosts with SFTP SHALL support directory browsing, bounded reading, preview, editing, download, creation, rename and deletion, subject to reported capabilities. Existing preview safety, text classification, size limits and unsaved-edit behavior SHALL remain applicable. Tabs, pending operations and directory state SHALL be bound to host, revision and path. Path insertion SHALL target a live terminal on the same host only. A global file disablement SHALL refuse local and remote file operations before filesystem or SFTP access.
+
+#### Scenario: Same path on two hosts
+- **WHEN** files at /home/user/notes exist on A and B and the user saves the tab belonging to A while viewing B
+- **THEN** the write targets A with its original revision and does not modify B
+
+#### Scenario: Path insertion across hosts
+- **WHEN** the file belongs to A but the only active terminal belongs to B
+- **THEN** insertion is refused with an explanation rather than sending A's path to B
+
+#### Scenario: Files globally disabled
+- **WHEN** file operations are globally disabled and a remote file request arrives
+- **THEN** it is refused without opening SFTP or querying a remote working directory
+
+#### Scenario: Remote working directory differs from SFTP namespace
+- **WHEN** the tmux directory cannot be mapped to the SFTP namespace
+- **THEN** the browser reports the mismatch and permits explicit directory selection without inventing a translation
+
+### Requirement: Remote file access boundary
+
+Remote file access SHALL use the configured SSH account's server-side permissions. Local configured roots SHALL NOT be interpreted as remote roots. The hub SHALL identify this remote boundary and SHALL NOT claim the local root-handle confinement guarantee over SFTP. Remote paths SHALL be absolute POSIX paths subject to existing length and traversal rejection. Lexical and resolved paths under /proc, /sys and /dev SHALL be refused; this check SHALL NOT be represented as protection from concurrent server-side path replacement. Non-regular file contents SHALL be refused, and stalled operations SHALL be cancelled within finite budgets.
+
+#### Scenario: Local roots and remote path
+- **WHEN** local roots restrict local files to /srv/projects and a remote account can read /home/user/notes
+- **THEN** remote access is evaluated on the remote server and never against the Hub's local /srv/projects
+
+#### Scenario: Remote pseudo-filesystem
+- **WHEN** a caller names /proc or a path resolved to /proc on a remote host
+- **THEN** the file operation is refused
+
+### Requirement: Bounded remote transfer and capability reporting
+
+The hub SHALL enforce file byte and directory entry limits during remote work, not after collecting unbounded results. Remote capabilities SHALL report SFTP availability, overwrite support and consistency limitations to authenticated clients. Unsupported overwrite SHALL NOT disable browsing and downloading. A bounded protocol response batch beyond the listing limit is permitted, but reading the whole directory before truncating is not. Remote reads SHALL present a stable bounded body and a revision tied to its content.
+
+#### Scenario: Very large remote directory
+- **WHEN** a remote directory contains far more entries than the listing limit
+- **THEN** the hub stops reading after the limit and bounded protocol lookahead and reports truncation
+
+#### Scenario: Replacement unsupported
+- **WHEN** the SFTP server does not support verified atomic replacement
+- **THEN** the editor explains why overwrite is unavailable and browse/download remain usable
+
+### Requirement: Remote file replacement semantics
+
+Remote saves SHALL stage complete bounded content in the destination directory and replace only after validating body length and supported atomic replacement. The hub SHALL NOT fall back to deleting the target first or truncating it in place. Normal saves SHALL compare a content-derived revision and available metadata with the observed file before commit, detecting changed bytes even when size and reported timestamp are unchanged. Forced saves SHALL still recheck target existence and regular-file type. Local inode identity and compare-and-swap guarantees SHALL NOT be claimed: remote processes can change a target after the final check, and an indistinguishable replacement cannot be detected reliably.
+
+The hub SHALL serialize its own conflicting writes, renames and deletes. Replacement SHALL preserve current permission bits and preserve owner/group where permitted; preservation failures SHALL be reported. The editor SHALL explain that replacement does not preserve ACLs/xattrs or update other hard-link names. If link count cannot be determined, replacement SHALL require acknowledgement of that limitation. A lost commit acknowledgement SHALL leave the edit unsaved with an outcome-unknown message pending reconciliation. Failed staging cleanup SHALL be recorded for a later safe attempt; cleanup SHALL target only identifiable Hub-owned staging files. Success SHALL NOT imply remote power-loss durability when that has not been established.
+
+#### Scenario: Same timestamp but different bytes
+- **WHEN** a remote file's bytes change without a distinguishable size or modification-time change before the final save check
+- **THEN** a normal save reports a conflict and leaves the changed target intact
+
+#### Scenario: Interrupted upload before commit
+- **WHEN** a staged upload fails before replacement is sent
+- **THEN** the destination remains unchanged and cleanup is attempted or recorded as pending if the host is unreachable
+
+#### Scenario: Lost commit acknowledgement
+- **WHEN** the connection drops after replacement is sent but before its result arrives
+- **THEN** the editor remains dirty, reports an uncertain outcome and does not automatically replay the save
+
+#### Scenario: Target removed during upload
+- **WHEN** an existing target is absent at the final check, including for a forced save
+- **THEN** the save is refused instead of recreating the missing target
+
+#### Scenario: Remote hard-link metadata unavailable
+- **WHEN** the server cannot establish whether the target has other hard-link names
+- **THEN** the editor requires acknowledgement of replacement semantics before issuing the save
+
+#### Scenario: Cleanup after restart
+- **WHEN** the hub reconnects with a pending staging cleanup record
+- **THEN** it removes only a staging entry it can identify as owned by that write and never arbitrary files sharing a naming pattern

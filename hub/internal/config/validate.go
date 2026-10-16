@@ -62,6 +62,7 @@ const (
 )
 
 var allowedRootKeys = map[string]bool{
+	"hosts":            true,
 	"version":          true,
 	"server":           true,
 	"auth":             true,
@@ -71,6 +72,17 @@ var allowedRootKeys = map[string]bool{
 	"shutdown":         true,
 	"web":              true,
 	keyFilesSection:    true,
+}
+
+var allowedHostsKeys = map[string]bool{
+	"state_dir":          true,
+	"master_key_file":    true,
+	"dial_timeout":       true,
+	"handshake_timeout":  true,
+	"operation_timeout":  true,
+	"keepalive_interval": true,
+	"max_backoff":        true,
+	"max_connections":    true,
 }
 
 var allowedServerKeys = map[string]bool{
@@ -213,6 +225,8 @@ func validateMappingNode(node *yaml.Node, pathPrefix string, allowedKeys map[str
 
 func sectionAllowedKeys(section string) map[string]bool {
 	switch section {
+	case "hosts":
+		return allowedHostsKeys
 	case "server":
 		return allowedServerKeys
 	case "auth":
@@ -252,7 +266,7 @@ func validateValueTypesAndChildren(valNode *yaml.Node, fullPath string) error {
 
 func isIntegerConfigField(field string) bool {
 	switch field {
-	case "version", "server.max_request_body_bytes", "websocket.max_input_message_bytes",
+	case "hosts.max_connections", "version", "server.max_request_body_bytes", "websocket.max_input_message_bytes",
 		"terminal.max_dimension", "terminal.staging_buffer_bytes",
 		"terminal.output_high_water_bytes", "terminal.output_low_water_bytes",
 		"web.terminal.scrollback", "web.terminal.font_size",
@@ -273,7 +287,9 @@ func isStringListConfigField(field string) bool {
 
 func isDurationConfigField(field string) bool {
 	switch field {
-	case "server.read_header_timeout", "server.idle_timeout",
+	case "hosts.dial_timeout", "hosts.handshake_timeout",
+		"hosts.operation_timeout", "hosts.keepalive_interval",
+		"hosts.max_backoff", "server.read_header_timeout", "server.idle_timeout",
 		"auth.ticket_ttl", "auth.ticket_sweep_interval",
 		"websocket.control_write_timeout", "websocket.output_write_timeout",
 		"websocket.exit_write_timeout", "terminal.backpressure_poll_interval",
@@ -315,7 +331,7 @@ func validateScalarType(valNode *yaml.Node, fullPath string) error {
 	}
 
 	switch fullPath {
-	case "server.addr", "auth.token", "tmux.path", "websocket.origin":
+	case "hosts.state_dir", "hosts.master_key_file", "server.addr", "auth.token", "tmux.path", "websocket.origin":
 		if valNode.Tag != tagYAMLString {
 			return fmt.Errorf("field %q must be a string, got tag %s at line %d", fullPath, valNode.Tag, valNode.Line)
 		}
@@ -420,6 +436,9 @@ func ValidateConfig(cfg *Config) error {
 		return err
 	}
 	if err := validateWebConfig(&cfg.Web); err != nil {
+		return err
+	}
+	if err := validateHostsConfig(cfg.Hosts); err != nil {
 		return err
 	}
 	return validateFilesConfig(&cfg.Files)
@@ -638,6 +657,29 @@ func validateBrowserDuration(field string, d Duration, min, max time.Duration) e
 	}
 	if td < min || td > max {
 		return fmt.Errorf("field %q: duration %s out of range [%s, %s]", field, td, min, max)
+	}
+	return nil
+}
+
+func validateHostsConfig(h HostsConfig) error {
+	items := []struct {
+		name     string
+		duration Duration
+	}{
+		{"dial_timeout", h.DialTimeout},
+		{"handshake_timeout", h.HandshakeTimeout},
+		{"operation_timeout", h.OperationTimeout},
+		{"keepalive_interval", h.KeepaliveInterval},
+		{"max_backoff", h.MaxBackoff},
+	}
+	for _, item := range items {
+		field := "hosts." + item.name
+		if err := validateDuration(field, item.duration, minGeneralDuration, maxGeneralDuration); err != nil {
+			return err
+		}
+	}
+	if h.MaxConnections < 1 || h.MaxConnections > 256 {
+		return errors.New("hosts.max_connections must be between 1 and 256")
 	}
 	return nil
 }

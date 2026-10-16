@@ -99,13 +99,13 @@ test('API endpoints: list, create, rename, kill, ticket', async () => {
     lastBody = init?.body ? JSON.parse(String(init.body)) : null
     lastAuth = new Headers(init?.headers).get('Authorization') ?? ''
 
-    if (lastUrl === '/api/hosts/local/sessions' && lastMethod === 'GET') {
+    if (lastUrl.match(/^\/api\/hosts\/[^/]+\/sessions$/) && lastMethod === 'GET') {
       return new Response(JSON.stringify({
         sessions: [{ name: 's1', windows: 1, attached: 0, created: 1000 }],
       }), { status: 200, headers: { 'Content-Type': 'application/json' } })
     }
 
-    if (lastUrl === '/api/hosts/local/sessions' && lastMethod === 'POST') {
+    if (lastUrl.match(/^\/api\/hosts\/[^/]+\/sessions$/) && lastMethod === 'POST') {
       const name = (lastBody as { name?: string } | null)?.name || 'session-auto-1'
       return new Response(JSON.stringify({
         name,
@@ -115,16 +115,17 @@ test('API endpoints: list, create, rename, kill, ticket', async () => {
       }), { status: 201, headers: { 'Content-Type': 'application/json' } })
     }
 
-    if (lastUrl === '/api/hosts/local/sessions/old-sess' && lastMethod === 'PATCH') {
+    if (lastUrl.match(/^\/api\/hosts\/[^/]+\/sessions\/[^/]+$/) && lastMethod === 'PATCH') {
+      const name = (lastBody as { name?: string } | null)?.name || 'new-sess'
       return new Response(JSON.stringify({
-        name: 'new-sess',
+        name,
         windows: 1,
         attached: 0,
         created: 2000,
       }), { status: 200, headers: { 'Content-Type': 'application/json' } })
     }
 
-    if (lastUrl === '/api/hosts/local/sessions/kill-sess' && lastMethod === 'DELETE') {
+    if (lastUrl.match(/^\/api\/hosts\/[^/]+\/sessions\/[^/]+$/) && lastMethod === 'DELETE') {
       return new Response(null, { status: 204 })
     }
 
@@ -168,6 +169,29 @@ test('API endpoints: list, create, rename, kill, ticket', async () => {
   const ticket = await issueTicket('my-sess')
   assert.equal(ticket, 'secret-ticket-123')
   assert.deepEqual(lastBody, { hostId: 'local', session: 'my-sess' })
+
+  // Remote host-scoped API operations
+  await listSessions('remote-1')
+  assert.equal(lastUrl, '/api/hosts/remote-1/sessions')
+  assert.equal(lastMethod, 'GET')
+
+  await createSession('r-sess', 'remote-1')
+  assert.equal(lastUrl, '/api/hosts/remote-1/sessions')
+  assert.equal(lastMethod, 'POST')
+  assert.deepEqual(lastBody, { name: 'r-sess' })
+
+  await renameSession('old-r', 'new-r', 'remote-1')
+  assert.equal(lastUrl, '/api/hosts/remote-1/sessions/old-r')
+  assert.equal(lastMethod, 'PATCH')
+  assert.deepEqual(lastBody, { name: 'new-r' })
+
+  await killSession('dead-r', 'remote-1')
+  assert.equal(lastUrl, '/api/hosts/remote-1/sessions/dead-r')
+  assert.equal(lastMethod, 'DELETE')
+
+  const remoteTicket = await issueTicket('r-sess', 'remote-1')
+  assert.equal(remoteTicket, 'secret-ticket-123')
+  assert.deepEqual(lastBody, { hostId: 'remote-1', session: 'r-sess' })
 })
 
 test('API clears token and throws AuthError on 401', async () => {

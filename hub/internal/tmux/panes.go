@@ -142,8 +142,7 @@ func paneTargetOf(name string) string {
 // authorization input. The boundary is decided the same way wherever the user
 // goes afterwards.
 func (c *Client) PaneWorkingDirectory(ctx context.Context, name string) (string, error) {
-	stdout, stderr, code, err := c.Exec(ctx,
-		"display-message", "-p", "-t", paneTargetOf(name), "#{pane_current_path}")
+	stdout, stderr, code, err := c.Exec(ctx, WorkingDirectoryArgs(name)...)
 	if err != nil {
 		return "", fmt.Errorf("exec display-message: %w", err)
 	}
@@ -181,7 +180,7 @@ func (c *Client) PaneWorkingDirectory(ctx context.Context, name string) (string,
 // ListPanes returns every pane across all sessions on the tmux server in a
 // single invocation. If no server is running, returns an empty slice.
 func (c *Client) ListPanes(ctx context.Context) ([]session.Pane, error) {
-	stdout, stderr, code, err := c.Exec(ctx, "list-panes", "-a", "-F", PaneFormat)
+	stdout, stderr, code, err := c.Exec(ctx, ListPanesArgs()...)
 	if err != nil {
 		return nil, fmt.Errorf("exec list-panes: %w", err)
 	}

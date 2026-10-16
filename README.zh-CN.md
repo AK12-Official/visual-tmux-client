@@ -2,9 +2,7 @@
 
 简体中文 | [English](README.md)
 
-**Visual Tmux Client** 是一个轻量级、自托管的 Web 界面，用于通过浏览器管理和使用 tmux 会话。Vue 前端直接打包嵌入在单个 Go 二进制文件中，因此运行环境只需要该二进制文件和本机已安装的 `tmux`。
-
-> 本项目目前处于早期的 `v0.3` 版本。它管理运行 Visual Tmux Client 的同一台机器上的 tmux；暂未实现多主机汇聚。
+**Visual Tmux Client** 是一个轻量级、自托管的 Web 界面，用于通过浏览器统一管理和使用本地以及多台远程 SSH 服务器上的 tmux 会话与文件。Vue 前端直接打包嵌入在单个 Go 二进制文件中，无任何外部运行时依赖，只需系统具备标准 `tmux` 及远端具备 SSH/SFTP 服务。
 
 ## 会话保留默认值
 
@@ -19,15 +17,19 @@ VTC 创建或连接会话时，会在所连接的 tmux 服务上设置全局默�
 
 ## 特性
 
-- 查看、创建（一键生成自动命名的会话）、重命名及终止本地 tmux 会话，支持单会话或批量操作。
+- 多主机统一管理：在同一个 Web 界面中无缝管理本地机器与多台远程 SSH 主机。
+- 查看、创建（一键生成自动命名的会话）、重命名及终止 tmux 会话，支持单会话或批量操作。
 - 在由 xterm.js 驱动的完整浏览器终端中连接会话，支持在断开或主动 detach 后随时重新连接。
 - 默认启用鼠标支持，连接终端可直接使用鼠标滚轮浏览 tmux 历史输出。
 - 观察哪个会话正在输出：有新输出的后台会话卡片会高亮提示；当前查看的会话会在终端顶部栏及浏览器标签页标题中显示活动圆点。
 - 终端顶部栏提供字号调节、全屏切换及关闭面板操作。
 - 支持通过拖拽手动调整会话顺序与置顶固定，左侧会话栏可自由折叠。
 - 操作反馈与终端事件通过分级、自动过期的 Toast 浮层提示。
-- 在终端内浏览、预览、编辑与整理主机文件：目录树、多标签编辑器、Markdown 与图片预览，以及新建/重命名/删除/下载的右键菜单。
+- 在终端内浏览、预览、编辑与整理本地或远程 SFTP 文件：目录树、多标签编辑器、Markdown 与图片预览，以及新建/重命名/删除/下载的右键菜单。
 - 可直接把文件路径插入终端输入行，无需离开文件管理器。
+- 安全远程主机注册：支持 SSH 密码与加密私钥认证（ed25519、RSA、ECDSA，支持密钥口令 Passphrase），严格实行首次使用信任（TOFU）主机公钥指纹 Pinning。
+- 静态加密凭据存储：使用 AES-256-GCM 与认证主密钥安全加密保存远程主机凭据。
+- 主机工作空间相互隔离：独立会话命名空间、连接池管理及自动 Keepalive 心跳探测。
 - 内置中文 tmux 指南，点击应用内的帮助按钮即可查阅。
 - 会话名称支持包括中文在内的非 ASCII 字符（最多 64 字符）；保留/禁用 `:`、`.`、`/`、`\`、`;`、全角易混淆符号（`：`、`．`、`；`）、边缘空白及控制字符。
 - 浏览器断开不会影响后台会话，tmux 会话持续运行。
@@ -101,6 +103,8 @@ Visual Tmux Client 支持外部 YAML 配置文件、环境变量和命令行参�
 | `VISUAL_TMUX_CLIENT_TOKEN` | 启动时随机生成 | 浏览器界面使用的共享 Bearer Token |
 | `VISUAL_TMUX_CLIENT_ORIGIN` | 未设置 | 允许发起 WebSocket 连接的浏览器来源；默认匹配请求的主机与端口 |
 | `VISUAL_TMUX_CLIENT_TMUX_PATH` | 从 `PATH` 中查找 | 指定 tmux 可执行文件路径 |
+| `VISUAL_TMUX_CLIENT_HOSTS_STATE_DIR` | 系统用户配置目录（Linux 下为 `~/.config/visual-tmux-client`） | 保存持久化 SQLite 主机数据库（`hosts.db`）的目录 |
+| `VISUAL_TMUX_CLIENT_HOSTS_MASTER_KEY_FILE` | 从 state dir 自动派生（`master.key`） | 用于加密存储凭据的 32 字节 AES-256 主加密密钥文件路径 |
 
 ### YAML 配置文件示例
 
@@ -167,6 +171,17 @@ files:
   #   - "/srv/projects"
   max_file_size: 104857600 # 100 MiB
   max_dir_entries: 1000
+
+hosts:
+  # 多主机 SSH 注册中心与远程传输配置
+  state_dir: "" # 为空时使用系统用户配置目录（Linux 下为 ~/.config/visual-tmux-client）
+  master_key_file: "" # 为空时使用 state_dir 内的 master.key
+  dial_timeout: "10s"
+  handshake_timeout: "10s"
+  operation_timeout: "30s"
+  keepalive_interval: "15s"
+  max_backoff: "30s"
+  max_connections: 16
 ```
 
 ### 文件访问边界
@@ -204,6 +219,46 @@ files:
 文件管理器会打开在当前会话活动 pane 的工作目录。该目录只是一个起点，且只读取一次：之后可以自由浏览，切换活动 pane 也不会移动已经打开的管理器。
 
 配置了 `roots` 且 pane 的工作目录落在这些 root 之外时，管理器会改为打开**第一个 root** 并明确告知——浏览器无从得知边界允许哪些目录，只能由 hub 给出。若该目录因其他原因不可用（例如已被删除），则改用最近一个仍能打开的祖先目录，并同样给出提示，而不是显示一棵空树。
+
+### 远程主机文件访问（SFTP）
+
+在已注册的远程主机上执行文件操作时：
+- 操作通过 SFTP (v3) 以认证 SSH 用户身份执行。操作边界受该远程用户的操作系统文件权限约束；本地配置的 `files.roots` 仅约束本地主机，不约束远程主机。
+- **原子替换**：当远端 SFTP 服务支持 OpenSSH `posix-rename@openssh.com` 扩展时，文件保存采用原子替换与乐观并发检查。若远端不支持原子替换，覆盖已存在的目标文件将被拒绝（除非显式强制覆盖），以防止由于网络中断导致旧文件被损坏。
+- **硬链接防护**：如果远程文件的硬链接计数大于 1，替换已有目标需经显式确认，因为原子替换会解除该名称与原有 inode 的关联。
+- **时间戳精度**：标准 SFTP v3 传输整数秒级修改时间。远程文件的乐观并发检查基于粗粒度的 1 秒时间戳。
+- **临时上传文件**：文件保存先写入同级临时文件（`.vtc-tmp.*`），写入完毕后再重命名替换，确保未完成的网络传输绝不会覆盖破坏旧文件。
+
+## 多主机部署与安全
+
+### 单管理员权限与服务器信任
+Visual Tmux Client 遵循单管理员安全模型。持有共享 Bearer Token 即拥有对本地 hub 及全部已注册远程主机的完全管理权限（包括会话管理、文件读写及任意命令执行）。
+
+在注册远程主机时，VTC 严格采用首次使用信任（TOFU）主机密钥固定：
+1. 首次连接前向管理员展示远端主机的公钥 SHA-256 指纹，待管理员确认。
+2. 确认后，公钥指纹安全持久化保存在 SQLite 数据库（`hosts.db`）中。
+3. 后续连接严格核验已 Pinning 的公钥指纹；一旦出现指纹不匹配或非预期的变更，连接将立即被拒绝阻断。
+
+### 容器化部署与持久化挂载
+在 Docker 或 Kubernetes 中运行时：
+- 主机注册数据库（`hosts.db`）和主加密密钥（`master.key`）存放于 `hosts.state_dir`（或由环境变量 `VISUAL_TMUX_CLIENT_HOSTS_STATE_DIR` 指定）。
+- **必须为该状态目录挂载持久化存储卷**，以确保容器重启或镜像升级时已注册的主机及加密凭据不会丢失。
+- 确保持久化目录具备 `0700` 权限，主密钥文件具备 `0600` 权限。
+
+Docker 持久化挂载示例：
+```sh
+docker run -d \
+  -p 7690:7690 \
+  -v /var/lib/visual-tmux-client/hosts:/data/hosts \
+  -e VISUAL_TMUX_CLIENT_HOSTS_STATE_DIR=/data/hosts \
+  -e VISUAL_TMUX_CLIENT_TOKEN="secret-admin-token" \
+  visual-tmux-client:latest
+```
+
+### 密钥与状态备份、灾难恢复
+- **备份**：定期同时备份状态目录下的 `hosts.db` 与 `master.key`。二者必须一同备份：`hosts.db` 中的敏感凭据使用由 `master.key` 派生的 AES-256-GCM 算法加密。
+- **恢复**：恢复到新机器或新容器时，只需在服务启动前将 `hosts.db` 和 `master.key` 放回指定的 `state_dir` 并设置 `0600`/`0700` 权限。
+- **主密钥遗失**：若 `master.key` 遗失或损坏，`hosts.db` 将无法解密已保存的密码与私钥。主机元数据和已 Pinning 的公钥指纹依然保留，但需要重新录入各主机的登录凭据。
 
 默认只监听回环地址是有意的安全设计。如需通过其他机器访问，请在服务前部署 HTTPS 反向代理、使用高强度固定 Token，并将 `origin` 设置为准确的公网 HTTPS 来源。暴露到网络前请先阅读 [SECURITY.md](SECURITY.md)。
 
@@ -243,6 +298,7 @@ hub/cmd/visual-tmux-client/  主入口，CLI 参数解析与退出码处理
 hub/internal/app/            应用组装根（composition root）、信号捕获与两阶段优雅关闭
 hub/internal/config/         强类型配置结构、严格 YAML 解码、多源加载器与来源追踪
 hub/internal/auth/           Bearer Token 校验、抗时序攻击恒定时间比较、一次性票据池
+hub/internal/host/           远程 SSH 主机注册中心、连接池、敏感凭据加密、SFTP 桥接与远程 tmux 适配器
 hub/internal/session/        会话业务模型、名称规范校验、业务领域服务与 Backend 接口
 hub/internal/tmux/           Tmux 命令执行、PTY 进程管理、Socket 隔离与环境敏感信息清理
 hub/internal/terminal/       终端输出背压缓冲、环形暂存队列、连接 Pump 调度协调
@@ -259,7 +315,8 @@ configs/                     示例配置文件模板
 Visual Tmux Client 保持严格的向前与向后兼容性：
 - 无 YAML 配置文件启动时，系统自动应用完整内置默认值，与旧版本行为一致。
 - 历史版本的所有命令行参数与环境变量保持 100% 兼容。
-- 若需要回滚至早期版本，只需停止服务并直接替换二进制文件。已有的 tmux 会话在服务启停和版本切换期间保持完整运行。
+- 若需要回滚至早期版本，只需停止服务并直接替换二进制文件。已有的本地 tmux 会话在服务启停和版本切换期间保持完整运行。
+- 主机注册中心数据库（`hosts.db`）表结构保持向后兼容；回滚二进制文件仍可正常读取已有主机。如需彻底恢复，将预先备份的 `hosts.db` 和 `master.key` 拷回即可。
 
 ## 参与贡献
 

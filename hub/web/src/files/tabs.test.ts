@@ -12,6 +12,8 @@ import {
   isDirty,
   saveOpenFile,
   settleSave,
+  reconcileTab,
+  type ReconcileResult,
   type OpenFile,
 } from './tabs'
 
@@ -301,6 +303,62 @@ test('an answer is recorded normally once no rename is outstanding', () => {
 
   assert.equal(settled.outcome, 'saved')
   assert.equal(isDirty(settled.files[0]), false)
+})
+
+test('reconcileTab marks tab clean when disk matches editor text', () => {
+  const file = openFile({ text: 'updated text', saved: 'initial text' })
+  assert.equal(isDirty(file), true)
+
+  const newStamp = { millis: 12345, nanos: null }
+  const result = reconcileTab(file, { text: 'updated text', stamp: newStamp })
+
+  assert.equal(result.outcome, 'matched')
+  assert.equal(result.file.text, 'updated text')
+  assert.equal(result.file.saved, 'updated text')
+  assert.equal(result.file.stamp, newStamp)
+  assert.equal(isDirty(result.file), false)
+})
+
+test('reconcileTab preserves later edits without silently discarding them when discardEdits is false', () => {
+  const file = openFile({ text: 'later edits typed by user', saved: 'initial text' })
+  assert.equal(isDirty(file), true)
+
+  const diskStamp = { millis: 99999, nanos: null }
+  const result = reconcileTab(file, { text: 'disk text', stamp: diskStamp }, false)
+
+  assert.equal(result.outcome, 'preserved')
+  assert.equal(result.file.text, 'later edits typed by user')
+  assert.equal(result.file.saved, 'initial text')
+  assert.equal(result.file.stamp, diskStamp)
+  assert.equal(isDirty(result.file), true)
+})
+
+test('reconcileTab reloads from disk when discardEdits is confirmed', () => {
+  const file = openFile({ text: 'local unsaved edit', saved: 'initial text' })
+  assert.equal(isDirty(file), true)
+
+  const diskStamp = { millis: 55555, nanos: null }
+  const result = reconcileTab(file, { text: 'disk text', stamp: diskStamp }, true)
+
+  assert.equal(result.outcome, 'reloaded')
+  assert.equal(result.file.text, 'disk text')
+  assert.equal(result.file.saved, 'disk text')
+  assert.equal(result.file.stamp, diskStamp)
+  assert.equal(isDirty(result.file), false)
+})
+
+test('reconcileTab reloads clean tab when disk has new content', () => {
+  const file = openFile({ text: 'initial text', saved: 'initial text' })
+  assert.equal(isDirty(file), false)
+
+  const diskStamp = { millis: 77777, nanos: null }
+  const result = reconcileTab(file, { text: 'new remote text', stamp: diskStamp }, false)
+
+  assert.equal(result.outcome, 'reloaded')
+  assert.equal(result.file.text, 'new remote text')
+  assert.equal(result.file.saved, 'new remote text')
+  assert.equal(result.file.stamp, diskStamp)
+  assert.equal(isDirty(result.file), false)
 })
 
 // The boundary this module's own comment claims -- free of the renderer -- is

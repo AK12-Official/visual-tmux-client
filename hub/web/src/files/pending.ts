@@ -32,14 +32,14 @@
 // better than recording anything: it does not let its own two requests race at
 // all. See deleteTarget in the manager.
 
-/** Pending is the set of in-flight operations of one kind, by path. */
+/** Pending is the set of in-flight operations of one kind, by path and optional hostId. */
 export interface Pending {
-  /** begin records that an operation naming `path` has been sent. */
-  begin(path: string): void
-  /** end records that the operation naming `path` has been answered. */
-  end(path: string): void
+  /** begin records that an operation naming `path` on `hostId` has been sent. */
+  begin(path: string, hostId?: string): void
+  /** end records that the operation naming `path` on `hostId` has been answered. */
+  end(path: string, hostId?: string): void
   /**
-   * isPending reports whether an operation naming `path`, or naming a directory
+   * isPending reports whether an operation naming `path` on `hostId`, or naming a directory
    * above it, is in flight.
    *
    * The direction is *upwards*, and that is what its callers ask. A save is about
@@ -48,9 +48,9 @@ export interface Pending {
    * that directory. Looking downwards instead -- at what is inside the path --
    * would answer a question no caller has, and would miss the one they do.
    */
-  isPending(path: string): boolean
+  isPending(path: string, hostId?: string): boolean
   /**
-   * idle resolves once nothing is outstanding for `path` or anything beneath it.
+   * idle resolves once nothing is outstanding for `path` or anything beneath it on `hostId`.
    *
    * The direction is *downwards*, deliberately the opposite of isPending, and
    * likewise what its caller asks. A delete names an entry, and the writes it has
@@ -61,7 +61,7 @@ export interface Pending {
    * ever name a directory above the path being waited for -- but a caller that
    * wanted it would be asking a different question, and should ask isPending.
    */
-  idle(path: string): Promise<void>
+  idle(path: string, hostId?: string): Promise<void>
 }
 
 /**
@@ -110,23 +110,31 @@ export function createPending(): Pending {
     waiters = stillWaiting
   }
 
+  function toKey(path: string, hostId?: string): string {
+    return hostId ? `${hostId}:${path}` : path
+  }
+
   return {
-    begin(path) {
-      counts.set(path, (counts.get(path) ?? 0) + 1)
+    begin(path, hostId) {
+      const k = toKey(path, hostId)
+      counts.set(k, (counts.get(k) ?? 0) + 1)
     },
-    end(path) {
-      const outstanding = (counts.get(path) ?? 0) - 1
-      if (outstanding > 0) counts.set(path, outstanding)
-      else counts.delete(path)
+    end(path, hostId) {
+      const k = toKey(path, hostId)
+      const outstanding = (counts.get(k) ?? 0) - 1
+      if (outstanding > 0) counts.set(k, outstanding)
+      else counts.delete(k)
       settleIdleWaiters()
     },
-    isPending(path) {
-      return any((outstanding) => within(path, outstanding))
+    isPending(path, hostId) {
+      const k = toKey(path, hostId)
+      return any((outstanding) => within(k, outstanding))
     },
-    idle(path) {
-      if (!busyBeneath(path)) return Promise.resolve()
+    idle(path, hostId) {
+      const k = toKey(path, hostId)
+      if (!busyBeneath(k)) return Promise.resolve()
       return new Promise((settle) => {
-        waiters.push({ path, settle })
+        waiters.push({ path: k, settle })
       })
     },
   }
