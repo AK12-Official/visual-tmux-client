@@ -34,6 +34,14 @@ DWKhR9jS1C59JLKFSk3+aF4o2HIsr48Lz5kGUkTfc8xj79PsDRkkbyqhxojhDerdUxpYtK
 RECXJ0e+PkPnYftJYlni7+jWTtpvGWxCCXfsh/EY5+VRR/e1B6xnd5Mlpx
 -----END OPENSSH PRIVATE KEY-----`
 	TestEncryptedKeyPassphrase = "testpassphrase"
+
+	dirPermPrivate         = 0o700
+	filePermExec           = 0o755
+	extraEnvCapacity       = 4
+	ptyReqMinPayload       = 8
+	windowChangeMinPayload = 8
+	subsystemHeaderLen     = 4
+	execHeaderLen          = 4
 )
 
 // DisposableSSHConfig parameterizes a disposable SSH server fixture.
@@ -72,11 +80,8 @@ type DisposableSSHServer struct {
 	closed bool
 }
 
-// NewDisposableSSHServer starts an isolated SSH/SFTP server with an isolated tmux backend.
-func NewDisposableSSHServer(t *testing.T, cfg DisposableSSHConfig) *DisposableSSHServer {
+func generateHostSigner(t *testing.T) (ssh.Signer, ssh.PublicKey, string, string) {
 	t.Helper()
-
-	// Generate fresh host key
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate host key: %v", err)
@@ -86,21 +91,21 @@ func NewDisposableSSHServer(t *testing.T, cfg DisposableSSHConfig) *DisposableSS
 		t.Fatalf("signer from host key: %v", err)
 	}
 	hostPubKey := hostSigner.PublicKey()
-	fingerprint := ssh.FingerprintSHA256(hostPubKey)
-	keyType := hostPubKey.Type()
+	return hostSigner, hostPubKey, ssh.FingerprintSHA256(hostPubKey), hostPubKey.Type()
+}
 
-	user := cfg.User
+func resolveUserCredentials(
+	t *testing.T, cfg DisposableSSHConfig,
+) (user, password, userKeyPEM string, userSigner ssh.Signer, passphrase string) {
+	t.Helper()
+	user = cfg.User
 	if user == "" {
 		user = "testuser"
 	}
-	password := cfg.Password
+	password = cfg.Password
 	if password == "" && !cfg.UsePrivateKey && !cfg.UseEncryptedKey {
 		password = "testpassword"
 	}
-
-	var userKeyPEM string
-	var userSigner ssh.Signer
-	var passphrase string
 
 	if cfg.UseEncryptedKey {
 		userKeyPEM = TestEncryptedPrivateKey
@@ -114,7 +119,7 @@ func NewDisposableSSHServer(t *testing.T, cfg DisposableSSHConfig) *DisposableSS
 		}
 		userSigner = s
 	} else if cfg.UsePrivateKey {
-		pub, userPriv, err := ed25519.GenerateKey(rand.Reader)
+		_, userPriv, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			t.Fatalf("generate user key: %v", err)
 		}
@@ -129,45 +134,28 @@ func NewDisposableSSHServer(t *testing.T, cfg DisposableSSHConfig) *DisposableSS
 			t.Fatalf("signer from user key: %v", err)
 		}
 		userSigner = s
-		_ = pub
 	}
+	return user, password, userKeyPEM, userSigner, passphrase
+}
 
-	// Create root directory for private files with 0700 permissions
-	rootDir, err := os.MkdirTemp("", "vtc-sftp")
-	if err != nil {
-		t.Fatalf("create root dir: %v", err)
-	}
-	if err := os.Chmod(rootDir, 0o700); err != nil {
-		t.Fatalf("chmod root dir: %v", err)
-	}
-
-	// Isolated socket directory
-	socketDir := SocketDir(t)
-	socketName := cfg.TmuxSocketName
-	if socketName == "" {
-		socketName = "vtc-iso"
-	}
-
-	// Look up real tmux binary to avoid recursive execution
+func setupTmuxEnvironment(t *testing.T, rootDir, socketName, socketDir string) ([]string, string) {
+	t.Helper()
 	realTmux, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Fatalf("tmux binary not found: %v", err)
 	}
 
-	// Wrapper binary to ensure all tmux invocations on the remote use isolated socket and environment
 	binDir := filepath.Join(rootDir, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
+	if err := os.MkdirAll(binDir, filePermExec); err != nil {
 		t.Fatalf("create bin dir: %v", err)
 	}
 	wrapperPath := filepath.Join(binDir, "tmux")
 	wrapperScript := fmt.Sprintf("#!/bin/sh\nexec %q -L %s \"$@\"\n", realTmux, socketName)
-	if err := os.WriteFile(wrapperPath, []byte(wrapperScript), 0o755); err != nil {
+	if err := os.WriteFile(wrapperPath, []byte(wrapperScript), filePermExec); err != nil {
 		t.Fatalf("write tmux wrapper: %v", err)
 	}
 
-	// Build scrubbed environment adhering to AGENTS.md:
-	// drop TMUX and TMUX_PANE, set TMUX_TMPDIR to private dir, set HOME to rootDir
-	tmuxEnv := make([]string, 0, len(os.Environ())+4)
+	tmuxEnv := make([]string, 0, len(os.Environ())+extraEnvCapacity)
 	for _, entry := range os.Environ() {
 		k, _, _ := strings.Cut(entry, "=")
 		if k != "TMUX" && k != "TMUX_PANE" && k != "TMUX_TMPDIR" && k != "HOME" && k != "PATH" {
@@ -180,29 +168,15 @@ func NewDisposableSSHServer(t *testing.T, cfg DisposableSSHConfig) *DisposableSS
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 	)
 
-	// Start isolated tmux server
 	startCmd := exec.Command(realTmux, "-L", socketName, "start-server")
 	startCmd.Env = tmuxEnv
-	_ = startCmd.Run()
+	_ = startCmd.Run() //nolint:errcheck // best-effort start isolated server
 
-	server := &DisposableSSHServer{
-		t:           t,
-		HostSigner:  hostSigner,
-		HostPubKey:  hostPubKey,
-		Fingerprint: fingerprint,
-		KeyType:     keyType,
-		User:        user,
-		Password:    password,
-		UserKeyPEM:  userKeyPEM,
-		UserSigner:  userSigner,
-		Passphrase:  passphrase,
-		RootDir:     rootDir,
-		SocketDir:   socketDir,
-		TmuxEnv:     tmuxEnv,
-		TmuxSocket:  socketName,
-	}
+	return tmuxEnv, realTmux
+}
 
-	serverConfig := &ssh.ServerConfig{
+func buildServerConfig(server *DisposableSSHServer, hostSigner ssh.Signer) *ssh.ServerConfig {
+	cfg := &ssh.ServerConfig{
 		PasswordCallback: func(conn ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
 			server.mu.Lock()
 			closed := server.closed
@@ -231,7 +205,51 @@ func NewDisposableSSHServer(t *testing.T, cfg DisposableSSHConfig) *DisposableSS
 			return nil, errors.New("unauthorized public key")
 		},
 	}
-	serverConfig.AddHostKey(hostSigner)
+	cfg.AddHostKey(hostSigner)
+	return cfg
+}
+
+// NewDisposableSSHServer starts an isolated SSH/SFTP server with an isolated tmux backend.
+func NewDisposableSSHServer(t *testing.T, cfg DisposableSSHConfig) *DisposableSSHServer {
+	t.Helper()
+
+	hostSigner, hostPubKey, fingerprint, keyType := generateHostSigner(t)
+	user, password, userKeyPEM, userSigner, passphrase := resolveUserCredentials(t, cfg)
+
+	rootDir, err := os.MkdirTemp("", "vtc-sftp")
+	if err != nil {
+		t.Fatalf("create root dir: %v", err)
+	}
+	if err := os.Chmod(rootDir, dirPermPrivate); err != nil {
+		t.Fatalf("chmod root dir: %v", err)
+	}
+
+	socketDir := SocketDir(t)
+	socketName := cfg.TmuxSocketName
+	if socketName == "" {
+		socketName = "vtc-iso"
+	}
+
+	tmuxEnv, _ := setupTmuxEnvironment(t, rootDir, socketName, socketDir)
+
+	server := &DisposableSSHServer{
+		t:           t,
+		HostSigner:  hostSigner,
+		HostPubKey:  hostPubKey,
+		Fingerprint: fingerprint,
+		KeyType:     keyType,
+		User:        user,
+		Password:    password,
+		UserKeyPEM:  userKeyPEM,
+		UserSigner:  userSigner,
+		Passphrase:  passphrase,
+		RootDir:     rootDir,
+		SocketDir:   socketDir,
+		TmuxEnv:     tmuxEnv,
+		TmuxSocket:  socketName,
+	}
+
+	serverConfig := buildServerConfig(server, hostSigner)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -239,7 +257,9 @@ func NewDisposableSSHServer(t *testing.T, cfg DisposableSSHConfig) *DisposableSS
 	}
 	server.Listener = listener
 	server.Addr = "127.0.0.1"
-	server.Port = listener.Addr().(*net.TCPAddr).Port
+	if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok {
+		server.Port = tcpAddr.Port
+	}
 
 	t.Cleanup(func() {
 		server.Close()
@@ -260,7 +280,7 @@ func (s *DisposableSSHServer) serve(config *ssh.ServerConfig) {
 		s.mu.Lock()
 		if s.closed {
 			s.mu.Unlock()
-			_ = tcpConn.Close()
+			_ = tcpConn.Close() //nolint:errcheck // closing connection on closed server
 			return
 		}
 		s.conns = append(s.conns, tcpConn)
@@ -269,13 +289,15 @@ func (s *DisposableSSHServer) serve(config *ssh.ServerConfig) {
 		go func(c net.Conn) {
 			sshConn, chans, reqs, err := ssh.NewServerConn(c, config)
 			if err != nil {
-				_ = c.Close()
+				_ = c.Close() //nolint:errcheck // close failed handshake connection
 				return
 			}
 			go ssh.DiscardRequests(reqs)
 			for newChannel := range chans {
 				if newChannel.ChannelType() != "session" {
-					_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported channel type")
+					_ = newChannel.Reject( //nolint:errcheck // best effort reject
+						ssh.UnknownChannelType, "unsupported channel type",
+					)
 					continue
 				}
 				ch, requests, err := newChannel.Accept()
@@ -284,9 +306,59 @@ func (s *DisposableSSHServer) serve(config *ssh.ServerConfig) {
 				}
 				go s.handleSession(ch, requests)
 			}
-			_ = sshConn.Wait()
+			_ = sshConn.Wait() //nolint:errcheck // best effort wait
 		}(tcpConn)
 	}
+}
+
+func handlePTYReq(req *ssh.Request, ptyCols, ptyRows *uint32) {
+	if len(req.Payload) >= ptyReqMinPayload {
+		termLen := binary.BigEndian.Uint32(req.Payload[:subsystemHeaderLen])
+		offset := subsystemHeaderLen + termLen
+		if uint32(len(req.Payload)) >= offset+ptyReqMinPayload {
+			*ptyCols = binary.BigEndian.Uint32(req.Payload[offset : offset+subsystemHeaderLen])
+			*ptyRows = binary.BigEndian.Uint32(req.Payload[offset+subsystemHeaderLen : offset+ptyReqMinPayload])
+		}
+	}
+	_ = req.Reply(true, nil) //nolint:errcheck // best effort reply
+}
+
+func handleWindowChange(req *ssh.Request, ptmxLock *sync.Mutex, ptmx *os.File, ptyCols, ptyRows *uint32) {
+	if len(req.Payload) >= windowChangeMinPayload {
+		cols := binary.BigEndian.Uint32(req.Payload[:subsystemHeaderLen])
+		rows := binary.BigEndian.Uint32(req.Payload[subsystemHeaderLen:windowChangeMinPayload])
+		ptmxLock.Lock()
+		*ptyCols = cols
+		*ptyRows = rows
+		if ptmx != nil {
+			_ = pty.Setsize( //nolint:errcheck // best effort resize
+				ptmx, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)},
+			)
+		}
+		ptmxLock.Unlock()
+	}
+	if req.WantReply {
+		_ = req.Reply(true, nil) //nolint:errcheck // best effort reply
+	}
+}
+
+func handleSubsystem(req *ssh.Request, channel ssh.Channel, rootDir string) bool {
+	if len(req.Payload) >= subsystemHeaderLen {
+		subsys := string(req.Payload[subsystemHeaderLen:])
+		if subsys == "sftp" {
+			_ = req.Reply(true, nil) //nolint:errcheck // best effort reply
+			sftpServer, err := sftp.NewServer(channel, sftp.WithServerWorkingDirectory(rootDir))
+			if err == nil {
+				go func() {
+					_ = sftpServer.Serve() //nolint:errcheck // sftp serve finished
+					_ = channel.Close()    //nolint:errcheck // close sftp channel
+				}()
+			}
+			return true
+		}
+	}
+	_ = req.Reply(false, nil) //nolint:errcheck // reject unknown subsystem
+	return false
 }
 
 func (s *DisposableSSHServer) handleSession(channel ssh.Channel, requests <-chan *ssh.Request) {
@@ -301,62 +373,30 @@ func (s *DisposableSSHServer) handleSession(channel ssh.Channel, requests <-chan
 	for req := range requests {
 		switch req.Type {
 		case "pty-req":
-			if len(req.Payload) >= 8 {
-				termLen := binary.BigEndian.Uint32(req.Payload[:4])
-				if uint32(len(req.Payload)) >= 4+termLen+8 {
-					ptyCols = binary.BigEndian.Uint32(req.Payload[4+termLen : 4+termLen+4])
-					ptyRows = binary.BigEndian.Uint32(req.Payload[4+termLen+4 : 4+termLen+8])
-				}
-			}
 			ptyReq = true
-			_ = req.Reply(true, nil)
+			handlePTYReq(req, &ptyCols, &ptyRows)
 		case "window-change":
-			if len(req.Payload) >= 8 {
-				cols := binary.BigEndian.Uint32(req.Payload[:4])
-				rows := binary.BigEndian.Uint32(req.Payload[4:8])
-				ptmxLock.Lock()
-				ptyCols = cols
-				ptyRows = rows
-				if ptmx != nil {
-					_ = pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
-				}
-				ptmxLock.Unlock()
-			}
-			if req.WantReply {
-				_ = req.Reply(true, nil)
-			}
+			handleWindowChange(req, &ptmxLock, ptmx, &ptyCols, &ptyRows)
 		case "subsystem":
-			if len(req.Payload) >= 4 {
-				subsys := string(req.Payload[4:])
-				if subsys == "sftp" {
-					_ = req.Reply(true, nil)
-					sftpServer, err := sftp.NewServer(channel, sftp.WithServerWorkingDirectory(s.RootDir))
-					if err == nil {
-						go func() {
-							_ = sftpServer.Serve()
-							_ = channel.Close()
-						}()
-					}
-					return
-				}
-			}
-			_ = req.Reply(false, nil)
-		case "exec":
-			if len(req.Payload) < 4 {
-				_ = req.Reply(false, nil)
+			if handleSubsystem(req, channel, s.RootDir) {
 				return
 			}
-			cmdText := string(req.Payload[4:])
-			_ = req.Reply(true, nil)
+		case "exec":
+			if len(req.Payload) < execHeaderLen {
+				_ = req.Reply(false, nil) //nolint:errcheck // best effort reply
+				return
+			}
+			cmdText := string(req.Payload[execHeaderLen:])
+			_ = req.Reply(true, nil) //nolint:errcheck // best effort reply
 			s.runCommand(channel, cmdText, ptyReq, ptyCols, ptyRows, &ptmx, &ptmxLock)
 			return
 		case "shell":
-			_ = req.Reply(true, nil)
+			_ = req.Reply(true, nil) //nolint:errcheck // best effort reply
 			s.runCommand(channel, "sh", ptyReq, ptyCols, ptyRows, &ptmx, &ptmxLock)
 			return
 		default:
 			if req.WantReply {
-				_ = req.Reply(false, nil)
+				_ = req.Reply(false, nil) //nolint:errcheck // best effort reply
 			}
 		}
 	}
@@ -377,22 +417,23 @@ func (s *DisposableSSHServer) runCommand(
 	if ptyReq {
 		ptmx, err := pty.Start(cmd)
 		if err != nil {
-			_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{Status: 1}))
-			_ = channel.Close()
+			closeChannelWithStatus(channel, 1)
 			return
 		}
 		ptmxLock.Lock()
 		*ptmxRef = ptmx
 		if ptyRows > 0 && ptyCols > 0 {
-			_ = pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(ptyRows), Cols: uint16(ptyCols)})
+			_ = pty.Setsize( //nolint:errcheck // best effort resize
+				ptmx, &pty.Winsize{Rows: uint16(ptyRows), Cols: uint16(ptyCols)},
+			)
 		}
 		ptmxLock.Unlock()
 
 		go func() {
-			_, _ = io.Copy(ptmx, channel)
+			_, _ = io.Copy(ptmx, channel) //nolint:errcheck // copy pty
 		}()
 		go func() {
-			_, _ = io.Copy(channel, ptmx)
+			_, _ = io.Copy(channel, ptmx) //nolint:errcheck // copy pty
 		}()
 
 		err = cmd.Wait()
@@ -401,9 +442,8 @@ func (s *DisposableSSHServer) runCommand(
 		if errors.As(err, &exitErr) {
 			exitCode = uint32(exitErr.ExitCode())
 		}
-		_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{Status: exitCode}))
-		_ = channel.Close()
-		_ = ptmx.Close()
+		closeChannelWithStatus(channel, exitCode)
+		_ = ptmx.Close() //nolint:errcheck // close ptmx
 		return
 	}
 
@@ -417,8 +457,13 @@ func (s *DisposableSSHServer) runCommand(
 	if errors.As(err, &exitErr) {
 		exitCode = uint32(exitErr.ExitCode())
 	}
-	_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{Status: exitCode}))
-	_ = channel.Close()
+	closeChannelWithStatus(channel, exitCode)
+}
+
+func closeChannelWithStatus(channel ssh.Channel, status uint32) {
+	statusReq := struct{ Status uint32 }{Status: status}
+	_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(statusReq)) //nolint:errcheck // exit status
+	_ = channel.Close()                                                      //nolint:errcheck // close channel
 }
 
 // DropConnections closes all active incoming connections to simulate network drops.
@@ -426,7 +471,7 @@ func (s *DisposableSSHServer) DropConnections() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, c := range s.conns {
-		_ = c.Close()
+		_ = c.Close() //nolint:errcheck // dropping connection
 	}
 	s.conns = nil
 }
@@ -439,9 +484,9 @@ func (s *DisposableSSHServer) Close() {
 		return
 	}
 	s.closed = true
-	_ = s.Listener.Close()
+	_ = s.Listener.Close() //nolint:errcheck // close listener
 	for _, c := range s.conns {
-		_ = c.Close()
+		_ = c.Close() //nolint:errcheck // close connection
 	}
 	s.conns = nil
 	s.mu.Unlock()
@@ -449,7 +494,7 @@ func (s *DisposableSSHServer) Close() {
 	// Kill isolated tmux server
 	killCmd := exec.Command("tmux", "-L", s.TmuxSocket, "kill-server")
 	killCmd.Env = s.TmuxEnv
-	_ = killCmd.Run()
+	_ = killCmd.Run() //nolint:errcheck // best-effort kill throwaway tmux server
 
-	_ = os.RemoveAll(s.RootDir)
+	_ = os.RemoveAll(s.RootDir) //nolint:errcheck // cleanup test temp root
 }

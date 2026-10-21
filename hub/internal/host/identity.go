@@ -7,6 +7,13 @@ type ID string
 // Revision identifies a persisted configuration version. Zero is not a version.
 type Revision uint64
 
+type ConnectionType string
+
+const (
+	ConnectionTypeLocal ConnectionType = "local"
+	ConnectionTypeSSH   ConnectionType = "ssh"
+)
+
 const (
 	LocalID       ID       = "local"
 	LocalRevision Revision = 1
@@ -30,6 +37,7 @@ const (
 	ErrUnsupported    ErrorCode = "host_unsupported"
 	ErrOutcomeUnknown ErrorCode = "outcome_unknown"
 	ErrStaleRevision  ErrorCode = "host_revision_conflict"
+	ErrDuplicateLocal ErrorCode = "duplicate_local_host"
 )
 
 func (c ErrorCode) Error() string { return string(c) }

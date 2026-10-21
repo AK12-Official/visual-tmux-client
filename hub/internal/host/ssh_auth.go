@@ -7,6 +7,11 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+const (
+	CredentialTypePassword   = "password"
+	CredentialTypePrivateKey = "private_key"
+)
+
 var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrPassphraseRequired = errors.New("passphrase required for encrypted private key")
@@ -15,13 +20,13 @@ var (
 // AuthMethods converts stored credentials into Go SSH authentication methods.
 func AuthMethods(kind string, creds Credentials) ([]ssh.AuthMethod, error) {
 	switch kind {
-	case "password":
+	case CredentialTypePassword:
 		if creds.Password == "" {
 			return nil, errors.New("password cannot be empty")
 		}
 		return []ssh.AuthMethod{ssh.Password(creds.Password)}, nil
 
-	case "private_key":
+	case CredentialTypePrivateKey:
 		if creds.PrivateKey == "" {
 			return nil, errors.New("private key cannot be empty")
 		}

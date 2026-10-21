@@ -91,7 +91,7 @@ func startDisposableSSHServer(
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
+	t.Cleanup(func() { _ = listener.Close() }) //nolint:errcheck // listener cleanup
 
 	go func() {
 		for {
@@ -102,7 +102,7 @@ func startDisposableSSHServer(
 			go func(c net.Conn) {
 				sshConn, chans, reqs, err := ssh.NewServerConn(c, serverConfig)
 				if err != nil {
-					_ = c.Close()
+					_ = c.Close() //nolint:errcheck // conn cleanup
 					return
 				}
 				go ssh.DiscardRequests(reqs)
@@ -114,16 +114,16 @@ func startDisposableSSHServer(
 								go ssh.DiscardRequests(reqs)
 								go func() {
 									// keep channel open until connection closes
-									_ = sshConn.Wait()
-									_ = ch.Close()
+									_ = sshConn.Wait() //nolint:errcheck // wait conn
+									_ = ch.Close()     //nolint:errcheck // close ch
 								}()
 							}
 							continue
 						}
-						_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported")
+						_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported") //nolint:errcheck // reject
 					}
 				}()
-				_ = sshConn.Wait()
+				_ = sshConn.Wait() //nolint:errcheck // wait conn
 			}(tcpConn)
 		}
 	}()
@@ -133,7 +133,10 @@ func startDisposableSSHServer(
 
 func TestSSHAuthAdapters(t *testing.T) {
 	// Parse encrypted key public key to add to authorized keys
-	signer, err := ssh.ParsePrivateKeyWithPassphrase([]byte(testEncryptedPrivateKey), []byte(testEncryptedKeyPassphrase))
+	signer, err := ssh.ParsePrivateKeyWithPassphrase(
+		[]byte(testEncryptedPrivateKey),
+		[]byte(testEncryptedKeyPassphrase),
+	)
 	if err != nil {
 		t.Fatalf("setup: failed to parse encrypted key: %v", err)
 	}
@@ -163,7 +166,7 @@ func TestSSHAuthAdapters(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_ = client.Close()
+		_ = client.Close() //nolint:errcheck // client cleanup
 		return nil
 	}
 

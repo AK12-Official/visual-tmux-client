@@ -28,7 +28,7 @@ func TestHostAdministrationAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }() //nolint:errcheck // test cleanup
 
 	router := NewRouter(RouterConfig{
 		Token: "secret-token",
@@ -42,6 +42,9 @@ func TestHostAdministrationAuthentication(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/hosts", ""},
 		{http.MethodPost, "/api/hosts", `{"id":"r1","name":"Remote 1"}`},
+		{http.MethodGet, "/api/host-settings", ""},
+		{http.MethodPut, "/api/host-settings", `{"revision":1}`},
+		{http.MethodPatch, "/api/host-settings", `{"revision":1}`},
 		{http.MethodGet, "/api/hosts/r1", ""},
 		{http.MethodPut, "/api/hosts/r1", `{"revision":1,"name":"Updated"}`},
 		{http.MethodDelete, "/api/hosts/r1", ""},
@@ -76,7 +79,7 @@ func TestHostCRUDAndLocalIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }() //nolint:errcheck // test cleanup
 
 	var changedHosts []host.ID
 	sessSpy := &spySessionService{
@@ -126,26 +129,82 @@ func TestHostCRUDAndLocalIdentity(t *testing.T) {
 		t.Fatalf("expected 1 host with ID local, got %+v", listResp.Hosts)
 	}
 
-	// 2. Cannot modify local host
-	resp = authedRequest(http.MethodPost, "/api/hosts", map[string]any{
-		"id":   "local",
-		"name": "Modified Local",
-	})
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("POST local: expected 400, got %d", resp.StatusCode)
-	}
-
+	// 2. Uniform local management and default settings
+	// Local rename acceptance
 	resp = authedRequest(http.MethodPut, "/api/hosts/local", map[string]any{
 		"revision": 1,
 		"name":     "Modified Local",
 	})
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("PUT local: expected 400, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT local: expected 200, got %d", resp.StatusCode)
+	}
+	var localUpdated host.Host
+	if err := json.NewDecoder(resp.Body).Decode(&localUpdated); err != nil {
+		t.Fatal(err)
+	}
+	if localUpdated.Name != "Modified Local" || localUpdated.Revision != 2 || localUpdated.ConnectionRevision != 1 {
+		t.Fatalf("unexpected updated local: %+v", localUpdated)
 	}
 
-	resp = authedRequest(http.MethodDelete, "/api/hosts/local", nil)
+	// Irrelevant SSH fields for local host are rejected
+	resp = authedRequest(http.MethodPut, "/api/hosts/local", map[string]any{
+		"revision": 2,
+		"name":     "Modified Local",
+		"address":  "127.0.0.1",
+	})
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("DELETE local: expected 400, got %d", resp.StatusCode)
+		t.Fatalf("PUT local with address: expected 400, got %d", resp.StatusCode)
+	}
+
+	// Immutable connection type
+	resp = authedRequest(http.MethodPut, "/api/hosts/local", map[string]any{
+		"revision":       2,
+		"name":           "Modified Local",
+		"connectionType": "ssh",
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("PUT local with changed connection type: expected 400, got %d", resp.StatusCode)
+	}
+
+	// Duplicate local registration is rejected with conflict
+	resp = authedRequest(http.MethodPost, "/api/hosts", map[string]any{
+		"id":             "local2",
+		"connectionType": "local",
+		"name":           "Second Local",
+	})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate local: expected 409, got %d", resp.StatusCode)
+	}
+
+	// Host settings: initial default is local
+	resp = authedRequest(http.MethodGet, "/api/host-settings", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/host-settings: expected 200, got %d", resp.StatusCode)
+	}
+	var settings host.Settings
+	if err := json.NewDecoder(resp.Body).Decode(&settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings.DefaultHostID == nil || *settings.DefaultHostID != host.LocalID || settings.Revision != 1 {
+		t.Fatalf("unexpected default settings: %+v", settings)
+	}
+
+	// Stale revision update rejected
+	resp = authedRequest(http.MethodPut, "/api/host-settings", map[string]any{
+		"revision":      99,
+		"defaultHostId": "local",
+	})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("stale settings update: expected 409, got %d", resp.StatusCode)
+	}
+
+	// Unknown default target rejected
+	resp = authedRequest(http.MethodPut, "/api/host-settings", map[string]any{
+		"revision":      1,
+		"defaultHostId": "unknown",
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown target settings update: expected 404, got %d", resp.StatusCode)
 	}
 
 	// 3. Unknown host rejection
@@ -200,7 +259,7 @@ func TestHostCRUDAndLocalIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }() //nolint:errcheck // test cleanup
 	cfg.Hosts = registry
 	router = NewRouter(cfg, sessSpy, nil, nil, nil)
 
@@ -210,7 +269,9 @@ func TestHostCRUDAndLocalIdentity(t *testing.T) {
 		t.Fatalf("GET remote-1: expected 200, got %d", resp.StatusCode)
 	}
 	buf := new(bytes.Buffer)
-	buf.ReadFrom(resp.Body)
+	if _, err := buf.ReadFrom(resp.Body); err != nil {
+		t.Fatal(err)
+	}
 	respStr := buf.String()
 	if bytes.Contains([]byte(respStr), []byte("super-secret-password")) {
 		t.Fatal("response exposed password!")
@@ -298,5 +359,41 @@ func TestHostCRUDAndLocalIdentity(t *testing.T) {
 	resp = authedRequest(http.MethodGet, "/api/hosts/remote-1", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("GET deleted host: expected 404, got %d", resp.StatusCode)
+	}
+
+	// 7. Local host removal and settings atomic clear
+	resp = authedRequest(http.MethodDelete, "/api/hosts/local?revision=2", nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE local: expected 204, got %d", resp.StatusCode)
+	}
+	resp = authedRequest(http.MethodGet, "/api/hosts/local", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET deleted local: expected 404, got %d", resp.StatusCode)
+	}
+
+	// Default host cleared atomically when default was removed
+	resp = authedRequest(http.MethodGet, "/api/host-settings", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/host-settings: expected 200, got %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings.DefaultHostID != nil {
+		t.Fatalf("expected nil default host after removal, got %v", settings.DefaultHostID)
+	}
+
+	// Re-register local host
+	resp = authedRequest(http.MethodPost, "/api/hosts", map[string]any{
+		"id":             "local",
+		"connectionType": "local",
+		"name":           "Local Restored",
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST re-register local: expected 201, got %d", resp.StatusCode)
+	}
+	resp = authedRequest(http.MethodGet, "/api/hosts/local", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET restored local: expected 200, got %d", resp.StatusCode)
 	}
 }

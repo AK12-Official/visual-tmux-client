@@ -84,7 +84,7 @@ func startOversizedSFTPServer(t *testing.T, lister *virtualOversizedLister) (net
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
+	t.Cleanup(func() { _ = listener.Close() }) //nolint:errcheck // test cleanup
 
 	handler := sftp.InMemHandler()
 	handler.FileList = &virtualFileHandler{lister: lister}
@@ -98,13 +98,13 @@ func startOversizedSFTPServer(t *testing.T, lister *virtualOversizedLister) (net
 			go func(c net.Conn) {
 				sshConn, chans, reqs, err := ssh.NewServerConn(c, serverConfig)
 				if err != nil {
-					_ = c.Close()
+					_ = c.Close() //nolint:errcheck // mock conn cleanup
 					return
 				}
 				go ssh.DiscardRequests(reqs)
 				for newChannel := range chans {
 					if newChannel.ChannelType() != "session" {
-						_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported")
+						_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported") //nolint:errcheck // reject channel
 						continue
 					}
 					ch, channelReqs, err := newChannel.Accept()
@@ -114,19 +114,19 @@ func startOversizedSFTPServer(t *testing.T, lister *virtualOversizedLister) (net
 					go func(in <-chan *ssh.Request, channel ssh.Channel) {
 						for req := range in {
 							if req.Type == "subsystem" && string(req.Payload[4:]) == "sftp" {
-								_ = req.Reply(true, nil)
+								_ = req.Reply(true, nil) //nolint:errcheck // mock reply
 								server := sftp.NewRequestServer(channel, handler)
-								_ = server.Serve()
-								_ = channel.Close()
+								_ = server.Serve()  //nolint:errcheck // server exit
+								_ = channel.Close() //nolint:errcheck // mock channel close
 								return
 							}
 							if req.WantReply {
-								_ = req.Reply(false, nil)
+								_ = req.Reply(false, nil) //nolint:errcheck // mock reply
 							}
 						}
 					}(channelReqs, ch)
 				}
-				_ = sshConn.Wait()
+				_ = sshConn.Wait() //nolint:errcheck // mock conn wait
 			}(tcpConn)
 		}
 	}()
@@ -145,7 +145,7 @@ func dialTestSSHClient(t *testing.T, addr string) *ssh.Client {
 	if err != nil {
 		t.Fatalf("dial test ssh: %v", err)
 	}
-	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() }) //nolint:errcheck // test cleanup
 	return conn
 }
 
@@ -160,7 +160,7 @@ func TestSFTPAdapterBoundedDirectoryIterationDoesNotScaleWithOversizedDir(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer adapter.Close()
+	defer adapter.Close() //nolint:errcheck // test cleanup
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -203,7 +203,7 @@ func TestSFTPAdapterExtensionNegotiation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer adapter.Close()
+	defer adapter.Close() //nolint:errcheck // test cleanup
 
 	// Verify extension checking works without panic
 	_ = adapter.HasExtension(host.PosixRenameExtension)
@@ -221,7 +221,7 @@ func TestSFTPAdapterEffectiveCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer adapter.Close()
+	defer adapter.Close() //nolint:errcheck // test cleanup
 
 	// Pre-cancelled context must fail immediately
 	cancelledCtx, cancel := context.WithCancel(context.Background())

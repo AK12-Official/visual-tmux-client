@@ -96,7 +96,8 @@ files:
   max_dir_entries: 1000
 
 hosts:
-  # Multi-Host SSH Registry and Remote Transport Configuration.
+  # Unified Host Registry and Remote Transport Configuration.
+  # The hub initializes, migrates, and locks this private durable state before listening.
   #
   # Directory where the durable SQLite database (hosts.db) is stored.
   # If left empty, defaults to the OS user configuration directory:
@@ -108,7 +109,8 @@ hosts:
 
   # File path to the 32-byte AES-256 master encryption key used to encrypt
   # stored credentials at rest. If left empty, defaults to "master.key" inside state_dir.
-  # Automatically generated with 0600 permissions if it does not exist.
+  # Automatically generated with 0600 permissions during fresh state initialization if neither the key nor database exists.
+  # If an existing database is present without a valid matching key, the service will refuse to start.
   # Can also be set via VISUAL_TMUX_CLIENT_HOSTS_MASTER_KEY_FILE environment variable.
   master_key_file: ""
 

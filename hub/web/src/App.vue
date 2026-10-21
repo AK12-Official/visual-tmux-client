@@ -4,6 +4,7 @@ import {
   AuthError,
   clearToken,
   createSession,
+  getHostSettings,
   getToken,
   isHeaderSafeToken,
   killSession,
@@ -42,35 +43,123 @@ const tokenInput = ref('')
 const authError = ref('')
 const authBusy = ref(false)
 
-const availableHosts = ref<HostItem[]>([
-  { id: 'local', revision: 0, connectionRevision: 0, name: 'Local', trusted: true, hasCredential: false } as HostItem,
-])
-const currentHostId = ref('local')
+const RECENT_HOST_KEY = 'vtc:recent-host'
+const availableHosts = ref<HostItem[]>([])
+const currentHostId = ref<string | null>(null)
+const activeHostRemoved = ref(false)
+const hostDiscoveryLoading = ref(false)
+const hostDiscoveryError = ref('')
+const hasInitializedWorkspace = ref(false)
 
-const currentHost = computed<HostItem>(() =>
-  availableHosts.value.find((h) => h.id === currentHostId.value) || {
-    id: currentHostId.value,
-    revision: 0,
-    connectionRevision: 0,
-    name: currentHostId.value,
-    trusted: true,
-    hasCredential: false,
-  },
-)
-const currentHostName = computed(() => currentHost.value.name || currentHost.value.id)
+const currentHost = computed<HostItem | null>(() => {
+  if (!currentHostId.value) return null
+  return availableHosts.value.find((h) => h.id === currentHostId.value) ?? null
+})
+const currentHostName = computed(() => currentHost.value?.name || currentHost.value?.id || '')
+const currentHostRevision = computed(() => currentHost.value?.revision ?? 0)
+const currentHostConnectionRevision = computed(() => currentHost.value?.connectionRevision ?? 0)
 
-async function loadAvailableHosts(): Promise<void> {
-  if (!hasToken.value) return
-  try {
-    const list = await listHosts()
-    if (Array.isArray(list) && list.length > 0) {
-      availableHosts.value = list
-      if (!list.some((h) => h.id === currentHostId.value)) {
-        currentHostId.value = 'local'
+function selectHost(id: string): void {
+  currentHostId.value = id
+  hasInitializedWorkspace.value = true
+  onHostChange()
+}
+
+function handleActiveHostRemoved(removedId: string): void {
+  if (currentHostId.value === removedId) {
+    stopPolling()
+    activeHostRemoved.value = true
+    if (filesDirty.value) {
+      fileManagerOpen.value = true
+    }
+    // Dropping panels for the removed host so no new input is sent
+    for (const key of Object.keys(panelIds.value)) {
+      const colon = key.indexOf(':')
+      const host = colon >= 0 ? key.slice(0, colon) : 'local'
+      const name = colon >= 0 ? key.slice(colon + 1) : key
+      if (host === removedId) {
+        disposeTerminalSession(name, host)
       }
     }
-  } catch {
-    /* ignore network failure */
+    try {
+      const recent = localStorage.getItem(RECENT_HOST_KEY)
+      if (recent === removedId) {
+        localStorage.removeItem(RECENT_HOST_KEY)
+      }
+    } catch {
+      /* ignore storage quota */
+    }
+  }
+}
+
+async function loadAvailableHosts(isBootstrap = false): Promise<void> {
+  if (!hasToken.value) return
+  hostDiscoveryLoading.value = true
+  hostDiscoveryError.value = ''
+  try {
+    const prevConnRev = currentHost.value?.connectionRevision
+    const [list, settings] = await Promise.all([
+      listHosts(),
+      getHostSettings().catch(() => null),
+    ])
+    availableHosts.value = Array.isArray(list) ? list : []
+    hostDiscoveryLoading.value = false
+    const nextConnRev = currentHost.value?.connectionRevision
+
+    if (availableHosts.value.length === 0) {
+      if (currentHostId.value && !activeHostRemoved.value) {
+        handleActiveHostRemoved(currentHostId.value)
+      } else if (!activeHostRemoved.value) {
+        currentHostId.value = null
+      }
+      return
+    }
+
+    if (isBootstrap || currentHostId.value === null) {
+      // 1. Remembered recent host if still registered
+      const recent = localStorage.getItem(RECENT_HOST_KEY)
+      if (recent && availableHosts.value.some((h) => h.id === recent)) {
+        selectHost(recent)
+        return
+      }
+
+      // 2. Registered default host if still registered
+      if (
+        settings?.defaultHostId &&
+        availableHosts.value.some((h) => h.id === settings.defaultHostId)
+      ) {
+        selectHost(settings.defaultHostId)
+        return
+      }
+
+      // 3. Otherwise present host selection without guessing
+      currentHostId.value = null
+      return
+    }
+
+    // Active use: check if active host was removed
+    if (currentHostId.value && !availableHosts.value.some((h) => h.id === currentHostId.value)) {
+      handleActiveHostRemoved(currentHostId.value)
+      return
+    }
+
+    if (
+      prevConnRev !== undefined &&
+      nextConnRev !== undefined &&
+      prevConnRev !== nextConnRev &&
+      currentHostId.value &&
+      !activeHostRemoved.value
+    ) {
+      selected.value = null
+      void refresh()
+    }
+  } catch (err) {
+    hostDiscoveryLoading.value = false
+    if (err instanceof AuthError) {
+      handleAuthFailure()
+      return
+    }
+    hostDiscoveryError.value = err instanceof Error ? err.message : String(err)
   }
 }
 
@@ -81,7 +170,7 @@ const selected = ref<string | null>(null)
 const managerInitialHostId = ref<string | null>(null)
 const cachedSessionsByHost = shallowRef<Record<string, Session[]>>(nameMap())
 
-function openHostManagerFor(hostId: string): void {
+function openHostManagerFor(hostId: string | null): void {
   managerInitialHostId.value = hostId
   hostManagerOpen.value = true
 }
@@ -218,8 +307,10 @@ function onDirtyChange(d: boolean, hosts?: string[]) {
 }
 
 function onHostDeleted(id: string) {
-  fileManagerRef.value?.discardHostDrafts(id)
-  void loadAvailableHosts()
+  if (currentHostId.value === id) {
+    handleActiveHostRemoved(id)
+  }
+  void loadAvailableHosts(false)
 }
 
 // The hub publishes whether it offers a file manager at all. A button that
@@ -264,7 +355,7 @@ function toggleFileManager(): void {
  * is to find a live attachment, and to say so when there is none rather than
  * letting the insertion look like it worked. */
 function insertPathIntoTerminal(text: string, sourceHostId = currentHostId.value): void {
-  if (sourceHostId !== currentHostId.value) {
+  if (!currentHostId.value || sourceHostId !== currentHostId.value) {
     notify(
       'warning',
       `Cannot insert path across hosts: file belongs to ${sourceHostId} but active terminal is on ${currentHostId.value}.`,
@@ -319,8 +410,9 @@ function onActivity(name: string, hostId = currentHostId.value): void {
 }
 
 const currentHostActivity = computed(() => {
-  const prefix = `${currentHostId.value}:`
   const result = nameMap<boolean>()
+  if (!currentHostId.value) return result
+  const prefix = `${currentHostId.value}:`
   for (const [key, val] of Object.entries(activity.value)) {
     if (key.startsWith(prefix) && val) {
       result[key.slice(prefix.length)] = true
@@ -330,7 +422,7 @@ const currentHostActivity = computed(() => {
 })
 
 const selectedActive = computed(
-  () => selected.value !== null && !!activity.value[panelKey(selected.value, currentHostId.value)],
+  () => selected.value !== null && currentHostId.value !== null && !!activity.value[panelKey(selected.value, currentHostId.value)],
 )
 
 // The tab-title mark is the only signal visible when the browser tab itself
@@ -376,20 +468,20 @@ function stopPolling() {
 let refreshSeq = 0
 
 async function refresh() {
-  if (!hasToken.value) return
+  if (!hasToken.value || !currentHostId.value || activeHostRemoved.value) return
   const seq = ++refreshSeq
   const targetHostId = currentHostId.value
-  const targetRevision = currentHost.value?.revision
+  const targetConnectionRevision = currentHost.value?.connectionRevision
   try {
     const list = await listSessions(targetHostId)
     if (seq !== refreshSeq) return
-    if (currentHostId.value !== targetHostId) return
+    if (currentHostId.value !== targetHostId || activeHostRemoved.value) return
     if (
-      targetRevision !== undefined &&
-      currentHost.value?.revision !== undefined &&
-      currentHost.value.revision !== targetRevision
+      targetConnectionRevision !== undefined &&
+      currentHost.value?.connectionRevision !== undefined &&
+      currentHost.value.connectionRevision !== targetConnectionRevision
     ) {
-      // Stale response from a superseded host revision dropped
+      // Stale response from a superseded host connection revision dropped
       return
     }
     cachedSessionsByHost.value = nameMap(cachedSessionsByHost.value, {
@@ -419,16 +511,16 @@ async function refresh() {
     }
   } catch (err) {
     if (seq !== refreshSeq) return
-    if (currentHostId.value !== targetHostId) return
+    if (currentHostId.value !== targetHostId || activeHostRemoved.value) return
     if (
-      targetRevision !== undefined &&
-      currentHost.value?.revision !== undefined &&
-      currentHost.value.revision !== targetRevision
+      targetConnectionRevision !== undefined &&
+      currentHost.value?.connectionRevision !== undefined &&
+      currentHost.value.connectionRevision !== targetConnectionRevision
     ) {
       return
     }
 
-    if (targetHostId === 'local' && err instanceof AuthError) {
+    if (err instanceof AuthError) {
       handleAuthFailure()
       return
     }
@@ -437,12 +529,14 @@ async function refresh() {
     listError.value = msg
     listStale.value = true
 
-    // Remote authentication, trust, or unavailable errors stop automatic polling retries
-    // to prevent hammering the server and offer host repair.
-    const isRemoteAuthOrTrust =
-      targetHostId !== 'local' &&
-      (msg.includes('auth') || msg.includes('trust') || msg.includes('unavailable') || msg.includes('conflict'))
-    if (isRemoteAuthOrTrust) {
+    // Stop automatic polling on host-level failures to offer host repair
+    if (
+      msg.startsWith('host_unavailable') ||
+      msg.startsWith('host_not_found') ||
+      msg.startsWith('host_revision_conflict') ||
+      msg.includes('ssh authentication failed') ||
+      msg.includes('untrusted_host_key')
+    ) {
       stopPolling()
     }
   }
@@ -468,6 +562,10 @@ function handleAuthFailure() {
   stopPolling()
   clearToken()
   token.value = ''
+  currentHostId.value = null
+  availableHosts.value = []
+  activeHostRemoved.value = false
+  hasInitializedWorkspace.value = false
   // The credential is gone, so nothing could be saved anyway; asking about
   // unsaved edits here would be a question with only one answer.
   closeFileManager()
@@ -495,19 +593,12 @@ async function submitToken() {
   authError.value = ''
   try {
     setToken(t)
-    await loadAvailableHosts()
-    const list = await listSessions(currentHostId.value)
     token.value = t
     tokenInput.value = ''
-    cachedSessionsByHost.value = nameMap(cachedSessionsByHost.value, {
-      [currentHostId.value]: list,
-    })
-    sessions.value = list
-    listError.value = ''
-    listStale.value = false
-    startPolling()
+    await loadAvailableHosts(true)
   } catch (err) {
     clearToken()
+    token.value = ''
     if (err instanceof AuthError) {
       authError.value = 'Authentication failed. Check the token and try again.'
     } else {
@@ -522,6 +613,10 @@ function logout() {
   stopPolling()
   clearToken()
   token.value = ''
+  currentHostId.value = null
+  availableHosts.value = []
+  activeHostRemoved.value = false
+  hasInitializedWorkspace.value = false
   // As with an auth failure: the token is gone, so there is nothing to ask.
   closeFileManager()
   selected.value = null
@@ -530,6 +625,13 @@ function logout() {
 }
 
 function onHostChange(): void {
+  if (!currentHostId.value) return
+  activeHostRemoved.value = false
+  try {
+    localStorage.setItem(RECENT_HOST_KEY, currentHostId.value)
+  } catch {
+    /* ignore storage quota */
+  }
   selected.value = null
   listError.value = ''
   listStale.value = false
@@ -539,34 +641,53 @@ function onHostChange(): void {
 
 function onSelectHostFromModal(id: string): void {
   hostManagerOpen.value = false
-  if (currentHostId.value !== id) {
-    currentHostId.value = id
-    onHostChange()
+  if (currentHostId.value !== id || activeHostRemoved.value) {
+    selectHost(id)
   }
+}
+
+function openHostManagerAdd(): void {
+  managerInitialHostId.value = null
+  hostManagerOpen.value = true
 }
 
 // One-click creation: the hub assigns the default name (made unique by its
 // suffix retry); renaming is how the user personalizes it afterwards.
 const creating = ref(false)
 async function onCreate() {
-  if (creating.value) return
+  if (creating.value || !currentHostId.value || activeHostRemoved.value) return
+  const targetHostId = currentHostId.value
+  const targetHostName = currentHostName.value
+  const targetConnectionRev = currentHost.value?.connectionRevision
   creating.value = true
   try {
-    const sess = await createSession(undefined, currentHostId.value)
-    await refresh()
-    select(sess.name)
+    const sess = await createSession(undefined, targetHostId, targetConnectionRev)
+    if (
+      currentHostId.value === targetHostId &&
+      currentHost.value?.connectionRevision === targetConnectionRev &&
+      !activeHostRemoved.value
+    ) {
+      await refresh()
+      if (
+        currentHostId.value === targetHostId &&
+        currentHost.value?.connectionRevision === targetConnectionRev &&
+        !activeHostRemoved.value
+      ) {
+        select(sess.name)
+      }
+    }
   } catch (err) {
     if (err instanceof AuthError) {
-      if (currentHostId.value === 'local') {
-        handleAuthFailure()
-        return
-      }
-      notify('error', 'Remote host authentication failed. Check host credentials.')
+      handleAuthFailure()
       return
     }
     const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('host_revision_conflict')) {
+      notify('error', `Could not create session on ${targetHostName}: host configuration has changed.`)
+      return
+    }
     if (msg.includes('outcome_unknown')) {
-      notify('warning', `Creation outcome uncertain on ${currentHostName.value}. Verify sessions before retrying.`)
+      notify('warning', `Creation outcome uncertain on ${targetHostName}. Verify sessions before retrying.`)
       return
     }
     notify('error', msg)
@@ -576,66 +697,78 @@ async function onCreate() {
 }
 
 async function onRename(oldName: string, newName: string) {
+  if (!currentHostId.value || activeHostRemoved.value) return
+  const targetHostId = currentHostId.value
+  const targetHostName = currentHostName.value
+  const targetConnectionRev = currentHost.value?.connectionRevision
   try {
-    await renameSession(oldName, newName, currentHostId.value)
-    // Carry the panel identity across the rename, so the live attachment for
-    // this session is reused rather than stranded in the KeepAlive cache under
-    // a name that no longer exists (see panelIds).
-    const oldKey = panelKey(oldName)
-    const newKey = panelKey(newName)
-    const id = panelIds.value[oldKey]
-    if (id !== undefined) {
-      const next = nameMap(panelIds.value, { [newKey]: id })
-      delete next[oldKey]
-      panelIds.value = next
+    await renameSession(oldName, newName, targetHostId, targetConnectionRev)
+    if (
+      currentHostId.value === targetHostId &&
+      currentHost.value?.connectionRevision === targetConnectionRev &&
+      !activeHostRemoved.value
+    ) {
+      // Carry the panel identity across the rename, so the live attachment for
+      // this session is reused rather than stranded in the KeepAlive cache under
+      // a name that no longer exists (see panelIds).
+      const oldKey = panelKey(oldName, targetHostId)
+      const newKey = panelKey(newName, targetHostId)
+      const id = panelIds.value[oldKey]
+      if (id !== undefined) {
+        const next = nameMap(panelIds.value, { [newKey]: id })
+        delete next[oldKey]
+        panelIds.value = next
+      }
+      if (connStates.value[oldKey] !== undefined) {
+        const nextStates = nameMap(connStates.value, { [newKey]: connStates.value[oldKey] })
+        delete nextStates[oldKey]
+        connStates.value = nextStates
+      }
+      if (activity.value[oldKey] !== undefined) {
+        const nextAct = nameMap(activity.value, { [newKey]: activity.value[oldKey] })
+        delete nextAct[oldKey]
+        activity.value = nextAct
+      }
+      const timer = activityTimers.get(oldKey)
+      if (timer) {
+        clearTimeout(timer)
+        activityTimers.delete(oldKey)
+        activityTimers.set(
+          newKey,
+          setTimeout(() => {
+            activityTimers.delete(newKey)
+            const next = nameMap(activity.value)
+            delete next[newKey]
+            activity.value = next
+          }, getConfig().web.activity_decay),
+        )
+      }
+      // Follow the rename: `selected` is the viewed terminal's identity — it
+      // names the ws ticket and the header. Left on the old name, the polled
+      // list no longer contains it, so a live session reads as ended and every
+      // reconnect asks for a ticket the hub answers with session_not_found.
+      if (currentHostId.value === targetHostId && selected.value === oldName) {
+        selected.value = newName
+      }
+      // Retarget the attachment itself. For the viewed panel the `session` prop
+      // change would reach it, but a panel parked in the KeepAlive cache never
+      // re-renders, so no prop can: without this its terminal keeps the old name
+      // and its next reconnect asks the hub for a session that no longer exists.
+      renameTerminalSession(oldName, newName, targetHostId)
+      await refresh()
     }
-    if (connStates.value[oldKey] !== undefined) {
-      const nextStates = nameMap(connStates.value, { [newKey]: connStates.value[oldKey] })
-      delete nextStates[oldKey]
-      connStates.value = nextStates
-    }
-    if (activity.value[oldKey] !== undefined) {
-      const nextAct = nameMap(activity.value, { [newKey]: activity.value[oldKey] })
-      delete nextAct[oldKey]
-      activity.value = nextAct
-    }
-    const timer = activityTimers.get(oldKey)
-    if (timer) {
-      clearTimeout(timer)
-      activityTimers.delete(oldKey)
-      activityTimers.set(
-        newKey,
-        setTimeout(() => {
-          activityTimers.delete(newKey)
-          const next = nameMap(activity.value)
-          delete next[newKey]
-          activity.value = next
-        }, getConfig().web.activity_decay),
-      )
-    }
-    // Follow the rename: `selected` is the viewed terminal's identity — it
-    // names the ws ticket and the header. Left on the old name, the polled
-    // list no longer contains it, so a live session reads as ended and every
-    // reconnect asks for a ticket the hub answers with session_not_found.
-    if (selected.value === oldName) selected.value = newName
-    // Retarget the attachment itself. For the viewed panel the `session` prop
-    // change would reach it, but a panel parked in the KeepAlive cache never
-    // re-renders, so no prop can: without this its terminal keeps the old name
-    // and its next reconnect asks the hub for a session that no longer exists.
-    renameTerminalSession(oldName, newName, currentHostId.value)
-    await refresh()
   } catch (err) {
     if (err instanceof AuthError) {
-      if (currentHostId.value === 'local') {
-        handleAuthFailure()
-        return
-      }
-      notify('error', 'Remote host authentication failed. Check host credentials.')
+      handleAuthFailure()
       return
     }
     const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('host_revision_conflict')) {
+      notify('error', `Could not rename session on ${targetHostName}: host configuration has changed.`)
+      return
+    }
     if (msg.includes('outcome_unknown')) {
-      notify('warning', `Rename outcome uncertain on ${currentHostName.value}. Verify session before retrying.`)
+      notify('warning', `Rename outcome uncertain on ${targetHostName}. Verify session before retrying.`)
       return
     }
     notify('error', msg)
@@ -649,7 +782,7 @@ async function onRename(oldName: string, newName: string) {
 // gone — KeepAlive only unmounts on eviction, and nothing evicts here — so its
 // terminal is disposed explicitly, or its xterm instance, scrollback and
 // ResizeObserver would be retained for the life of the page.
-function dropPanel(name: string, hostId = currentHostId.value): void {
+function dropPanel(name: string, hostId = currentHostId.value ?? 'local'): void {
   const key = panelKey(name, hostId)
   if (panelIds.value[key] !== undefined) {
     const next = nameMap(panelIds.value)
@@ -675,23 +808,35 @@ function dropPanel(name: string, hostId = currentHostId.value): void {
 }
 
 async function onKill(name: string) {
+  if (!currentHostId.value || activeHostRemoved.value) return
+  const targetHostId = currentHostId.value
+  const targetHostName = currentHostName.value
+  const targetConnectionRev = currentHost.value?.connectionRevision
   try {
-    await killSession(name, currentHostId.value)
-    if (selected.value === name) selected.value = null
-    dropPanel(name, currentHostId.value)
-    await refresh()
+    await killSession(name, targetHostId, targetConnectionRev)
+    dropPanel(name, targetHostId)
+    if (
+      currentHostId.value === targetHostId &&
+      currentHost.value?.connectionRevision === targetConnectionRev &&
+      !activeHostRemoved.value
+    ) {
+      if (selected.value === name) {
+        selected.value = null
+      }
+      await refresh()
+    }
   } catch (err) {
     if (err instanceof AuthError) {
-      if (currentHostId.value === 'local') {
-        handleAuthFailure()
-        return
-      }
-      notify('error', 'Remote host authentication failed. Check host credentials.')
+      handleAuthFailure()
       return
     }
     const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('host_revision_conflict')) {
+      notify('error', `Could not kill session on ${targetHostName}: host configuration has changed.`)
+      return
+    }
     if (msg.includes('outcome_unknown')) {
-      notify('warning', `Kill outcome uncertain on ${currentHostName.value}. Verify session before retrying.`)
+      notify('warning', `Kill outcome uncertain on ${targetHostName}. Verify session before retrying.`)
       return
     }
     notify('error', msg)
@@ -701,24 +846,46 @@ async function onKill(name: string) {
 // Bulk kill issues one DELETE per session sequentially and names the sessions
 // that failed, so a mid-batch failure never hides behind the successes.
 async function onBulkKill(names: string[]) {
+  if (!currentHostId.value || activeHostRemoved.value) return
+  const targetHostId = currentHostId.value
+  const targetHostName = currentHostName.value
+  const targetConnectionRev = currentHost.value?.connectionRevision
   const failed: string[] = []
   for (const name of names) {
+    if (activeHostRemoved.value) return
+    const currentConnRev = availableHosts.value.find((h) => h.id === targetHostId)?.connectionRevision
+    if (
+      targetConnectionRev !== undefined &&
+      currentConnRev !== undefined &&
+      currentConnRev !== targetConnectionRev
+    ) {
+      notify('warning', `Host configuration changed during bulk kill. Remaining sessions were not killed.`)
+      break
+    }
     try {
-      await killSession(name, currentHostId.value)
-      if (selected.value === name) selected.value = null
-      dropPanel(name, currentHostId.value)
+      await killSession(name, targetHostId, targetConnectionRev)
+      if (
+        currentHostId.value === targetHostId &&
+        currentHost.value?.connectionRevision === targetConnectionRev &&
+        !activeHostRemoved.value
+      ) {
+        if (selected.value === name) {
+          selected.value = null
+        }
+      }
+      dropPanel(name, targetHostId)
     } catch (err) {
       if (err instanceof AuthError) {
-        if (currentHostId.value === 'local') {
-          handleAuthFailure()
-          return
-        }
-        notify('error', 'Remote host authentication failed. Check host credentials.')
+        handleAuthFailure()
         return
       }
       const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('host_revision_conflict')) {
+        notify('error', `Could not kill session "${name}" on ${targetHostName}: host configuration changed.`)
+        break
+      }
       if (msg.includes('outcome_unknown')) {
-        notify('warning', `Kill outcome uncertain for "${name}" on ${currentHostName.value}.`)
+        notify('warning', `Kill outcome uncertain for "${name}" on ${targetHostName}.`)
       }
       failed.push(name)
     }
@@ -726,10 +893,16 @@ async function onBulkKill(names: string[]) {
   if (failed.length > 0) {
     notify('error', `Failed to kill: ${failed.join(', ')}`)
   }
-  await refresh()
+  if (
+    currentHostId.value === targetHostId &&
+    currentHost.value?.connectionRevision === targetConnectionRev &&
+    !activeHostRemoved.value
+  ) {
+    await refresh()
+  }
 }
 
-function onState(session: string, state: ConnState, hostId = currentHostId.value) {
+function onState(session: string, state: ConnState, hostId = currentHostId.value ?? 'local') {
   const key = panelKey(session, hostId)
   connStates.value = nameMap(connStates.value, { [key]: state })
 }
@@ -739,7 +912,7 @@ function onNotice(message: string, level: ToastLevel = 'error') {
 }
 
 function onOnline() {
-  if (hasToken.value) {
+  if (hasToken.value && currentHostId.value) {
     void refresh()
   }
 }
@@ -748,9 +921,9 @@ function onOffline() {
   notify('warning', 'Network connection offline')
 }
 
-onMounted(() => {
+onMounted(async () => {
   if (hasToken.value) {
-    void loadAvailableHosts().then(() => refresh())
+    await loadAvailableHosts(true)
   }
   window.addEventListener('online', onOnline)
   window.addEventListener('offline', onOffline)
@@ -801,6 +974,7 @@ onBeforeUnmount(() => {
             aria-label="Target Host"
             @change="onHostChange"
           >
+            <option v-if="currentHostId === null" :value="null" disabled>Select Host…</option>
             <option v-for="h in availableHosts" :key="h.id" :value="h.id">
               {{ h.name || h.id }}{{ h.address ? ` (${h.address})` : '' }}
             </option>
@@ -812,7 +986,41 @@ onBeforeUnmount(() => {
         </div>
       </header>
 
-      <div class="app__body">
+      <div v-if="hostDiscoveryError && !hasInitializedWorkspace" class="app__discovery-state app__discovery-state--error" role="alert">
+        <p class="app__discovery-msg">{{ hostDiscoveryError }}</p>
+        <button class="app__discovery-btn" type="button" @click="loadAvailableHosts(true)">Retry</button>
+      </div>
+
+      <div v-else-if="!hostDiscoveryLoading && availableHosts.length === 0 && !activeHostRemoved && !hasInitializedWorkspace" class="app__discovery-state app__discovery-state--empty">
+        <p class="app__discovery-msg">No hosts registered. Add a host to get started.</p>
+        <button class="app__discovery-btn" type="button" @click="openHostManagerAdd">+ Add Host</button>
+      </div>
+
+      <div v-else-if="!currentHostId && !activeHostRemoved && !hasInitializedWorkspace" class="app__discovery-state app__discovery-state--prompt">
+        <h2 class="app__discovery-title">Select a Host</h2>
+        <p class="app__discovery-msg">Choose a host to manage tmux sessions:</p>
+        <div class="app__prompt-hosts">
+          <button
+            v-for="h in availableHosts"
+            :key="h.id"
+            class="app__host-card-btn"
+            type="button"
+            @click="selectHost(h.id)"
+          >
+            <span class="app__host-card-name">{{ h.name || h.id }}</span>
+            <span v-if="h.address" class="app__host-card-addr">{{ h.address }}</span>
+          </button>
+        </div>
+      </div>
+
+      <div v-else class="app__body">
+        <div v-if="hostDiscoveryError" class="app__discovery-state app__discovery-state--error app__discovery-banner" role="alert">
+          <p class="app__discovery-msg">{{ hostDiscoveryError }}</p>
+          <button class="app__discovery-btn" type="button" @click="loadAvailableHosts(false)">Retry</button>
+        </div>
+        <div v-if="activeHostRemoved" class="app__removed-banner" role="alert">
+          {{ availableHosts.length === 0 ? 'Active host was removed. Input and operations are stopped. Add a host to continue.' : 'Active host was removed. Input and operations are stopped. Select another host to continue.' }}
+        </div>
         <aside class="app__sidebar" :class="{ 'app__sidebar--collapsed': sidebarCollapsed }">
           <template v-if="!sidebarCollapsed">
             <button
@@ -831,7 +1039,7 @@ onBeforeUnmount(() => {
                 :selected="selected"
                 :active="currentHostActivity"
                 :creating="creating"
-                :host-id="currentHostId"
+                :host-id="currentHostId ?? undefined"
                 :host-name="currentHostName"
                 @select="select($event)"
                 @create="onCreate"
@@ -930,7 +1138,7 @@ onBeforeUnmount(() => {
               :session="selected"
               :alive="selectedAlive"
               :font-size="fontSize"
-              :host-id="currentHostId"
+              :host-id="currentHostId ?? undefined"
               @state="onState"
               @notice="onNotice"
               @activity="onActivity"
@@ -940,10 +1148,11 @@ onBeforeUnmount(() => {
             <FileManagerOverlay
               ref="fileManagerRef"
               :session="selected"
-              :host-id="currentHostId"
+              :host-id="currentHostId ?? undefined"
               :host-name="currentHostName"
-              :host-revision="currentHost.revision"
+              :host-revision="currentHostRevision"
               :available-host-ids="availableHosts.map((h) => h.id)"
+              :available-hosts="availableHosts"
               @close="closeFileManager"
               @notice="onNotice"
               @insert-path="insertPathIntoTerminal"
@@ -1302,5 +1511,93 @@ onBeforeUnmount(() => {
   margin: 0;
   color: var(--th-danger);
   font-size: 0.8rem;
+}
+.app__discovery-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 2rem;
+  text-align: center;
+}
+.app__discovery-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--th-text-hi);
+}
+.app__discovery-msg {
+  margin: 0;
+  color: var(--th-text-lo);
+  font-size: 0.95rem;
+  max-width: 480px;
+}
+.app__discovery-state--error .app__discovery-msg {
+  color: var(--th-danger);
+}
+.app__discovery-btn {
+  background: var(--th-raised);
+  color: var(--th-text-hi);
+  border: 1px solid var(--th-border);
+  border-radius: 4px;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.app__discovery-btn:hover {
+  border-color: var(--th-text-lo);
+}
+.app__prompt-hosts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: center;
+  max-width: 500px;
+}
+.app__host-card-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  background: var(--th-surface);
+  border: 1px solid var(--th-border);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  min-width: 140px;
+  text-align: left;
+}
+.app__host-card-btn:hover {
+  border-color: var(--th-focus);
+  background: var(--th-raised);
+}
+.app__host-card-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--th-text-hi);
+}
+.app__host-card-addr {
+  font-size: 0.75rem;
+  color: var(--th-text-lo);
+}
+.app__removed-banner {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--th-danger);
+  border-bottom: 1px solid var(--th-danger);
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  text-align: center;
+  font-weight: 500;
+}
+.app__discovery-banner {
+  flex: none;
+  padding: 0.5rem 1rem;
+  flex-direction: row;
+  justify-content: center;
+  gap: 1rem;
+  background: rgba(239, 68, 68, 0.15);
+  border-bottom: 1px solid var(--th-danger);
 }
 </style>

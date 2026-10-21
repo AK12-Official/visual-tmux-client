@@ -55,7 +55,10 @@ func TestPOSIXEncoderLiteralFidelity(t *testing.T) {
 
 func TestPOSIXCommandEncoding(t *testing.T) {
 	verifyScript := `for a in "$@"; do printf '%s\n' "$a"; done`
-	fullCmd := host.EncodePOSIXCommand("sh", "-c", verifyScript, "--", "tmux", "new-session", "-d", "-s", "session $1 'test'", "-c", "/path/with spaces")
+	fullCmd := host.EncodePOSIXCommand(
+		"sh", "-c", verifyScript, "--",
+		"tmux", "new-session", "-d", "-s", "session $1 'test'", "-c", "/path/with spaces",
+	)
 
 	runCmd := exec.Command("sh", "-c", fullCmd)
 	out, err := runCmd.CombinedOutput()
@@ -75,7 +78,10 @@ func TestPOSIXCommandEncoding(t *testing.T) {
 
 	actualLines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	if len(actualLines) != len(expectedLines) {
-		t.Fatalf("arg count mismatch: got %d, expected %d. output:\n%s", len(actualLines), len(expectedLines), string(out))
+		t.Fatalf(
+			"arg count mismatch: got %d, expected %d. output:\n%s",
+			len(actualLines), len(expectedLines), string(out),
+		)
 	}
 	for i := range expectedLines {
 		if actualLines[i] != expectedLines[i] {
@@ -97,7 +103,7 @@ func startMockEnvSSHServer(t *testing.T, stdoutResp string, exitStatus uint32) (
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
+	t.Cleanup(func() { _ = listener.Close() }) //nolint:errcheck // test cleanup
 
 	go func() {
 		for {
@@ -108,14 +114,14 @@ func startMockEnvSSHServer(t *testing.T, stdoutResp string, exitStatus uint32) (
 			go func(tcp net.Conn) {
 				sshConn, chans, reqs, err := ssh.NewServerConn(tcp, serverConfig)
 				if err != nil {
-					_ = tcp.Close()
+					_ = tcp.Close() //nolint:errcheck // mock conn cleanup
 					return
 				}
 				go ssh.DiscardRequests(reqs)
 				go func() {
 					for newChannel := range chans {
 						if newChannel.ChannelType() != "session" {
-							_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported")
+							_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported") //nolint:errcheck // reject
 							continue
 						}
 						channel, requests, err := newChannel.Accept()
@@ -125,25 +131,28 @@ func startMockEnvSSHServer(t *testing.T, stdoutResp string, exitStatus uint32) (
 						go func() {
 							for req := range requests {
 								if req.Type == "exec" {
-									_ = req.Reply(true, nil)
-									_, _ = io.WriteString(channel, stdoutResp)
+									_ = req.Reply(true, nil)                   //nolint:errcheck // reply
+									_, _ = io.WriteString(channel, stdoutResp) //nolint:errcheck // write response
 									if exitStatus != 0 {
-										// send exit status
 										statusMsg := struct{ Status uint32 }{Status: exitStatus}
-										_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(&statusMsg))
+										statusData := ssh.Marshal(&statusMsg)
+										//nolint:errcheck // status
+										_, _ = channel.SendRequest("exit-status", false, statusData)
 									} else {
 										statusMsg := struct{ Status uint32 }{Status: 0}
-										_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(&statusMsg))
+										statusData := ssh.Marshal(&statusMsg)
+										//nolint:errcheck // status
+										_, _ = channel.SendRequest("exit-status", false, statusData)
 									}
-									_ = channel.Close()
+									_ = channel.Close() //nolint:errcheck // mock close
 									return
 								}
-								_ = req.Reply(false, nil)
+								_ = req.Reply(false, nil) //nolint:errcheck // reject
 							}
 						}()
 					}
 				}()
-				_ = sshConn.Wait()
+				_ = sshConn.Wait() //nolint:errcheck // wait
 			}(c)
 		}
 	}()
@@ -153,7 +162,8 @@ func startMockEnvSSHServer(t *testing.T, stdoutResp string, exitStatus uint32) (
 
 func TestProbeRemoteEnvironment(t *testing.T) {
 	t.Run("ValidLinuxEnvironment", func(t *testing.T) {
-		listener, hostKey := startMockEnvSSHServer(t, "Linux\n---ENV-SEP---\n/home/ubuntu\n---ENV-SEP---\ntmux 3.3a\n", 0)
+		probeResp := "Linux\n---ENV-SEP---\n/home/ubuntu\n---ENV-SEP---\ntmux 3.3a\n"
+		listener, hostKey := startMockEnvSSHServer(t, probeResp, 0)
 		client, err := ssh.Dial("tcp", listener.Addr().String(), &ssh.ClientConfig{
 			User:            "ubuntu",
 			HostKeyCallback: host.PinnedHostKeyCallback(hostKey.Marshal()),
@@ -161,7 +171,7 @@ func TestProbeRemoteEnvironment(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer client.Close()
+		defer client.Close() //nolint:errcheck // test cleanup
 
 		env, err := host.ProbeRemoteEnvironment(context.Background(), client)
 		if err != nil {
@@ -173,7 +183,8 @@ func TestProbeRemoteEnvironment(t *testing.T) {
 	})
 
 	t.Run("UnsupportedWindowsOS", func(t *testing.T) {
-		listener, hostKey := startMockEnvSSHServer(t, "Windows_NT\n---ENV-SEP---\nC:\\Users\\admin\n---ENV-SEP---\ntmux 3.0\n", 0)
+		probeResp := "Windows_NT\n---ENV-SEP---\nC:\\Users\\admin\n---ENV-SEP---\ntmux 3.0\n"
+		listener, hostKey := startMockEnvSSHServer(t, probeResp, 0)
 		client, err := ssh.Dial("tcp", listener.Addr().String(), &ssh.ClientConfig{
 			User:            "admin",
 			HostKeyCallback: host.PinnedHostKeyCallback(hostKey.Marshal()),
@@ -181,7 +192,7 @@ func TestProbeRemoteEnvironment(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer client.Close()
+		defer client.Close() //nolint:errcheck // test cleanup
 
 		_, err = host.ProbeRemoteEnvironment(context.Background(), client)
 		if !errors.Is(err, host.ErrUnsupportedEnvironment) {
@@ -190,7 +201,8 @@ func TestProbeRemoteEnvironment(t *testing.T) {
 	})
 
 	t.Run("TmuxUnavailable", func(t *testing.T) {
-		listener, hostKey := startMockEnvSSHServer(t, "Linux\n---ENV-SEP---\n/home/user\n---ENV-SEP---\nsh: tmux: command not found\n", 127)
+		probeResp := "Linux\n---ENV-SEP---\n/home/user\n---ENV-SEP---\nsh: tmux: command not found\n"
+		listener, hostKey := startMockEnvSSHServer(t, probeResp, 127)
 		client, err := ssh.Dial("tcp", listener.Addr().String(), &ssh.ClientConfig{
 			User:            "user",
 			HostKeyCallback: host.PinnedHostKeyCallback(hostKey.Marshal()),
@@ -198,7 +210,7 @@ func TestProbeRemoteEnvironment(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer client.Close()
+		defer client.Close() //nolint:errcheck // test cleanup
 
 		_, err = host.ProbeRemoteEnvironment(context.Background(), client)
 		if !errors.Is(err, host.ErrTmuxUnavailable) {

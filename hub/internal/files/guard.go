@@ -143,6 +143,16 @@ func (s *RootSet) Roots() []string {
 	return append([]string(nil), s.roots...)
 }
 
+// HasRoots reports whether the root set contains at least one configured root.
+func (s *RootSet) HasRoots() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.roots) > 0
+}
+
 // Resolve is the single choke point every filesystem operation goes through. It
 // returns the canonical path to act on, or the reason the operation must not
 // happen.

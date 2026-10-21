@@ -41,7 +41,9 @@ func NewRemoteSessionService(lease ClientLease, home, tmuxPath string) *session.
 	return session.NewService(backend)
 }
 
-func (b *RemoteSessionBackend) exec(ctx context.Context, isMutation bool, args ...string) (stdout, stderr string, exitCode int, err error) {
+func (b *RemoteSessionBackend) exec(
+	ctx context.Context, isMutation bool, args ...string,
+) (stdout, stderr string, exitCode int, err error) {
 	if err := b.lease.CheckValid(); err != nil {
 		return "", "", 0, err
 	}
@@ -55,7 +57,7 @@ func (b *RemoteSessionBackend) exec(ctx context.Context, isMutation bool, args .
 		b.lease.InvalidateControl(client)
 		return "", "", 0, &Error{Target: b.lease.Target, Code: ErrUnavailable, Cause: err}
 	}
-	defer sshSession.Close()
+	defer func() { _ = sshSession.Close() }() //nolint:errcheck // best-effort session cleanup
 
 	var outBuf, errBuf bytes.Buffer
 	sshSession.Stdout = &outBuf
@@ -67,7 +69,9 @@ func (b *RemoteSessionBackend) exec(ctx context.Context, isMutation bool, args .
 	startErr := sshSession.Start(cmdText)
 	if startErr != nil {
 		b.lease.InvalidateControl(client)
-		return outBuf.String(), errBuf.String(), 0, &Error{Target: b.lease.Target, Code: ErrUnavailable, Cause: startErr}
+		return outBuf.String(), errBuf.String(), 0, &Error{
+			Target: b.lease.Target, Code: ErrUnavailable, Cause: startErr,
+		}
 	}
 
 	waitDone := make(chan error, 1)
@@ -77,13 +81,17 @@ func (b *RemoteSessionBackend) exec(ctx context.Context, isMutation bool, args .
 
 	select {
 	case <-ctx.Done():
-		_ = sshSession.Close()
+		_ = sshSession.Close() //nolint:errcheck // abort remote session
 		b.lease.InvalidateControl(client)
 		<-waitDone
 		if isMutation {
-			return outBuf.String(), errBuf.String(), 0, &Error{Target: b.lease.Target, Code: ErrOutcomeUnknown, Cause: ctx.Err()}
+			return outBuf.String(), errBuf.String(), 0, &Error{
+				Target: b.lease.Target, Code: ErrOutcomeUnknown, Cause: ctx.Err(),
+			}
 		}
-		return outBuf.String(), errBuf.String(), 0, &Error{Target: b.lease.Target, Code: ErrUnavailable, Cause: ctx.Err()}
+		return outBuf.String(), errBuf.String(), 0, &Error{
+			Target: b.lease.Target, Code: ErrUnavailable, Cause: ctx.Err(),
+		}
 	case waitErr := <-waitDone:
 		if waitErr != nil {
 			var exitErr *ssh.ExitError
@@ -92,9 +100,13 @@ func (b *RemoteSessionBackend) exec(ctx context.Context, isMutation bool, args .
 			}
 			b.lease.InvalidateControl(client)
 			if isMutation {
-				return outBuf.String(), errBuf.String(), 0, &Error{Target: b.lease.Target, Code: ErrOutcomeUnknown, Cause: waitErr}
+				return outBuf.String(), errBuf.String(), 0, &Error{
+					Target: b.lease.Target, Code: ErrOutcomeUnknown, Cause: waitErr,
+				}
 			}
-			return outBuf.String(), errBuf.String(), 0, &Error{Target: b.lease.Target, Code: ErrUnavailable, Cause: waitErr}
+			return outBuf.String(), errBuf.String(), 0, &Error{
+				Target: b.lease.Target, Code: ErrUnavailable, Cause: waitErr,
+			}
 		}
 		return outBuf.String(), errBuf.String(), 0, nil
 	}

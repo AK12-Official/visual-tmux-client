@@ -233,6 +233,20 @@ When accessing files on an enrolled remote host:
 
 ## Multi-host Deployment and Security
 
+### Unified Host Management and Topology
+Visual Tmux Client manages both local and remote SSH targets within a single persistent model:
+- **Typed Connections**: Each host record declares an immutable `connectionType` of `local` or `ssh`. Local execution targets the local tmux process and local filesystem; SSH targets execute remotely over SSH and SFTP. Irrelevant SSH fields (address, port, username, credentials, and host key pinning) are rejected on local host registrations.
+- **Singleton Local Host**: At most one local-type host may be registered at any given time.
+- **Default Host Setting**: A global default host can be configured via `PATCH /api/host-settings` or through the Web UI ("Set Default"). When the designated default host is removed, the setting is cleared atomically (`defaultHostId: null`).
+- **Browser Host Selection**:
+  1. *Remembered Recent Host*: If the browser remembers a still-registered recent host (`vtc:recent-host`), it is restored first.
+  2. *Registered Default Host*: Otherwise, the configured default host is selected.
+  3. *Explicit Selection Prompt*: If neither exists, the browser presents an explicit host selection prompt without guessing or sending premature session requests.
+  4. *Empty Registry*: If all hosts (including local) have been removed, the browser displays an empty registry prompt with an "+ Add Host" button without issuing session, terminal, or file requests.
+- **Host Removal Semantics**: Deleting a host removes its registration from the database and immediately invalidates active attachments, leases, tickets, and file observations. Deleting a host **does NOT terminate** its tmux sessions or delete its files. If an active host is deleted while an editor has unsaved drafts, target operations cease while drafts remain recoverable in the browser.
+- **Capability Diagnostics**: `GET /api/hosts/{id}/capabilities` returns adapter-backed, structured status records (`available`, `unavailable`, or `not_applicable`) rather than evaluating object truthiness. On local hosts, SSH and SFTP capabilities are reported as `not_applicable`.
+- **Monotonic Revision Watermarks**: Re-registering an ID previously used assigns revision numbers strictly exceeding the previous watermark, preventing stale leases, tickets, or cached records from matching the new host.
+
 ### Single-Admin Authority and Server Trust
 Visual Tmux Client operates under a single-admin security model. Possession of the shared Bearer token grants full administrative authority to manage sessions, access files, enroll remote hosts, and execute arbitrary commands both locally and across all enrolled remote machines.
 
@@ -242,9 +256,11 @@ When enrolling a remote host, VTC employs Trust-On-First-Use (TOFU) host key pin
 3. Subsequent connections strictly verify the pinned key. Any key mismatch or unannounced change causes the connection to be immediately aborted.
 
 ### Containerized Deployments and Persistent Mounts
+Before listening on any network port, the Hub initializes, migrates, and locks its private durable state directory (`hosts.state_dir` or `VISUAL_TMUX_CLIENT_HOSTS_STATE_DIR`, defaulting to `~/.config/visual-tmux-client` on Linux). An unwritable directory, permission error, corrupted schema, or active lock held by another process causes the server to exit immediately with an error (CLI `--help` and `--version` remain available).
+
 When deploying in Docker or Kubernetes:
-- The host registry database (`hosts.db`) and master encryption key (`master.key`) are stored in `hosts.state_dir` (or `VISUAL_TMUX_CLIENT_HOSTS_STATE_DIR`).
-- **You must mount a persistent volume** to this state directory so that enrolled hosts and encrypted credentials survive container restarts or image upgrades.
+- The host registry database (`hosts.db`), master encryption key (`master.key`), and lock file (`owner.lock`) are stored in `hosts.state_dir` (or `VISUAL_TMUX_CLIENT_HOSTS_STATE_DIR`).
+- **You must mount a persistent volume** to this state directory so that enrolled hosts, default settings, and encrypted credentials survive container restarts or image upgrades.
 - Ensure the state directory is secured with `0700` permissions and the master key file with `0600` permissions.
 
 Example Docker volume mount:
@@ -260,7 +276,7 @@ docker run -d \
 ### Key and State Backup & Disaster Recovery
 - **Backup**: Regularly back up both `hosts.db` and `master.key` from your state directory. Both files must be backed up together; credentials in `hosts.db` are encrypted using AES-256-GCM keyed by `master.key`.
 - **Restoration**: To restore to a fresh machine or container, restore `hosts.db` and `master.key` to the designated `state_dir` with `0600`/`0700` permissions before starting the service.
-- **Lost Master Key**: If `master.key` is lost or corrupted, `hosts.db` cannot decrypt stored SSH passwords or private keys. The host metadata and pinned host keys remain accessible, but each host will need to have its credentials re-entered.
+- **Lost Master Key**: If `master.key` is lost or corrupted, `hosts.db` cannot decrypt stored SSH passwords or private keys. The service refuses to start to protect encrypted credentials from being overwritten or compromised. To recover, restore `master.key` from your secure backup, or restore both `hosts.db` and `master.key` together from a matching backup point. Starting with a fresh key while an existing database is present is rejected.
 
 The default loopback binding is intentional. If you expose the service to another machine, put it behind HTTPS, use a strong stable token, and set `origin` to the exact public origin. See [SECURITY.md](SECURITY.md) before exposing it to a network.
 
@@ -314,11 +330,14 @@ The browser UI fetches public runtime parameters from `GET /api/client-config` p
 
 ### Rollback Strategy
 
-Visual Tmux Client retains full backwards compatibility:
+Visual Tmux Client retains backwards compatibility for configuration and sessions:
 - Starting the binary without a YAML configuration file automatically operates with the documented built-in defaults.
 - All command-line flags and environment variables from previous versions continue to function identically.
-- If rolling back to an earlier binary release, simply stop the server, replace the executable, and restart. Running local tmux sessions are fully preserved across restarts and downgrades.
-- The host registry database (`hosts.db`) schema maintains backwards compatibility; rolling back the binary preserves existing host enrollments. Restoring backed-up `hosts.db` and `master.key` files provides an immediate clean recovery point if necessary.
+- Running local tmux sessions are fully preserved across restarts and server downgrades.
+- **Database Schema & Binary Downgrades**: Downgrading to an earlier binary release that expects schema 1 is **not** supported directly against a schema 2 database (legacy binaries strictly reject higher schema versions to prevent data corruption). To roll back to a legacy binary release:
+  1. Stop the visual-tmux-client service.
+  2. Restore the pre-upgrade backups of `hosts.db` and `master.key` (any host configuration changes made after the backup will be lost).
+  3. Replace the executable with the previous release binary and restart.
 
 ## Contributing
 

@@ -368,3 +368,46 @@ func TestTicketStore_NilNowFallback(t *testing.T) {
 		t.Errorf("Redeem failed: %v", err)
 	}
 }
+
+func TestTicketStoreInvalidation(t *testing.T) {
+	store := NewTicketStore(5*time.Minute, nil)
+
+	tktA1, _, err := store.IssueForTarget("host-a", 1, "sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tktA2, _, err := store.IssueForTarget("host-a", 2, "sess-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tktB, _, err := store.IssueForTarget("host-b", 1, "sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Invalidate connection revision 1 on host-a
+	store.InvalidateConnection("host-a", 1)
+
+	// tktA1 (rev 1) should be gone
+	if err := store.RedeemForTarget(tktA1, "host-a", 1, "sess-1"); !errors.Is(err, ErrTicketInvalid) {
+		t.Fatalf("expected ErrTicketInvalid for invalidated connection revision, got: %v", err)
+	}
+	// tktA2 (rev 2) remains valid
+	if err := store.RedeemForTarget(tktA2, "host-a", 2, "sess-2"); err != nil {
+		t.Fatalf("expected tktA2 to remain valid: %v", err)
+	}
+	// tktB remains valid
+	if err := store.RedeemForTarget(tktB, "host-b", 1, "sess-1"); err != nil {
+		t.Fatalf("expected tktB to remain valid: %v", err)
+	}
+
+	// Re-issue for host-b and test InvalidateHost
+	tktB2, _, err := store.IssueForTarget("host-b", 1, "sess-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.InvalidateHost("host-b")
+	if err := store.RedeemForTarget(tktB2, "host-b", 1, "sess-2"); !errors.Is(err, ErrTicketInvalid) {
+		t.Fatalf("expected ErrTicketInvalid after InvalidateHost, got: %v", err)
+	}
+}

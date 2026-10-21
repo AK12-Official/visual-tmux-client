@@ -359,11 +359,15 @@ export async function writeFile(
   expected: Stamp | null,
   allowOtherNames = false,
   hostId = 'local',
+  expectedConnectionRevision?: number,
 ): Promise<Stamp | null> {
   const query = new URLSearchParams({
     path,
     size: String(new TextEncoder().encode(body).length),
   })
+  if (expectedConnectionRevision !== undefined && expectedConnectionRevision !== null) {
+    query.set('expected_connection_revision', String(expectedConnectionRevision))
+  }
   if (expected !== null) {
     query.set('expected_mtime', String(expected.millis))
     // Sent as the string it arrived as, never re-encoded through a number.
@@ -401,24 +405,43 @@ async function post(route: string, payload: unknown, hostId = 'local'): Promise<
   })
 }
 
-export async function createEntry(path: string, isDir: boolean, hostId = 'local'): Promise<void> {
-  await post('create', { path, kind: isDir ? 'dir' : 'file' }, hostId)
+export async function createEntry(
+  path: string,
+  isDir: boolean,
+  hostId = 'local',
+  expectedConnectionRevision?: number,
+): Promise<void> {
+  const payload: Record<string, unknown> = { path, kind: isDir ? 'dir' : 'file' }
+  if (expectedConnectionRevision !== undefined) {
+    payload.expected_connection_revision = expectedConnectionRevision
+  }
+  await post('create', payload, hostId)
 }
 
 export async function renameEntry(
   path: string,
   newPath: string,
   hostId = 'local',
+  expectedConnectionRevision?: number,
 ): Promise<void> {
-  await post('rename', { path, new_path: newPath }, hostId)
+  const payload: Record<string, unknown> = { path, new_path: newPath }
+  if (expectedConnectionRevision !== undefined) {
+    payload.expected_connection_revision = expectedConnectionRevision
+  }
+  await post('rename', payload, hostId)
 }
 
 export async function deleteEntry(
   path: string,
   recursive: boolean,
   hostId = 'local',
+  expectedConnectionRevision?: number,
 ): Promise<void> {
-  await post('delete', { path, recursive }, hostId)
+  const payload: Record<string, unknown> = { path, recursive }
+  if (expectedConnectionRevision !== undefined) {
+    payload.expected_connection_revision = expectedConnectionRevision
+  }
+  await post('delete', payload, hostId)
 }
 
 /** StartDirectory is where the manager opens, and whether the hub substituted it. */

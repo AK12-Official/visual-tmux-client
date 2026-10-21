@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/files"
@@ -26,36 +28,59 @@ const fileContentType = "application/octet-stream"
 // mapFileError turns the service's error vocabulary into the wire codes the
 // browser matches on. The browser needs the code rather than the status: the
 // conflict flow in particular has to tell a lost race from any other failure.
-var fileErrorMappings = []struct {
-	target error
-	status int
-	code   string
-}{
-	{host.ErrNotFound, http.StatusNotFound, "host_not_found"},
-	{host.ErrUnavailable, http.StatusServiceUnavailable, "host_unavailable"},
-	{host.ErrUnsupported, http.StatusNotImplemented, "host_unsupported"},
-	{host.ErrOutcomeUnknown, http.StatusBadGateway, "outcome_unknown"},
-	{host.ErrStaleRevision, http.StatusConflict, "host_revision_conflict"},
-	{files.ErrInvalidPath, http.StatusBadRequest, "invalid_path"},
-	{files.ErrInvalidBody, http.StatusBadRequest, "invalid_body"},
-	{files.ErrPathNotAllowed, http.StatusForbidden, "path_not_allowed"},
-	{files.ErrCrossRoot, http.StatusForbidden, "cross_root_move"},
-	{files.ErrPermissionDenied, http.StatusForbidden, "permission_denied"},
-	{files.ErrNotFound, http.StatusNotFound, "not_found"},
-	{files.ErrConflict, http.StatusConflict, "conflict"},
-	{files.ErrDirNotEmpty, http.StatusConflict, "dir_not_empty"},
-	{files.ErrHasOtherNames, http.StatusConflict, "other_names"},
-	{files.ErrFileTooLarge, http.StatusRequestEntityTooLarge, "file_too_large"},
+func mapHostFileError(w http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, host.ErrNotFound):
+		writeError(w, http.StatusNotFound, "host_not_found")
+		return true
+	case errors.Is(err, host.ErrUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "host_unavailable")
+		return true
+	case errors.Is(err, host.ErrUnsupported):
+		writeError(w, http.StatusNotImplemented, "host_unsupported")
+		return true
+	case errors.Is(err, host.ErrOutcomeUnknown):
+		writeError(w, http.StatusBadGateway, "outcome_unknown")
+		return true
+	case errors.Is(err, host.ErrStaleRevision):
+		writeError(w, http.StatusConflict, "host_revision_conflict")
+		return true
+	default:
+		return false
+	}
 }
 
+// mapFileError turns the service's error vocabulary into the wire codes the
+// browser matches on. The browser needs the code rather than the status: the
+// conflict flow in particular has to tell a lost race from any other failure.
 func mapFileError(w http.ResponseWriter, err error) {
-	for _, m := range fileErrorMappings {
-		if errors.Is(err, m.target) {
-			writeError(w, m.status, m.code)
-			return
-		}
+	if mapHostFileError(w, err) {
+		return
 	}
-	writeError(w, http.StatusInternalServerError, "write_failed")
+	switch {
+	case errors.Is(err, files.ErrInvalidPath):
+		writeError(w, http.StatusBadRequest, "invalid_path")
+	case errors.Is(err, files.ErrInvalidBody):
+		writeError(w, http.StatusBadRequest, "invalid_body")
+	case errors.Is(err, files.ErrPathNotAllowed):
+		writeError(w, http.StatusForbidden, "path_not_allowed")
+	case errors.Is(err, files.ErrCrossRoot):
+		writeError(w, http.StatusForbidden, "cross_root_move")
+	case errors.Is(err, files.ErrPermissionDenied):
+		writeError(w, http.StatusForbidden, "permission_denied")
+	case errors.Is(err, files.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found")
+	case errors.Is(err, files.ErrConflict):
+		writeError(w, http.StatusConflict, "conflict")
+	case errors.Is(err, files.ErrDirNotEmpty):
+		writeError(w, http.StatusConflict, "dir_not_empty")
+	case errors.Is(err, files.ErrHasOtherNames):
+		writeError(w, http.StatusConflict, "other_names")
+	case errors.Is(err, files.ErrFileTooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, "file_too_large")
+	default:
+		writeError(w, http.StatusInternalServerError, "write_failed")
+	}
 }
 
 func (s *handlerState) filesGloballyEnabled(w http.ResponseWriter) bool {
@@ -210,6 +235,22 @@ func (s *handlerState) serveFile(w http.ResponseWriter, r *http.Request, attachm
 		io.NewSectionReader(result.File, 0, size))
 }
 
+func parseWriteQueryParams(query url.Values) (int64, *files.ExpectedMtime, bool, bool) {
+	declared, ok := parseRequiredInt64(query.Get("size"))
+	if !ok {
+		return 0, nil, false, false
+	}
+	expected, ok := parseExpectedMtime(query)
+	if !ok {
+		return 0, nil, false, false
+	}
+	allowOtherNames, ok := parseFlag(query.Get("allow_other_names"))
+	if !ok {
+		return 0, nil, false, false
+	}
+	return declared, expected, allowOtherNames, true
+}
+
 func (s *handlerState) writeFile(w http.ResponseWriter, r *http.Request) {
 	if !s.filesGloballyEnabled(w) {
 		return
@@ -221,19 +262,13 @@ func (s *handlerState) writeFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := r.URL.Query()
-	declared, ok := parseRequiredInt64(query.Get("size"))
+	declared, expected, allowOtherNames, ok := parseWriteQueryParams(query)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
-	expected, ok := parseExpectedMtime(r.URL.Query())
-	if !ok {
-		writeError(w, http.StatusBadRequest, "invalid_body")
-		return
-	}
-	allowOtherNames, ok := parseFlag(query.Get("allow_other_names"))
-	if !ok {
-		writeError(w, http.StatusBadRequest, "invalid_body")
+
+	if !s.checkExpectedConnRev(w, r, nil) {
 		return
 	}
 
@@ -245,8 +280,44 @@ func (s *handlerState) writeFile(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.MaxFileSize > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxFileSize)
 	}
+
+	rc := http.NewResponseController(w)
+	opTimeout := defaultFileOperationTimeout
+	if s.cfg.FileOperationTimeout > 0 {
+		opTimeout = s.cfg.FileOperationTimeout
+	}
+	writeCtx, cancelWrite := context.WithTimeout(r.Context(), opTimeout)
+
+	stopWatcher := make(chan struct{})
+	watcherDone := make(chan struct{})
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			close(stopWatcher)
+			<-watcherDone
+		})
+	}
+	defer cancelWrite()
+	defer stop()
+
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-stopWatcher:
+			return
+		case <-writeCtx.Done():
+			select {
+			case <-stopWatcher:
+				return
+			default:
+			}
+			_ = rc.SetReadDeadline(time.Now()) //nolint:errcheck // abort stuck body read on cancellation
+			_ = r.Body.Close()                 //nolint:errcheck // abort stuck body read on cancellation
+		}
+	}()
+
 	result, err := s.files.Write(
-		r.Context(), query.Get("path"), r.Body, declared, expected, allowOtherNames)
+		writeCtx, query.Get("path"), r.Body, declared, expected, allowOtherNames)
 	if err != nil {
 		var oversized *http.MaxBytesError
 		if errors.As(err, &oversized) {
@@ -256,11 +327,14 @@ func (s *handlerState) writeFile(w http.ResponseWriter, r *http.Request) {
 		mapFileError(w, err)
 		return
 	}
+	stop()
 	writeJSON(w, http.StatusOK, writeFileResponse{
 		Mtime:      result.Mtime,
 		MtimeNanos: strconv.FormatInt(result.MtimeNanos, 10),
 	})
 }
+
+const defaultFileOperationTimeout = 30 * time.Second
 
 func (s *handlerState) createEntry(w http.ResponseWriter, r *http.Request) {
 	if !s.filesGloballyEnabled(w) {
@@ -273,6 +347,14 @@ func (s *handlerState) createEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	var req createFileRequest
 	if !s.decodeFileRequest(w, r, &req) {
+		return
+	}
+	bodyRev, ok := resolveBodyRevision(req.ExpectedConnectionRevision, req.ExpectedConnRevCamel)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !s.checkExpectedConnRev(w, r, bodyRev) {
 		return
 	}
 	isDir, ok := createKind(req.Kind)
@@ -319,6 +401,14 @@ func (s *handlerState) renameEntry(w http.ResponseWriter, r *http.Request) {
 	if !s.decodeFileRequest(w, r, &req) {
 		return
 	}
+	bodyRev, ok := resolveBodyRevision(req.ExpectedConnectionRevision, req.ExpectedConnRevCamel)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !s.checkExpectedConnRev(w, r, bodyRev) {
+		return
+	}
 	if err := s.files.Rename(r.Context(), req.Path, req.NewPath); err != nil {
 		mapFileError(w, err)
 		return
@@ -337,6 +427,14 @@ func (s *handlerState) deleteEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	var req deleteFileRequest
 	if !s.decodeFileRequest(w, r, &req) {
+		return
+	}
+	bodyRev, ok := resolveBodyRevision(req.ExpectedConnectionRevision, req.ExpectedConnRevCamel)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !s.checkExpectedConnRev(w, r, bodyRev) {
 		return
 	}
 	if err := s.files.Delete(r.Context(), req.Path, req.Recursive); err != nil {

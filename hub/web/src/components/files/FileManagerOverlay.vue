@@ -25,7 +25,7 @@ import { createPathChanges } from '../../files/pathChanges'
 import { getConfig } from '../../config'
 import type { Classification } from '../../files/classification'
 import { choosePreview, editable, namesAnImage, presentation, wantsText } from '../../files/preview'
-import { testHostCapabilities, type HostCapabilities } from '../../api'
+import { testHostCapabilities, type HostCapabilities, type HostItem } from '../../api'
 import {
   anyDirty,
   beginSave,
@@ -38,11 +38,13 @@ import {
   type OpenFile,
 } from '../../files/tabs'
 import {
+  cachedChildren,
   createTreeState,
   forgetDirectory,
   invalidateDirectory,
   isExpanded,
   loadDirectory,
+  resetTreeState,
 } from '../../files/tree'
 import CodeEditor from './CodeEditor.vue'
 import EditorTabs from './EditorTabs.vue'
@@ -63,6 +65,7 @@ const props = defineProps<{
   hostRevision?: number
   hostCapabilities?: HostCapabilities
   availableHostIds?: string[]
+  availableHosts?: HostItem[]
 }>()
 const host = computed(() => props.hostId ?? 'local')
 const emit = defineEmits<{
@@ -72,7 +75,8 @@ const emit = defineEmits<{
   (e: 'dirty-change', dirty: boolean, dirtyHosts?: string[]): void
 }>()
 
-const tree = reactive(createTreeState())
+const initialConnRev = props.availableHosts?.find((h) => h.id === host.value)?.connectionRevision
+const tree = reactive(createTreeState(host.value, initialConnRev))
 // treeRef is the rendered tree, asked to put the keyboard back after an action
 // removes or renames the row it was on.
 const treeRef = ref<InstanceType<typeof FileTree> | null>(null)
@@ -106,9 +110,19 @@ const menu = ref<{
 } | null>(null)
 
 // navigationAt is the ticket of the most recent goTo; an earlier one that
-// finishes later must not write. opening holds the paths being read right now.
+// finishes later must not write. openingKeys holds the host:path entries being read right now.
 let navigationAt = 0
-const opening = new Set<string>()
+const openingKeys = new Set<string>()
+function openingKey(hostId: string, path: string): string {
+  return `${hostId}:${path}`
+}
+function hasOpeningForHost(hostId: string): boolean {
+  const prefix = `${hostId}:`
+  for (const k of openingKeys) {
+    if (k.startsWith(prefix)) return true
+  }
+  return false
+}
 // saveTickets is the newest save attempted per tab session, so an out-of-order
 // answer from an older one cannot be folded back in.
 const saveTickets = new Map<number, number>()
@@ -195,14 +209,6 @@ watch(
 const capabilitiesByHost = reactive(new Map<string, HostCapabilities>())
 
 function loadHostCapabilities(h: string) {
-  if (h === 'local') {
-    capabilitiesByHost.set('local', {
-      hostId: 'local',
-      online: true,
-      files: { enabled: true, boundary: 'account_bound', rootHandleConfinement: false, atomicReplacement: true },
-    })
-    return
-  }
   if (props.hostCapabilities && (props.hostCapabilities.hostId === h || !props.hostCapabilities.hostId)) {
     capabilitiesByHost.set(h, props.hostCapabilities)
     return
@@ -233,22 +239,100 @@ watch(
   { immediate: true },
 )
 
+const hostRevisions = reactive<Record<string, { revision?: number; connectionRevision?: number }>>({})
+
+function currentHostConnRev(targetHost: string = host.value): number | undefined {
+  return (
+    hostRevisions[targetHost]?.connectionRevision ??
+    props.availableHosts?.find((h) => h.id === targetHost)?.connectionRevision
+  )
+}
+
+watch(
+  () => props.availableHosts,
+  (hosts) => {
+    if (hosts) {
+      for (const h of hosts) {
+        hostRevisions[h.id] = {
+          revision: h.revision,
+          connectionRevision: h.connectionRevision,
+        }
+      }
+      const curConnRev = currentHostConnRev(host.value)
+      if (
+        tree.connectionRevision !== undefined &&
+        curConnRev !== undefined &&
+        tree.connectionRevision !== curConnRev
+      ) {
+        // Connection configuration changed for this host.
+        // Wipe cached tree state so entries from the previous connection are not
+        // preserved or acted upon on the new connection.
+        closeMenu()
+        resetTreeState(tree, host.value, curConnRev)
+        current.value = ''
+        failure.value = ''
+        navError.value = ''
+        loading.value = true
+        void startDirectory()
+      } else if (curConnRev !== undefined) {
+        tree.connectionRevision = curConnRev
+      }
+    }
+  },
+  { immediate: true, deep: true },
+)
+
+watch(
+  [() => props.hostId, () => props.hostRevision],
+  ([newHostId, newRev]) => {
+    const h = (newHostId as string | undefined) ?? 'local'
+    if (newRev !== undefined) {
+      if (!hostRevisions[h]) hostRevisions[h] = {}
+      hostRevisions[h].revision = newRev as number
+    }
+  },
+  { immediate: true },
+)
+
 const activeHost = computed(() => active.value?.hostId ?? host.value)
 
-const hostRemoved = computed(() => {
-  const h = activeHost.value
+const isTabHostRemoved = (tab: OpenFile): boolean => {
+  const h = tab.hostId ?? 'local'
   if (h === 'local') return false
   if (!props.availableHostIds) return false
   return !props.availableHostIds.includes(h)
+}
+
+const hostRemoved = computed(() => {
+  if (!active.value) return false
+  return isTabHostRemoved(active.value)
 })
+
+const isTabRevisionStale = (tab: OpenFile): boolean => {
+  const targetHost = tab.hostId ?? 'local'
+  const currentInfo = hostRevisions[targetHost]
+  if (targetHost === host.value) {
+    if (tab.revision !== undefined && props.hostRevision !== undefined && tab.revision !== props.hostRevision) {
+      return true
+    }
+  }
+  if (currentInfo?.revision !== undefined && tab.revision !== undefined) {
+    if (tab.revision !== currentInfo.revision) {
+      return true
+    }
+  }
+  if (currentInfo?.connectionRevision !== undefined && tab.connectionRevision !== undefined) {
+    if (tab.connectionRevision !== currentInfo.connectionRevision) {
+      return true
+    }
+  }
+  return false
+}
 
 const revisionStale = computed(() => {
   const tab = active.value
   if (!tab) return false
-  const h = tab.hostId ?? 'local'
-  if (h !== host.value) return false
-  if (tab.revision === undefined || props.hostRevision === undefined) return false
-  return tab.revision !== props.hostRevision
+  return isTabRevisionStale(tab)
 })
 
 const replacementUnsupported = computed(() => {
@@ -355,22 +439,29 @@ function openWithoutReading(
   entry: Entry,
   size: number,
   binary: Classification,
+  targetHostId: string = host.value,
+  targetRevision: number | undefined = props.hostRevision,
+  targetConnectionRev: number | undefined = hostRevisions[targetHostId]?.connectionRevision ??
+    props.availableHosts?.find((h) => h.id === targetHostId)?.connectionRevision,
 ) {
-  const at = changes.resolve(path, startedAt)
+  const at = getChanges(targetHostId, targetConnectionRev).resolve(path, startedAt)
   if (at === null) {
     reportRemoved(entry.name)
     return
   }
-  const existing = tabs.value.find((tab) => tab.path === at && (tab.hostId ?? 'local') === host.value)
+  const existing = tabs.value.find((tab) => tab.path === at && (tab.hostId ?? 'local') === targetHostId)
   if (existing) {
-    activePath.value = existing.path
-    activeTabId.value = existing.id
+    if (host.value === targetHostId) {
+      activePath.value = existing.path
+      activeTabId.value = existing.id
+    }
     return
   }
   const newTab: OpenFile = {
     id: nextTabId++,
-    hostId: host.value,
-    revision: props.hostRevision,
+    hostId: targetHostId,
+    revision: targetRevision,
+    connectionRevision: targetConnectionRev,
     path: at,
     name: basename(at),
     text: '',
@@ -382,8 +473,10 @@ function openWithoutReading(
     binary,
   }
   tabs.value = [...tabs.value, newTab]
-  activePath.value = at
-  activeTabId.value = newTab.id
+  if (host.value === targetHostId) {
+    activePath.value = at
+    activeTabId.value = newTab.id
+  }
 }
 
 /** onImageTooLarge records the size an image preview refused to render.
@@ -411,15 +504,17 @@ async function goTo(path: string) {
   // without this, the slower one lands last and moves the manager to a directory
   // the user has already left -- or reports an error about one.
   const attempt = ++navigationAt
+  const targetHost = host.value
+  const targetConnRev = currentHostConnRev(targetHost)
   loading.value = true
   navError.value = ''
   try {
-    await loadDirectory(tree, path, true, host.value)
-    if (attempt !== navigationAt) return
+    await loadDirectory(tree, path, true, targetHost, targetConnRev)
+    if (attempt !== navigationAt || host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
     current.value = path
     failure.value = ''
   } catch (err) {
-    if (attempt !== navigationAt) return
+    if (attempt !== navigationAt || host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
     const detail = err instanceof FileApiError ? err.code : String(err)
     if (current.value === '') {
       failure.value = `${path} could not be opened (${detail}).`
@@ -427,7 +522,9 @@ async function goTo(path: string) {
       navError.value = `${path} could not be opened (${detail}).`
     }
   } finally {
-    if (attempt === navigationAt) loading.value = false
+    if (attempt === navigationAt && host.value === targetHost && currentHostConnRev(targetHost) === targetConnRev) {
+      loading.value = false
+    }
   }
 }
 
@@ -442,16 +539,20 @@ async function goTo(path: string) {
  * an ancestor that still exists beats an error.
  */
 async function startDirectory(): Promise<void> {
+  const targetHost = host.value
+  const targetConnRev = currentHostConnRev(targetHost)
   let seed: StartDirectory = { path: '', substituted: false }
   if (props.session === null) {
+    if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
     await goTo('/')
     return
   }
   try {
-    seed = await fetchWorkingDirectory(props.session, host.value)
+    seed = await fetchWorkingDirectory(props.session, targetHost)
   } catch {
     seed = { path: '', substituted: false }
   }
+  if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
   if (seed.path === '') {
     await goTo('/')
     return
@@ -459,6 +560,7 @@ async function startDirectory(): Promise<void> {
 
   if (seed.substituted) {
     await goTo(seed.path)
+    if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
     emit('notice', `Opened ${seed.path}: the session's directory is outside the file boundary.`, 'warning')
     return
   }
@@ -466,7 +568,8 @@ async function startDirectory(): Promise<void> {
   let probe = seed.path
   for (;;) {
     try {
-      await loadDirectory(tree, probe, false, host.value)
+      await loadDirectory(tree, probe, false, targetHost, targetConnRev)
+      if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
       current.value = probe
       loading.value = false
       if (probe !== seed.path) {
@@ -474,6 +577,7 @@ async function startDirectory(): Promise<void> {
       }
       return
     } catch (err) {
+      if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
       const code = err instanceof FileApiError ? err.code : ''
       // A directory that is merely not permitted may still have an ancestor that
       // is, and under an unrestricted boundary there is no configured root to be
@@ -492,6 +596,7 @@ async function startDirectory(): Promise<void> {
 
   // Nothing on the way up could be listed, so stay where the session is and show
   // why: a blank panel would hide the boundary that caused it.
+  if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
   current.value = seed.path
   await goTo(seed.path)
 }
@@ -504,27 +609,54 @@ async function startDirectory(): Promise<void> {
  * something that ends up in the editor is decoded here.
  */
 async function openFile(entry: Entry, path: string) {
+  if (loading.value || current.value === '') {
+    emit('notice', `Could not open ${entry.name}: directory is reloading.`, 'warning')
+    return
+  }
+  const parentDir = dirname(path)
+  const dirEntries = cachedChildren(tree, parentDir)
+  if (dirEntries && !dirEntries.some((e) => e.name === entry.name)) {
+    emit('notice', `Could not open ${entry.name}: entry is not present in current directory.`, 'error')
+    return
+  }
+  const targetHostId = host.value
+  const targetRevision = props.hostRevision
+  const targetConnectionRev = tree.connectionRevision ?? currentHostConnRev(targetHostId)
+  const currentConnRev = currentHostConnRev(targetHostId)
+  if (
+    tree.connectionRevision !== undefined &&
+    currentConnRev !== undefined &&
+    tree.connectionRevision !== currentConnRev
+  ) {
+    emit('notice', `Could not open ${entry.name}: host configuration has changed.`, 'error')
+    return
+  }
+  const opKey = openingKey(targetHostId, path)
+
   // The path as asked for, not as some earlier rename moved it: nothing has
   // happened *during* this read yet, so there is nothing to correct for.
-  const existing = tabs.value.find((tab) => tab.path === path && (tab.hostId ?? 'local') === host.value)
+  const existing = tabs.value.find((tab) => tab.path === path && (tab.hostId ?? 'local') === targetHostId)
   if (existing) {
-    activePath.value = existing.path
-    activeTabId.value = existing.id
+    if (host.value === targetHostId) {
+      activePath.value = existing.path
+      activeTabId.value = existing.id
+    }
     return
   }
   // A second click while the first read is still in flight would otherwise open
   // the same file twice, and two tabs carrying one key are two tabs that
   // disagree about what they are showing.
-  if (opening.has(path)) return
-  opening.add(path)
-  const startedAt = changes.generation()
+  if (openingKeys.has(opKey)) return
+  openingKeys.add(opKey)
+  const hostChanges = getChanges(targetHostId, targetConnectionRev)
+  const startedAt = hostChanges.generation()
 
   try {
     const kind = choosePreview(entry.name, entry.size)
     if (kind === 'image') {
       // Never read and never asked about: how it is shown is decided from its
       // name, which is all anyone knows.
-      openWithoutReading(path, startedAt, entry, entry.size, null)
+      openWithoutReading(path, startedAt, entry, entry.size, null, targetHostId, targetRevision, targetConnectionRev)
       return
     }
 
@@ -536,17 +668,26 @@ async function openFile(entry: Entry, path: string) {
     // that ever said how big this file is.
     let size = entry.size
     if (kind === 'info') {
-      const probed = await probeFile(path, host.value)
+      const probed = await probeFile(path, targetHostId)
       // The listing's size stands in when the hub did not report one: it is only
       // ever displayed for a file that is not read as text.
       size = probed.size ?? entry.size
       if (probed.binary) {
-        openWithoutReading(path, startedAt, entry, size, true)
+        openWithoutReading(path, startedAt, entry, size, true, targetHostId, targetRevision, targetConnectionRev)
         return
       }
     }
 
-    const contents = await readFile(path, host.value)
+    const contents = await readFile(path, targetHostId)
+    const currentConnRevAfter = currentHostConnRev(targetHostId)
+    if (
+      targetConnectionRev !== undefined &&
+      currentConnRevAfter !== undefined &&
+      targetConnectionRev !== currentConnRevAfter
+    ) {
+      emit('notice', `Could not open ${entry.name}: host configuration changed while loading.`, 'warning')
+      return
+    }
     // A rename while this read was travelling moved the file. The tab belongs
     // where the file is now: built at the old name it would look openable and
     // then refuse to save, which is the stranding retargetTabs exists to avoid.
@@ -556,7 +697,7 @@ async function openFile(entry: Entry, path: string) {
     // whatever is at that name now -- possibly a file the user has just created
     // there -- and following an older record would open a different file under
     // the wrong name and then save over it.
-    const at = changes.resolve(path, startedAt)
+    const at = hostChanges.resolve(path, startedAt)
     // A delete of this path, or of a directory holding it, was answered while
     // this read was travelling: the answer describes a file that is gone, and
     // installing it would leave a tab naming nothing.
@@ -567,17 +708,20 @@ async function openFile(entry: Entry, path: string) {
     // Two paths can resolve to one name after a rename, and a click on the new
     // name during the flight arrives with a different one -- so the check at the
     // top has to happen again here, or two tabs end up sharing a path.
-    const duplicate = tabs.value.find((tab) => tab.path === at && (tab.hostId ?? 'local') === host.value)
+    const duplicate = tabs.value.find((tab) => tab.path === at && (tab.hostId ?? 'local') === targetHostId)
     if (duplicate) {
-      activePath.value = at
-      activeTabId.value = duplicate.id
+      if (host.value === targetHostId) {
+        activePath.value = at
+        activeTabId.value = duplicate.id
+      }
       return
     }
 
     const newTab: OpenFile = {
       id: nextTabId++,
-      hostId: host.value,
-      revision: props.hostRevision,
+      hostId: targetHostId,
+      revision: targetRevision,
+      connectionRevision: targetConnectionRev,
       path: at,
       name: basename(at),
       text: contents.text,
@@ -587,15 +731,17 @@ async function openFile(entry: Entry, path: string) {
       binary: contents.binary,
     }
     tabs.value = [...tabs.value, newTab]
-    activePath.value = at
-    activeTabId.value = newTab.id
+    if (host.value === targetHostId) {
+      activePath.value = at
+      activeTabId.value = newTab.id
+    }
   } catch (err) {
     report(err, `Could not open ${entry.name}`)
   } finally {
-    opening.delete(path)
+    openingKeys.delete(opKey)
     // The record only exists for reads that are travelling; with none left it
     // would start redirecting files created at those names later on.
-    if (opening.size === 0) changes.clear()
+    if (!hasOpeningForHost(targetHostId)) hostChanges.clear()
   }
 }
 
@@ -604,10 +750,14 @@ async function toggleDirectory(path: string) {
     tree.expanded.delete(path)
     return
   }
+  const targetHost = host.value
+  const targetConnRev = currentHostConnRev(targetHost)
   try {
-    await loadDirectory(tree, path, false, host.value)
+    await loadDirectory(tree, path, false, targetHost, targetConnRev)
+    if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
     tree.expanded.add(path)
   } catch (err) {
+    if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
     report(err, `Could not expand ${basename(path)}`)
   }
 }
@@ -631,7 +781,7 @@ async function save(
   if (!tab) return
   const tabHost = tab.hostId ?? 'local'
 
-  if (hostRemoved.value && tab.id === active.value?.id) {
+  if (isTabHostRemoved(tab)) {
     emit(
       'notice',
       'Cannot save: host has been removed. Drafts remain available for local copying.',
@@ -639,7 +789,7 @@ async function save(
     )
     return
   }
-  if (revisionStale.value && tab.id === active.value?.id) {
+  if (isTabRevisionStale(tab)) {
     emit(
       'notice',
       'Cannot save: host configuration has changed (revision conflict). Reconcile before saving.',
@@ -694,6 +844,10 @@ async function save(
     const stamp = await saveOpenFile(request, tabHost)
     if (!isSameTab(tab.id)) return
     if (saveTickets.get(tab.id) !== ticket) return
+    const currentTabAfterSave = liveTab(tab.id)
+    if (currentTabAfterSave && currentTabAfterSave.connectionRevision !== tab.connectionRevision) {
+      return
+    }
     const settled = settleSave(tabs.value, request, stamp, renaming.isPending(request.path, tabHost))
     tabs.value = settled.files
     if (settled.outcome === 'raced') {
@@ -718,6 +872,10 @@ async function save(
   } catch (err) {
     if (!isSameTab(tab.id)) return
     if (saveTickets.get(tab.id) !== ticket) return
+    const currentTabAfterErr = liveTab(tab.id)
+    if (currentTabAfterErr && currentTabAfterErr.connectionRevision !== tab.connectionRevision) {
+      return
+    }
     const moved = liveTab(tab.id)
     if (moved && moved.path !== request.path) {
       // The path moved, so the question a conflict prompt would ask -- overwrite
@@ -800,10 +958,37 @@ async function reconcile(id: number) {
   const tab = liveTab(id)
   if (!tab) return
   const tabHost = tab.hostId ?? 'local'
+  const startRev =
+    hostRevisions[tabHost]?.revision ??
+    props.availableHosts?.find((h) => h.id === tabHost)?.revision ??
+    (tabHost === host.value ? props.hostRevision : undefined)
+  const startConnRev =
+    hostRevisions[tabHost]?.connectionRevision ??
+    props.availableHosts?.find((h) => h.id === tabHost)?.connectionRevision
   try {
     const contents = await readFile(tab.path, tabHost)
     const currentTab = liveTab(id)
     if (!currentTab) return
+
+    const currentRev =
+      hostRevisions[tabHost]?.revision ??
+      props.availableHosts?.find((h) => h.id === tabHost)?.revision ??
+      (tabHost === host.value ? props.hostRevision : undefined)
+    const currentConnRev =
+      hostRevisions[tabHost]?.connectionRevision ??
+      props.availableHosts?.find((h) => h.id === tabHost)?.connectionRevision
+
+    if (
+      (startConnRev !== undefined && currentConnRev !== undefined && startConnRev !== currentConnRev) ||
+      (startRev !== undefined && currentRev !== undefined && startRev !== currentRev)
+    ) {
+      emit(
+        'notice',
+        `Could not reconcile ${tab.name}: host configuration changed during reload. Please reconcile again.`,
+        'warning',
+      )
+      return
+    }
 
     let discardEdits = false
     if (currentTab.text !== currentTab.saved && contents.text !== currentTab.text) {
@@ -813,7 +998,15 @@ async function reconcile(id: number) {
     }
 
     const result = reconcileTab(currentTab, contents, discardEdits)
-    tabs.value = tabs.value.map((t) => (t.id === id ? { ...result.file, revision: props.hostRevision } : t))
+    tabs.value = tabs.value.map((t) =>
+      t.id === id
+        ? {
+            ...result.file,
+            revision: currentRev,
+            connectionRevision: currentConnRev,
+          }
+        : t,
+    )
 
     if (result.outcome === 'matched') {
       emit('notice', `${currentTab.name} matches remote file; marked clean.`, 'info')
@@ -827,11 +1020,22 @@ async function reconcile(id: number) {
   }
 }
 
-// changes records what happened to a path -- a rename that moved it, a delete
-// that removed it -- for the reads that were travelling when it happened. See
-// files/pathChanges.ts for why each record is scoped to the read rather than
-// consulted wholesale.
-const changes = createPathChanges()
+// changesByHost records what happened to a path -- a rename that moved it, a delete
+// that removed it -- for the reads that were travelling when it happened on that host.
+const changesByHost = new Map<string, ReturnType<typeof createPathChanges>>()
+function changesKey(targetHost: string, targetConnRev?: number): string {
+  return `${targetHost}:${targetConnRev ?? 0}`
+}
+
+function getChanges(targetHost: string, targetConnRev?: number) {
+  const key = changesKey(targetHost, targetConnRev)
+  let c = changesByHost.get(key)
+  if (!c) {
+    c = createPathChanges()
+    changesByHost.set(key, c)
+  }
+  return c
+}
 
 /** liveTab is the tab as it is now, by session.
  *
@@ -841,6 +1045,15 @@ const changes = createPathChanges()
  * again rather than held. */
 function liveTab(id: number): OpenFile | undefined {
   return tabs.value.find((candidate) => candidate.id === id)
+}
+
+/** tabMatchesScope reports whether a tab belongs to the specified host and connection revision. */
+function tabMatchesScope(tab: OpenFile, targetHost: string, targetConnRev?: number): boolean {
+  if ((tab.hostId ?? 'local') !== targetHost) return false
+  if (targetConnRev !== undefined) {
+    return tab.connectionRevision === targetConnRev
+  }
+  return tab.connectionRevision === undefined
 }
 
 /** isSameTab reports whether the editing session a save started from is still
@@ -920,8 +1133,11 @@ async function refreshCurrent() {
 async function resyncExpanded(root: string) {
   const prefix = root === '/' ? '/' : `${root}/`
   const open = [...tree.expanded].filter((path) => path.startsWith(prefix))
+  const targetHost = host.value
+  const targetConnRev = currentHostConnRev(targetHost)
   let reported = false
   const note = (err: unknown, path: string) => {
+    if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
     // Reported once: the usual cause takes out a whole subtree at a time, and a
     // notice per directory would bury the one that says what happened.
     if (reported) return
@@ -930,9 +1146,11 @@ async function resyncExpanded(root: string) {
   }
 
   for (const path of open) {
+    if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
     try {
-      await loadDirectory(tree, path, true, host.value)
+      await loadDirectory(tree, path, true, targetHost, targetConnRev)
     } catch (err) {
+      if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
       // A transport failure says nothing about the directory -- it may be there
       // and simply unreachable -- so what is cached stays, and a later refresh
       // can settle it. Only an answer from the hub justifies forgetting it, and
@@ -954,7 +1172,13 @@ async function resyncExpanded(root: string) {
  * applies to whatever now stands at `destination`. The directory it was in is
  * only invalidated, and then re-read if the user is looking at it, so the result
  * appears where they made the change instead of blanking the tree. */
-async function settleMutation(changed: string, destination = '') {
+async function settleMutation(
+  changed: string,
+  destination = '',
+  targetHost = host.value,
+  targetConnRev = currentHostConnRev(targetHost),
+) {
+  if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
   // Standing inside what was just removed: move to where it was, rather than
   // leaving the tree rooted at a directory that is gone.
   if (current.value === changed || current.value.startsWith(`${changed}/`)) {
@@ -968,12 +1192,15 @@ async function settleMutation(changed: string, destination = '') {
   invalidateDirectory(tree, parent)
   if (parent !== current.value && parentWasOpen) {
     try {
-      await loadDirectory(tree, parent, true, host.value)
+      await loadDirectory(tree, parent, true, targetHost, targetConnRev)
+      if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
       tree.expanded.add(parent)
     } catch (err) {
+      if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
       report(err, `Could not reload ${basename(parent)}`)
     }
   }
+  if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
   await goTo(current.value)
 }
 
@@ -981,7 +1208,21 @@ async function createHere(isDir: boolean) {
   // Nothing is being shown yet, so there is no directory to create in. The
   // buttons are disabled in that state; this is the same rule at the point that
   // matters, because joinPath('', name) would name a path at the filesystem root.
-  if (current.value === '') return
+  if (current.value === '' || loading.value) {
+    emit('notice', 'Could not create: directory is reloading.', 'warning')
+    return
+  }
+  const targetHost = host.value
+  const targetConnectionRev = tree.connectionRevision ?? currentHostConnRev(targetHost)
+  const currentConnRev = currentHostConnRev(targetHost)
+  if (
+    tree.connectionRevision !== undefined &&
+    currentConnRev !== undefined &&
+    tree.connectionRevision !== currentConnRev
+  ) {
+    emit('notice', 'Could not create: host configuration has changed.', 'error')
+    return
+  }
   // A create is deliberately not ordered against an outstanding delete, unlike a
   // save: one that lands before the unlink has its empty file removed, and one
   // that lands after leaves exactly what the user asked for. Nothing of theirs is
@@ -990,12 +1231,34 @@ async function createHere(isDir: boolean) {
   // ordering to protect.
   const name = window.prompt(isDir ? 'New directory name' : 'New file name')
   if (!name) return
+  const nowConnRev = currentHostConnRev(targetHost)
+  if (
+    targetConnectionRev !== undefined &&
+    nowConnRev !== undefined &&
+    targetConnectionRev !== nowConnRev
+  ) {
+    emit('notice', 'Could not create: host configuration changed during prompt.', 'warning')
+    return
+  }
   const path = joinPath(current.value, name)
   try {
-    await createEntry(path, isDir, host.value)
-    await settleMutation(path)
-    if (!isDir) await openFile({ name, is_dir: false, size: 0, mtime: 0 }, path)
+    await createEntry(path, isDir, targetHost, targetConnectionRev)
+    const nowRev = currentHostConnRev(targetHost)
+    if (
+      targetConnectionRev !== undefined &&
+      nowRev !== undefined &&
+      nowRev !== targetConnectionRev
+    ) {
+      emit('notice', `Created ${name} on previous connection.`, 'info')
+    } else if (host.value === targetHost && nowRev === targetConnectionRev) {
+      await settleMutation(path, '', targetHost, targetConnectionRev)
+      if (!isDir) await openFile({ name, is_dir: false, size: 0, mtime: 0 }, path)
+    }
   } catch (err) {
+    if (err instanceof FileApiError && err.code === 'host_revision_conflict') {
+      emit('notice', `Could not create ${name}: host configuration has changed.`, 'error')
+      return
+    }
     report(err, `Could not create ${name}`)
   }
 }
@@ -1006,9 +1269,15 @@ async function createHere(isDir: boolean) {
  * A tab left on the old path would save to a file that no longer exists, which
  * strands the edit: the hub answers not_found and there is no way out through
  * the UI. Renaming a directory carries its open files with it. */
-function retargetTabs(path: string, target: string, name: string) {
+function retargetTabs(
+  path: string,
+  target: string,
+  name: string,
+  targetHost: string = host.value,
+  targetConnectionRev: number | undefined = currentHostConnRev(targetHost),
+) {
   const prefix = `${path}/`
-  changes.record(path, target)
+  getChanges(targetHost, targetConnectionRev).record(path, target)
 
   // Where each tab that followed the rename ends up. A name freed outside the
   // manager -- a file removed from the terminal -- can already have a tab on it,
@@ -1017,13 +1286,13 @@ function retargetTabs(path: string, target: string, name: string) {
   // one path make the editor show whichever was opened first.
   const moving = new Map<number, string>()
   for (const tab of tabs.value) {
-    if ((tab.hostId ?? 'local') !== host.value) continue
+    if (!tabMatchesScope(tab, targetHost, targetConnectionRev)) continue
     if (tab.path === path) moving.set(tab.id, target)
     else if (tab.path.startsWith(prefix)) moving.set(tab.id, target + tab.path.slice(path.length))
   }
   const taken = new Set(moving.values())
   const stale = tabs.value.filter(
-    (tab) => (tab.hostId ?? 'local') === host.value && !moving.has(tab.id) && taken.has(tab.path),
+    (tab) => tabMatchesScope(tab, targetHost, targetConnectionRev) && !moving.has(tab.id) && taken.has(tab.path),
   )
   const lost = stale.filter(isDirty)
   if (lost.length > 0) {
@@ -1050,7 +1319,7 @@ function retargetTabs(path: string, target: string, name: string) {
     return [{ id: tab.id, path: destination }]
   })
   tabs.value = tabs.value
-    .filter((tab) => (tab.hostId ?? 'local') !== host.value || moving.has(tab.id) || !taken.has(tab.path))
+    .filter((tab) => !tabMatchesScope(tab, targetHost, targetConnectionRev) || moving.has(tab.id) || !taken.has(tab.path))
     .map((tab) => {
       const destination = moving.get(tab.id)
       if (destination === undefined) return tab
@@ -1059,7 +1328,7 @@ function retargetTabs(path: string, target: string, name: string) {
   for (const tab of unread) void readRenamedTab(tab.id, tab.path)
 
   const activeTab = active.value
-  if (activeTab && (activeTab.hostId ?? 'local') === host.value) {
+  if (activeTab && tabMatchesScope(activeTab, targetHost, targetConnectionRev)) {
     if (activePath.value === path) activePath.value = target
     else if (activePath.value?.startsWith(prefix)) {
       activePath.value = target + activePath.value.slice(path.length)
@@ -1102,9 +1371,11 @@ async function readRenamedTab(id: number, path: string) {
   try {
     const tab = liveTab(id)
     const tabHost = tab?.hostId ?? host.value
+    const tabConnRev = tab?.connectionRevision
     const contents = await readFile(path, tabHost)
     const live = liveTab(id)
     if (!live || live.path !== path || live.binary !== null || live.text !== live.saved) return
+    if (live.connectionRevision !== tabConnRev) return
     tabs.value = tabs.value.map((t) =>
       t.id === id
         ? {
@@ -1122,32 +1393,112 @@ async function readRenamedTab(id: number, path: string) {
 }
 
 function renameTarget(entry: Entry, path: string) {
+  if (loading.value || current.value === '') {
+    emit('notice', `Could not rename ${entry.name}: directory is reloading.`, 'warning')
+    return
+  }
+  const parentDir = dirname(path)
+  const dirEntries = cachedChildren(tree, parentDir)
+  if (dirEntries && !dirEntries.some((e) => e.name === entry.name)) {
+    emit('notice', `Could not rename ${entry.name}: entry is not present in current directory.`, 'error')
+    return
+  }
+  const targetHost = host.value
+  const targetConnectionRev = tree.connectionRevision ?? currentHostConnRev(targetHost)
+  const currentConnRev = currentHostConnRev(targetHost)
+  if (
+    tree.connectionRevision !== undefined &&
+    currentConnRev !== undefined &&
+    tree.connectionRevision !== currentConnRev
+  ) {
+    emit('notice', `Could not rename ${entry.name}: host configuration has changed.`, 'error')
+    return
+  }
   const name = window.prompt('Rename to', entry.name)
   if (!name || name === entry.name) return
+  const nowConnRev = currentHostConnRev(targetHost)
+  if (
+    targetConnectionRev !== undefined &&
+    nowConnRev !== undefined &&
+    targetConnectionRev !== nowConnRev
+  ) {
+    emit('notice', `Could not rename ${entry.name}: host configuration changed during prompt.`, 'warning')
+    return
+  }
   const target = joinPath(dirname(path), name)
-  renaming.begin(path, host.value)
-  void renameEntry(path, target, host.value)
+  renaming.begin(path, targetHost)
+  void renameEntry(path, target, targetHost, targetConnectionRev)
     .then(() => {
-      retargetTabs(path, target, name)
-      return settleMutation(path, target)
+      retargetTabs(path, target, name, targetHost, targetConnectionRev)
+      const nowRev = currentHostConnRev(targetHost)
+      if (
+        targetConnectionRev !== undefined &&
+        nowRev !== undefined &&
+        nowRev !== targetConnectionRev
+      ) {
+        emit('notice', `Renamed ${entry.name} to ${name} on previous connection.`, 'info')
+      } else if (host.value === targetHost && nowRev === targetConnectionRev) {
+        return settleMutation(path, target, targetHost, targetConnectionRev)
+      }
     })
     .then(() => {
       // The row the menu gave the keyboard back to is the one that just changed
       // its name, so the focus follows the entry it belongs to. Asked for by
       // path, because the row that now carries it is a different element.
-      if (focusIsNowhere()) treeRef.value?.focusPath(target)
+      if (host.value === targetHost && currentHostConnRev(targetHost) === targetConnectionRev && focusIsNowhere()) {
+        treeRef.value?.focusPath(target)
+      }
     })
-    .catch((err: unknown) => report(err, `Could not rename ${entry.name}`))
-    .finally(() => renaming.end(path, host.value))
+    .catch((err: unknown) => {
+      if (err instanceof FileApiError && err.code === 'host_revision_conflict') {
+        emit('notice', `Could not rename ${entry.name}: host configuration has changed.`, 'error')
+        return
+      }
+      report(err, `Could not rename ${entry.name}`)
+    })
+    .finally(() => renaming.end(path, targetHost))
 }
 
 async function deleteTarget(entry: Entry, path: string) {
+  if (loading.value || current.value === '') {
+    emit(
+      'notice',
+      `Could not delete ${entry.name}: directory is reloading.`,
+      'warning',
+    )
+    return
+  }
+  const parentDir = dirname(path)
+  const dirEntries = cachedChildren(tree, parentDir)
+  if (dirEntries && !dirEntries.some((e) => e.name === entry.name)) {
+    emit(
+      'notice',
+      `Could not delete ${entry.name}: entry is not present in current directory.`,
+      'error',
+    )
+    return
+  }
   const kind = entry.is_dir ? 'directory' : 'file'
   // Tabs for the entry and for anything it contains: a deleted directory takes
   // its open files with it, and unsaved edits among them are not recoverable.
   const prefix = `${path}/`
+  const targetHost = host.value
+  const targetConnectionRev = tree.connectionRevision ?? currentHostConnRev(targetHost)
+  const currentConnRev = currentHostConnRev(targetHost)
+  if (
+    tree.connectionRevision !== undefined &&
+    currentConnRev !== undefined &&
+    tree.connectionRevision !== currentConnRev
+  ) {
+    emit(
+      'notice',
+      `Could not delete ${entry.name}: host configuration has changed. Please refresh the directory.`,
+      'error',
+    )
+    return
+  }
   const doomed = tabs.value.filter(
-    (tab) => (tab.hostId ?? 'local') === host.value && (tab.path === path || tab.path.startsWith(prefix)),
+    (tab) => tabMatchesScope(tab, targetHost, targetConnectionRev) && (tab.path === path || tab.path.startsWith(prefix)),
   )
   const unsaved = doomed.filter(isDirty)
 
@@ -1157,6 +1508,19 @@ async function deleteTarget(entry: Entry, path: string) {
     question += `\n\nOpen with unsaved changes: ${names}. Those edits will be lost.`
   }
   if (!window.confirm(question)) {
+    return
+  }
+  const promptConnRev = currentHostConnRev(targetHost)
+  if (
+    targetConnectionRev !== undefined &&
+    promptConnRev !== undefined &&
+    targetConnectionRev !== promptConnRev
+  ) {
+    emit(
+      'notice',
+      `Could not delete ${entry.name}: host configuration changed during confirmation.`,
+      'warning',
+    )
     return
   }
 
@@ -1185,25 +1549,29 @@ async function deleteTarget(entry: Entry, path: string) {
   // there is no timeout on these requests anywhere in this client. A write that
   // never answers therefore leaves the delete unsent, with the entry still
   // listed, which is the truth; the alternative is a delete sent into a race it
-  // cannot see. It is worth being plain about the cost rather than calling that
-  // transient: while the wait is outstanding the marker stays up, so saves of
-  // that path are refused from then on and each retry of the delete adds another
-  // waiter. A client where a write never answers is one where that write's tab
-  // never stops being unsaved either; the way out of both is a reload.
-  // Where the keyboard should go when the row is gone: the entry that follows it
-  // in the listing, or the one before it when it is last. Taken now, because the
-  // row cannot say afterwards what stood beside it -- and taken with the
-  // directory it was measured in, because the wait below is unbounded and the
-  // user may have navigated somewhere else in the meantime. A row number in a
-  // listing the user has since opened is not a place they have ever been.
+  // cannot see.
   const neighbour = treeRef.value?.neighbourOf(path) ?? null
   const listing = current.value
 
-  deleting.begin(path, host.value)
+  deleting.begin(path, targetHost)
   try {
-    await saving.idle(path, host.value)
+    await saving.idle(path, targetHost)
 
-    await deleteEntry(path, entry.is_dir, host.value)
+    const currentConnectionRev = currentHostConnRev(targetHost)
+    if (
+      targetConnectionRev !== undefined &&
+      currentConnectionRev !== undefined &&
+      currentConnectionRev !== targetConnectionRev
+    ) {
+      emit(
+        'notice',
+        `Could not delete ${entry.name}: host configuration changed while waiting for saves. Please verify and confirm deletion again.`,
+        'warning',
+      )
+      return
+    }
+
+    await deleteEntry(path, entry.is_dir, targetHost, targetConnectionRev)
 
     // The hub has answered that the entry is gone, and that is what the reads
     // still travelling need to know: one of them was granted before this delete
@@ -1212,14 +1580,14 @@ async function deleteTarget(entry: Entry, path: string) {
     // a rule rather than a moment. It is kept before the sweep rather than after,
     // because there is no await between the answer and this line: an answer that
     // arrives from here on finds it.
-    changes.recordRemoval(path)
+    getChanges(targetHost, targetConnectionRev).recordRemoval(path)
 
     // Filtered by path where the answer lands, not by the set captured before
     // the request: a tab opened while the delete travelled names a file that is
     // now gone, and would otherwise survive pointing at nothing. A tab renamed
     // out of the way during the flight no longer matches, and should survive.
     const removed = tabs.value.filter(
-      (tab) => (tab.hostId ?? 'local') === host.value && (tab.path === path || tab.path.startsWith(prefix)),
+      (tab) => tabMatchesScope(tab, targetHost, targetConnectionRev) && (tab.path === path || tab.path.startsWith(prefix)),
     )
     // The warning named what was dirty when the user answered. A tab that
     // appeared or was edited while the delete travelled was not in it -- and
@@ -1232,24 +1600,42 @@ async function deleteTarget(entry: Entry, path: string) {
     }
 
     tabs.value = tabs.value.filter(
-      (tab) => (tab.hostId ?? 'local') !== host.value || (tab.path !== path && !tab.path.startsWith(prefix)),
+      (tab) => !tabMatchesScope(tab, targetHost, targetConnectionRev) || (tab.path !== path && !tab.path.startsWith(prefix)),
     )
     if (!tabs.value.some((tab) => (activeTabId.value !== null ? tab.id === activeTabId.value : tab.path === activePath.value))) {
       const nextTab = tabs.value.length > 0 ? tabs.value[tabs.value.length - 1] : null
       activeTabId.value = nextTab ? nextTab.id : null
       activePath.value = nextTab ? nextTab.path : null
     }
-    await settleMutation(path)
+    const currentConnectionRevAfter = currentHostConnRev(targetHost)
+    if (
+      targetConnectionRev !== undefined &&
+      currentConnectionRevAfter !== undefined &&
+      currentConnectionRevAfter !== targetConnectionRev
+    ) {
+      emit('notice', `Deleted ${entry.name} on previous connection.`, 'info')
+    } else if (host.value === targetHost && currentConnectionRevAfter === targetConnectionRev) {
+      await settleMutation(path, '', targetHost, targetConnectionRev)
+    }
   } catch (err) {
+    if (err instanceof FileApiError && err.code === 'host_revision_conflict') {
+      emit('notice', `Could not delete ${entry.name}: host configuration has changed.`, 'error')
+      return
+    }
     report(err, `Could not delete ${entry.name}`)
   } finally {
-    deleting.end(path, host.value)
+    deleting.end(path, targetHost)
     // The confirmation took the focus and the entry is gone, so the row that
     // stands where it did is what gets it. Left alone when the focus is somewhere
     // else -- that is the user having moved it on purpose -- and when the tree is
     // showing a different directory than the one this was measured in, which is
     // the same thing: a listing they opened while the delete waited for a write.
-    if (current.value === listing && focusIsNowhere()) {
+    if (
+      host.value === targetHost &&
+      currentHostConnRev(targetHost) === targetConnectionRev &&
+      current.value === listing &&
+      focusIsNowhere()
+    ) {
       if (neighbour === null || !treeRef.value?.focusPath(neighbour)) {
         treeRef.value?.focusFirstRow()
       }
@@ -1258,8 +1644,9 @@ async function deleteTarget(entry: Entry, path: string) {
 }
 
 async function download(path: string, name: string) {
+  const targetHost = host.value
   try {
-    const blob = await downloadFile(path, host.value)
+    const blob = await downloadFile(path, targetHost)
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -1396,15 +1783,16 @@ function onKeydown(event: KeyboardEvent) {
 
 watch(
   () => props.hostId,
-  () => {
+  (newHostId) => {
     // Reset file tree browsing for the new host, but preserve open tabs (drafts).
-    tree.children.clear()
-    tree.truncated.clear()
-    tree.expanded.clear()
-    tree.loads.clear()
+    closeMenu()
+    const nextHost = newHostId ?? 'local'
+    const nextConnRev = currentHostConnRev(nextHost)
+    resetTreeState(tree, nextHost, nextConnRev)
     current.value = ''
     failure.value = ''
     navError.value = ''
+    loading.value = true
     void startDirectory()
   },
 )
@@ -1415,7 +1803,17 @@ onMounted(() => {
 })
 onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
 
-defineExpose({ hasUnsavedChanges: () => dirty.value, discardHostDrafts })
+defineExpose({
+  hasUnsavedChanges: () => dirty.value,
+  discardHostDrafts,
+  tabs,
+  activeTabId,
+  activePath,
+  openFile,
+  deleteTarget,
+  save,
+  reconcile,
+})
 </script>
 
 <template>

@@ -128,6 +128,28 @@ func (s *TicketStore) Sweep() {
 	}
 }
 
+// InvalidateHost removes all tickets issued for the given host ID.
+func (s *TicketStore) InvalidateHost(hostID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, t := range s.byID {
+		if t.hostID == hostID {
+			delete(s.byID, id)
+		}
+	}
+}
+
+// InvalidateConnection removes tickets for the host matching or preceding the given connection revision.
+func (s *TicketStore) InvalidateConnection(hostID string, oldConnRev uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, t := range s.byID {
+		if t.hostID == hostID && (oldConnRev == 0 || t.connectionRevision <= oldConnRev) {
+			delete(s.byID, id)
+		}
+	}
+}
+
 // Len returns the number of active tickets (primarily for tests).
 func (s *TicketStore) Len() int {
 	s.mu.Lock()

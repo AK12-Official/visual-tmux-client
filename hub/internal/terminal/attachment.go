@@ -37,6 +37,8 @@ type clientMessage struct {
 
 // Attachment coordinates PTY process I/O and peer communication for a single terminal session.
 type Attachment struct {
+	hostID   string
+	epoch    uint64
 	proc     Process
 	peer     Peer
 	opts     Options
@@ -83,6 +85,28 @@ func NewAttachment(
 		stage:    NewStagingBuffer(opts.StagingBufferBytes),
 		queue:    NewOutputQueue(opts.OutputHighWaterBytes, opts.OutputLowWaterBytes),
 	}
+}
+
+// WithHost associates a host ID with the attachment.
+func (a *Attachment) WithHost(hostID string) *Attachment {
+	a.hostID = hostID
+	return a
+}
+
+// HostID returns the associated host ID, if any.
+func (a *Attachment) HostID() string {
+	return a.hostID
+}
+
+// WithEpoch associates an epoch generation with the attachment.
+func (a *Attachment) WithEpoch(epoch uint64) *Attachment {
+	a.epoch = epoch
+	return a
+}
+
+// Epoch returns the associated epoch generation.
+func (a *Attachment) Epoch() uint64 {
+	return a.epoch
 }
 
 // Start initiates the pumping goroutines, sends the ready frame, flushes staged data, and triggers repaint.

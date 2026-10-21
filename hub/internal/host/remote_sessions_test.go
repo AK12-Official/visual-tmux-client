@@ -37,7 +37,7 @@ func startMockTmuxSSHServer(t *testing.T, initialSessions []string) (net.Listene
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
+	t.Cleanup(func() { _ = listener.Close() }) //nolint:errcheck // test cleanup
 
 	go func() {
 		for {
@@ -48,14 +48,14 @@ func startMockTmuxSSHServer(t *testing.T, initialSessions []string) (net.Listene
 			go func(c net.Conn) {
 				sshConn, chans, reqs, err := ssh.NewServerConn(c, serverConfig)
 				if err != nil {
-					_ = c.Close()
+					_ = c.Close() //nolint:errcheck // mock conn cleanup
 					return
 				}
 				go ssh.DiscardRequests(reqs)
 				go func() {
 					for newChannel := range chans {
 						if newChannel.ChannelType() != "session" {
-							_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported")
+							_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported") //nolint:errcheck // reject
 							continue
 						}
 						channel, requests, err := newChannel.Accept()
@@ -71,32 +71,32 @@ func startMockTmuxSSHServer(t *testing.T, initialSessions []string) (net.Listene
 									state.mu.Unlock()
 
 									if discBefore {
-										_ = req.Reply(false, nil)
-										_ = channel.Close()
-										_ = c.Close()
+										_ = req.Reply(false, nil) //nolint:errcheck // reject reply
+										_ = channel.Close()       //nolint:errcheck // close ch
+										_ = c.Close()             //nolint:errcheck // close conn
 										return
 									}
 
-									_ = req.Reply(true, nil)
+									_ = req.Reply(true, nil) //nolint:errcheck // accept reply
 									cmd := string(req.Payload[4:])
 									if discAfter {
 										state.mu.Lock()
 										state.executedCmds = append(state.executedCmds, cmd)
 										state.mu.Unlock()
-										_ = c.Close()
-										_ = channel.Close()
+										_ = c.Close()       //nolint:errcheck // close conn
+										_ = channel.Close() //nolint:errcheck // close ch
 										return
 									}
 
 									state.handleExec(cmd, channel)
 									return
 								}
-								_ = req.Reply(false, nil)
+								_ = req.Reply(false, nil) //nolint:errcheck // reject non-exec
 							}
 						}()
 					}
 				}()
-				_ = sshConn.Wait()
+				_ = sshConn.Wait() //nolint:errcheck // wait
 			}(tcp)
 		}
 	}()
@@ -234,14 +234,14 @@ func (s *mockTmuxState) handleExec(cmd string, ch ssh.Channel) {
 	}
 
 	if stdout != "" {
-		_, _ = io.WriteString(ch, stdout)
+		_, _ = io.WriteString(ch, stdout) //nolint:errcheck // stdout
 	}
 	if stderr != "" {
-		_, _ = io.WriteString(ch.Stderr(), stderr)
+		_, _ = io.WriteString(ch.Stderr(), stderr) //nolint:errcheck // stderr
 	}
 	statusMsg := struct{ Status uint32 }{Status: exitCode}
-	_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(&statusMsg))
-	_ = ch.Close()
+	_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(&statusMsg)) //nolint:errcheck // status
+	_ = ch.Close()                                                       //nolint:errcheck // close
 }
 
 func TestRemoteSessionOperationsAndIsolation(t *testing.T) {
@@ -250,19 +250,31 @@ func TestRemoteSessionOperationsAndIsolation(t *testing.T) {
 	// Host B has session "dev" and home "/home/userB"
 	listenerB, keyB, stateB := startMockTmuxSSHServer(t, []string{"dev"})
 
-	_, portAStr, _ := net.SplitHostPort(listenerA.Addr().String())
-	portA, _ := strconv.ParseUint(portAStr, 10, 16)
+	_, portAStr, err := net.SplitHostPort(listenerA.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	portA, err := strconv.ParseUint(portAStr, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	_, portBStr, _ := net.SplitHostPort(listenerB.Addr().String())
-	portB, _ := strconv.ParseUint(portBStr, 10, 16)
+	_, portBStr, err := net.SplitHostPort(listenerB.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	portB, err := strconv.ParseUint(portBStr, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	regA, _ := setupTestRegistryWithHost(t, "host-A", uint16(portA), keyA)
 	mgrA := host.NewConnectionManager(host.DefaultConnectionConfig(), regA)
-	defer mgrA.Close()
+	defer mgrA.Close() //nolint:errcheck // test cleanup
 
 	regB, _ := setupTestRegistryWithHost(t, "host-B", uint16(portB), keyB)
 	mgrB := host.NewConnectionManager(host.DefaultConnectionConfig(), regB)
-	defer mgrB.Close()
+	defer mgrB.Close() //nolint:errcheck // test cleanup
 
 	leaseA, err := mgrA.Lease(context.Background(), "host-A")
 	if err != nil {
@@ -364,12 +376,18 @@ func TestMutationOutcomeClassificationAndNoReplay(t *testing.T) {
 	// Start mock SSH server with session "target-session"
 	listener, key, state := startMockTmuxSSHServer(t, []string{"target-session"})
 
-	_, portStr, _ := net.SplitHostPort(listener.Addr().String())
-	port, _ := strconv.ParseUint(portStr, 10, 16)
+	_, portStr, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	reg, _ := setupTestRegistryWithHost(t, "host-fault", uint16(port), key)
 	connMgr := host.NewConnectionManager(host.DefaultConnectionConfig(), reg)
-	defer connMgr.Close()
+	defer connMgr.Close() //nolint:errcheck // test cleanup
 
 	ctx := context.Background()
 

@@ -1,6 +1,7 @@
 package host_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -42,7 +43,7 @@ func startRealSFTPServer(t *testing.T) (net.Listener, ssh.PublicKey) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
+	t.Cleanup(func() { _ = listener.Close() }) //nolint:errcheck // test cleanup
 
 	go func() {
 		for {
@@ -53,13 +54,13 @@ func startRealSFTPServer(t *testing.T) (net.Listener, ssh.PublicKey) {
 			go func(c net.Conn) {
 				sshConn, chans, reqs, err := ssh.NewServerConn(c, serverConfig)
 				if err != nil {
-					_ = c.Close()
+					_ = c.Close() //nolint:errcheck // mock conn cleanup
 					return
 				}
 				go ssh.DiscardRequests(reqs)
 				for newChannel := range chans {
 					if newChannel.ChannelType() != "session" {
-						_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported")
+						_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported") //nolint:errcheck // reject
 						continue
 					}
 					ch, channelReqs, err := newChannel.Accept()
@@ -69,23 +70,23 @@ func startRealSFTPServer(t *testing.T) (net.Listener, ssh.PublicKey) {
 					go func(in <-chan *ssh.Request, channel ssh.Channel) {
 						for req := range in {
 							if req.Type == "subsystem" && string(req.Payload[4:]) == "sftp" {
-								_ = req.Reply(true, nil)
+								_ = req.Reply(true, nil) //nolint:errcheck // reply
 								server, err := sftp.NewServer(channel)
 								if err == nil {
 									go func() {
-										_ = server.Serve()
-										_ = channel.Close()
+										_ = server.Serve()  //nolint:errcheck // serve
+										_ = channel.Close() //nolint:errcheck // close
 									}()
 								}
 								return
 							}
 							if req.WantReply {
-								_ = req.Reply(false, nil)
+								_ = req.Reply(false, nil) //nolint:errcheck // reject
 							}
 						}
 					}(channelReqs, ch)
 				}
-				_ = sshConn.Wait()
+				_ = sshConn.Wait() //nolint:errcheck // wait
 			}(tcpConn)
 		}
 	}()
@@ -103,7 +104,7 @@ func setupTestRemoteFiles(t *testing.T) (*host.RemoteFileService, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = r.Close() })
+	t.Cleanup(func() { _ = r.Close() }) //nolint:errcheck // test cleanup
 
 	hostID := host.ID("remote-fs")
 	_, err = r.Save(context.Background(), host.HostInput{
@@ -120,7 +121,7 @@ func setupTestRemoteFiles(t *testing.T) (*host.RemoteFileService, string) {
 	}
 
 	mgr := host.NewConnectionManager(host.DefaultConnectionConfig(), r)
-	t.Cleanup(func() { _ = mgr.Close() })
+	t.Cleanup(func() { _ = mgr.Close() }) //nolint:errcheck // test cleanup
 
 	lease, err := mgr.Lease(context.Background(), hostID)
 	if err != nil {
@@ -134,19 +135,58 @@ func setupTestRemoteFiles(t *testing.T) (*host.RemoteFileService, string) {
 	return fileService, testDir
 }
 
+func testWriteFile(t *testing.T, name string, data []byte, perm os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(name, data, perm); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testMkdir(t *testing.T, name string, perm os.FileMode) {
+	t.Helper()
+	if err := os.Mkdir(name, perm); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testMkdirAll(t *testing.T, name string, perm os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(name, perm); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testSymlink(t *testing.T, oldname, newname string) {
+	t.Helper()
+	if err := os.Symlink(oldname, newname); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testReadFile(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 func TestRemoteFilesListBoundedAndOrdering(t *testing.T) {
 	fileService, testDir := setupTestRemoteFiles(t)
 	ctx := context.Background()
 
 	// 1. Create files and directories in testDir
-	_ = os.Mkdir(filepath.Join(testDir, "z_dir"), 0755)
-	_ = os.Mkdir(filepath.Join(testDir, "a_dir"), 0755)
-	_ = os.WriteFile(filepath.Join(testDir, "b_file.txt"), []byte("hello"), 0644)
-	_ = os.WriteFile(filepath.Join(testDir, "a_file.txt"), []byte("world"), 0644)
-	_ = os.WriteFile(filepath.Join(testDir, ".vtc-write-temp123"), []byte("staging"), 0600) // Staging file should be omitted
+	testMkdir(t, filepath.Join(testDir, "z_dir"), 0755)
+	testMkdir(t, filepath.Join(testDir, "a_dir"), 0755)
+	testWriteFile(t, filepath.Join(testDir, "b_file.txt"), []byte("hello"), 0644)
+	testWriteFile(t, filepath.Join(testDir, "a_file.txt"), []byte("world"), 0644)
+	testWriteFile(
+		t, filepath.Join(testDir, ".vtc-write-temp123"), []byte("staging"), 0600,
+	) // Staging file should be omitted
 
 	// Symlink to directory
-	_ = os.Symlink(filepath.Join(testDir, "a_dir"), filepath.Join(testDir, "link_to_dir"))
+	testSymlink(t, filepath.Join(testDir, "a_dir"), filepath.Join(testDir, "link_to_dir"))
 
 	res, err := fileService.List(ctx, testDir)
 	if err != nil {
@@ -190,7 +230,7 @@ func TestRemoteFilesListOversizedDirectoryTruncation(t *testing.T) {
 
 	// Create 35 files (service limit is 20)
 	for i := 0; i < 35; i++ {
-		_ = os.WriteFile(filepath.Join(testDir, fmt.Sprintf("file_%03d.txt", i)), []byte("data"), 0644)
+		testWriteFile(t, filepath.Join(testDir, fmt.Sprintf("file_%03d.txt", i)), []byte("data"), 0644)
 	}
 
 	res, err := fileService.List(ctx, testDir)
@@ -224,7 +264,7 @@ func TestRemoteFilesListErrors(t *testing.T) {
 
 	// 3. Not a directory
 	filePath := filepath.Join(testDir, "plain.txt")
-	_ = os.WriteFile(filePath, []byte("content"), 0644)
+	testWriteFile(t, filePath, []byte("content"), 0644)
 	_, err = fileService.List(ctx, filePath)
 	if !errors.Is(err, files.ErrInvalidPath) {
 		t.Fatalf("expected ErrInvalidPath for file target, got: %v", err)
@@ -243,31 +283,34 @@ func TestRemoteFilesReadAndClassification(t *testing.T) {
 
 	// 1. Text file
 	textPath := filepath.Join(testDir, "text.txt")
-	_ = os.WriteFile(textPath, []byte("Hello, UTF-8 世界!"), 0644)
+	testWriteFile(t, textPath, []byte("Hello, UTF-8 世界!"), 0644)
 
 	readRes, err := fileService.Read(ctx, textPath)
 	if err != nil {
 		t.Fatalf("read text file failed: %v", err)
 	}
-	defer readRes.File.Close()
+	defer readRes.File.Close() //nolint:errcheck // test cleanup
 
 	if readRes.Binary {
 		t.Fatal("expected Binary=false for UTF-8 text file")
 	}
-	content, _ := io.ReadAll(readRes.File)
+	content, err := io.ReadAll(readRes.File)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(content) != "Hello, UTF-8 世界!" {
 		t.Fatalf("content mismatch: %s", string(content))
 	}
 
 	// 2. Binary file with NUL byte
 	binPath := filepath.Join(testDir, "binary.dat")
-	_ = os.WriteFile(binPath, []byte("header\x00data"), 0644)
+	testWriteFile(t, binPath, []byte("header\x00data"), 0644)
 
 	binRes, err := fileService.Read(ctx, binPath)
 	if err != nil {
 		t.Fatalf("read binary file failed: %v", err)
 	}
-	defer binRes.File.Close()
+	defer binRes.File.Close() //nolint:errcheck // test cleanup
 
 	if !binRes.Binary {
 		t.Fatal("expected Binary=true for file containing NUL byte")
@@ -276,13 +319,13 @@ func TestRemoteFilesReadAndClassification(t *testing.T) {
 	// 3. Binary tail: text followed by invalid UTF-8 bytes at the very tail
 	tailPath := filepath.Join(testDir, "tail.log")
 	tailBytes := append([]byte(strings.Repeat("valid log line\n", 100)), 0xFF, 0xFE)
-	_ = os.WriteFile(tailPath, tailBytes, 0644)
+	testWriteFile(t, tailPath, tailBytes, 0644)
 
 	tailRes, err := fileService.Read(ctx, tailPath)
 	if err != nil {
 		t.Fatalf("read tail file failed: %v", err)
 	}
-	defer tailRes.File.Close()
+	defer tailRes.File.Close() //nolint:errcheck // test cleanup
 
 	if !tailRes.Binary {
 		t.Fatal("expected Binary=true for file with invalid UTF-8 tail")
@@ -295,18 +338,23 @@ func TestRemoteFilesReadOversizedAndNonRegular(t *testing.T) {
 
 	// 1. Oversized file (> 1 MiB limit)
 	largePath := filepath.Join(testDir, "large.bin")
-	largeFile, _ := os.Create(largePath)
-	_ = largeFile.Truncate(2 * 1024 * 1024) // 2 MiB
-	_ = largeFile.Close()
+	largeFile, err := os.Create(largePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := largeFile.Truncate(2 * 1024 * 1024); err != nil {
+		t.Fatal(err)
+	}
+	_ = largeFile.Close() //nolint:errcheck // test setup
 
-	_, err := fileService.Read(ctx, largePath)
+	_, err = fileService.Read(ctx, largePath)
 	if !errors.Is(err, files.ErrFileTooLarge) {
 		t.Fatalf("expected ErrFileTooLarge, got: %v", err)
 	}
 
 	// 2. Directory target
 	dirPath := filepath.Join(testDir, "subdir")
-	_ = os.Mkdir(dirPath, 0755)
+	testMkdir(t, dirPath, 0755)
 
 	_, err = fileService.Read(ctx, dirPath)
 	if !errors.Is(err, files.ErrInvalidPath) {
@@ -334,7 +382,10 @@ func TestRemoteFilesContentDigest(t *testing.T) {
 		t.Fatalf("digest mismatch: %s != %s", digest1, digest2)
 	}
 
-	diffDigest, _ := host.ComputeContentDigest(strings.NewReader("different content"))
+	diffDigest, err := host.ComputeContentDigest(strings.NewReader("different content"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if diffDigest == digest1 {
 		t.Fatal("different content produced same digest")
 	}
@@ -376,7 +427,7 @@ func TestRemoteFilesCreate(t *testing.T) {
 
 	// 5. Collision with dangling symlink: returns ErrConflict
 	danglingLink := filepath.Join(testDir, "dangling_link")
-	_ = os.Symlink(filepath.Join(testDir, "non_existent_target"), danglingLink)
+	testSymlink(t, filepath.Join(testDir, "non_existent_target"), danglingLink)
 	if err := fileService.Create(ctx, danglingLink, false); !errors.Is(err, files.ErrConflict) {
 		t.Fatalf("expected ErrConflict creating over dangling symlink, got: %v", err)
 	}
@@ -410,7 +461,7 @@ func TestRemoteFilesRename(t *testing.T) {
 
 	// 1. Rename regular file
 	srcFile := filepath.Join(testDir, "orig.txt")
-	_ = os.WriteFile(srcFile, []byte("content to move"), 0644)
+	testWriteFile(t, srcFile, []byte("content to move"), 0644)
 	dstFile := filepath.Join(testDir, "moved.txt")
 
 	if err := fileService.Rename(ctx, srcFile, dstFile); err != nil {
@@ -426,8 +477,8 @@ func TestRemoteFilesRename(t *testing.T) {
 
 	// 2. Rename directory
 	srcDir := filepath.Join(testDir, "orig_dir")
-	_ = os.Mkdir(srcDir, 0755)
-	_ = os.WriteFile(filepath.Join(srcDir, "inner.txt"), []byte("inner data"), 0644)
+	testMkdir(t, srcDir, 0755)
+	testWriteFile(t, filepath.Join(srcDir, "inner.txt"), []byte("inner data"), 0644)
 	dstDir := filepath.Join(testDir, "moved_dir")
 
 	if err := fileService.Rename(ctx, srcDir, dstDir); err != nil {
@@ -443,31 +494,37 @@ func TestRemoteFilesRename(t *testing.T) {
 
 	// 3. Collision: destination already exists returns ErrConflict
 	collisionDst := filepath.Join(testDir, "existing.txt")
-	_ = os.WriteFile(collisionDst, []byte("existing"), 0644)
+	testWriteFile(t, collisionDst, []byte("existing"), 0644)
 	if err := fileService.Rename(ctx, dstFile, collisionDst); !errors.Is(err, files.ErrConflict) {
 		t.Fatalf("expected ErrConflict when destination exists, got: %v", err)
 	}
 
 	// 4. Collision with dangling symlink as destination returns ErrConflict
 	danglingLink := filepath.Join(testDir, "dangling_dst")
-	_ = os.Symlink(filepath.Join(testDir, "gone"), danglingLink)
+	testSymlink(t, filepath.Join(testDir, "gone"), danglingLink)
 	if err := fileService.Rename(ctx, dstFile, danglingLink); !errors.Is(err, files.ErrConflict) {
 		t.Fatalf("expected ErrConflict when destination is dangling symlink, got: %v", err)
 	}
 
 	// 5. Source does not exist returns ErrNotFound
 	missingSrc := filepath.Join(testDir, "nonexistent.txt")
-	if err := fileService.Rename(ctx, missingSrc, filepath.Join(testDir, "target.txt")); !errors.Is(err, files.ErrNotFound) {
+	if err := fileService.Rename(
+		ctx, missingSrc, filepath.Join(testDir, "target.txt"),
+	); !errors.Is(err, files.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for missing source, got: %v", err)
 	}
 
 	// 6. Destination parent does not exist returns ErrNotFound
-	if err := fileService.Rename(ctx, dstFile, filepath.Join(testDir, "no_such_parent", "target.txt")); !errors.Is(err, files.ErrNotFound) {
+	if err := fileService.Rename(
+		ctx, dstFile, filepath.Join(testDir, "no_such_parent", "target.txt"),
+	); !errors.Is(err, files.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for missing dst parent, got: %v", err)
 	}
 
 	// 7. Destination parent is a file returns ErrInvalidPath
-	if err := fileService.Rename(ctx, dstFile, filepath.Join(collisionDst, "target.txt")); !errors.Is(err, files.ErrInvalidPath) {
+	if err := fileService.Rename(
+		ctx, dstFile, filepath.Join(collisionDst, "target.txt"),
+	); !errors.Is(err, files.ErrInvalidPath) {
 		t.Fatalf("expected ErrInvalidPath for dst parent that is a file, got: %v", err)
 	}
 
@@ -480,7 +537,9 @@ func TestRemoteFilesRename(t *testing.T) {
 	}
 
 	// 9. Pseudo-filesystem as source or destination returns ErrPathNotAllowed
-	if err := fileService.Rename(ctx, "/proc", filepath.Join(testDir, "proc_copy")); !errors.Is(err, files.ErrPathNotAllowed) {
+	if err := fileService.Rename(
+		ctx, "/proc", filepath.Join(testDir, "proc_copy"),
+	); !errors.Is(err, files.ErrPathNotAllowed) {
 		t.Fatalf("expected ErrPathNotAllowed for /proc source, got: %v", err)
 	}
 	if err := fileService.Rename(ctx, dstFile, "/proc/bad"); !errors.Is(err, files.ErrPathNotAllowed) {
@@ -494,7 +553,7 @@ func TestRemoteFilesDelete(t *testing.T) {
 
 	// 1. Delete regular file
 	regularFile := filepath.Join(testDir, "to_delete.txt")
-	_ = os.WriteFile(regularFile, []byte("delete me"), 0644)
+	testWriteFile(t, regularFile, []byte("delete me"), 0644)
 	if err := fileService.Delete(ctx, regularFile, false); err != nil {
 		t.Fatalf("delete file failed: %v", err)
 	}
@@ -504,7 +563,7 @@ func TestRemoteFilesDelete(t *testing.T) {
 
 	// 2. Delete dangling symlink
 	danglingLink := filepath.Join(testDir, "dangling_link")
-	_ = os.Symlink(filepath.Join(testDir, "no_such_target"), danglingLink)
+	testSymlink(t, filepath.Join(testDir, "no_such_target"), danglingLink)
 	if err := fileService.Delete(ctx, danglingLink, false); err != nil {
 		t.Fatalf("delete dangling link failed: %v", err)
 	}
@@ -514,10 +573,10 @@ func TestRemoteFilesDelete(t *testing.T) {
 
 	// 3. Delete symlink to directory: must remove symlink, NOT target directory or its contents
 	targetDir := filepath.Join(testDir, "symlink_target_dir")
-	_ = os.Mkdir(targetDir, 0755)
-	_ = os.WriteFile(filepath.Join(targetDir, "keep.txt"), []byte("keep me"), 0644)
+	testMkdir(t, targetDir, 0755)
+	testWriteFile(t, filepath.Join(targetDir, "keep.txt"), []byte("keep me"), 0644)
 	symlinkToDir := filepath.Join(testDir, "link_to_target_dir")
-	_ = os.Symlink(targetDir, symlinkToDir)
+	testSymlink(t, targetDir, symlinkToDir)
 
 	if err := fileService.Delete(ctx, symlinkToDir, false); err != nil {
 		t.Fatalf("delete symlink to dir failed: %v", err)
@@ -531,7 +590,7 @@ func TestRemoteFilesDelete(t *testing.T) {
 
 	// 4. Delete empty directory (recursive = false)
 	emptyDir := filepath.Join(testDir, "empty_dir")
-	_ = os.Mkdir(emptyDir, 0755)
+	testMkdir(t, emptyDir, 0755)
 	if err := fileService.Delete(ctx, emptyDir, false); err != nil {
 		t.Fatalf("delete empty dir failed: %v", err)
 	}
@@ -541,8 +600,8 @@ func TestRemoteFilesDelete(t *testing.T) {
 
 	// 5. Non-empty directory with recursive = false: returns ErrDirNotEmpty
 	nonEmptyDir := filepath.Join(testDir, "non_empty_dir")
-	_ = os.Mkdir(nonEmptyDir, 0755)
-	_ = os.WriteFile(filepath.Join(nonEmptyDir, "child.txt"), []byte("child"), 0644)
+	testMkdir(t, nonEmptyDir, 0755)
+	testWriteFile(t, filepath.Join(nonEmptyDir, "child.txt"), []byte("child"), 0644)
 
 	if err := fileService.Delete(ctx, nonEmptyDir, false); !errors.Is(err, files.ErrDirNotEmpty) {
 		t.Fatalf("expected ErrDirNotEmpty for non-empty dir without recursive, got: %v", err)
@@ -553,12 +612,12 @@ func TestRemoteFilesDelete(t *testing.T) {
 
 	// 6. Confirmed recursive delete (recursive = true): removes tree completely
 	subSubDir := filepath.Join(nonEmptyDir, "sub_sub")
-	_ = os.Mkdir(subSubDir, 0755)
-	_ = os.WriteFile(filepath.Join(subSubDir, "deep.txt"), []byte("deep"), 0644)
+	testMkdir(t, subSubDir, 0755)
+	testWriteFile(t, filepath.Join(subSubDir, "deep.txt"), []byte("deep"), 0644)
 	// Add a symlink inside the tree pointing outside to ensure it doesn't delete outside files
 	outsideFile := filepath.Join(testDir, "safe_outside.txt")
-	_ = os.WriteFile(outsideFile, []byte("safe"), 0644)
-	_ = os.Symlink(outsideFile, filepath.Join(subSubDir, "link_to_outside"))
+	testWriteFile(t, outsideFile, []byte("safe"), 0644)
+	testSymlink(t, outsideFile, filepath.Join(subSubDir, "link_to_outside"))
 
 	if err := fileService.Delete(ctx, nonEmptyDir, true); err != nil {
 		t.Fatalf("recursive delete failed: %v", err)
@@ -571,7 +630,9 @@ func TestRemoteFilesDelete(t *testing.T) {
 	}
 
 	// 7. Non-existent path returns ErrNotFound
-	if err := fileService.Delete(ctx, filepath.Join(testDir, "missing_entry"), false); !errors.Is(err, files.ErrNotFound) {
+	if err := fileService.Delete(
+		ctx, filepath.Join(testDir, "missing_entry"), false,
+	); !errors.Is(err, files.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for missing path, got: %v", err)
 	}
 
@@ -612,7 +673,10 @@ func TestRemoteFilesStartDirectoryAndWhitespace(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			gotPath, gotSubstituted := fileService.StartDirectory(tc.candidate)
 			if gotPath != tc.wantPath || gotSubstituted != tc.wantSubstituted {
-				t.Errorf("StartDirectory(%q) = (%q, %v), want (%q, %v)", tc.candidate, gotPath, gotSubstituted, tc.wantPath, tc.wantSubstituted)
+				t.Errorf(
+					"StartDirectory(%q) = (%q, %v), want (%q, %v)",
+					tc.candidate, gotPath, gotSubstituted, tc.wantPath, tc.wantSubstituted,
+				)
 			}
 		})
 	}
@@ -677,15 +741,13 @@ func TestRemoteFilesContentDerivedPreconditions(t *testing.T) {
 
 	filePath := filepath.Join(testDir, "precondition.txt")
 	initialBytes := []byte("initial data")
-	if err := os.WriteFile(filePath, initialBytes, 0644); err != nil {
-		t.Fatal(err)
-	}
+	testWriteFile(t, filePath, initialBytes, 0644)
 
 	readRes, err := fileService.Read(ctx, filePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer readRes.File.Close()
+	defer readRes.File.Close() //nolint:errcheck // test cleanup
 
 	initialDigest, err := host.ComputeContentDigest(readRes.File)
 	if err != nil {
@@ -699,7 +761,9 @@ func TestRemoteFilesContentDerivedPreconditions(t *testing.T) {
 		Digest: initialDigest,
 	}
 	newBody := strings.NewReader("updated data v1")
-	writeRes, err := fileService.Write(ctx, filePath, newBody, int64(len("updated data v1")), expected, true)
+	writeRes, err := fileService.Write(
+		ctx, filePath, newBody, int64(len("updated data v1")), expected, true,
+	)
 	if err != nil {
 		t.Fatalf("normal save failed: %v", err)
 	}
@@ -711,9 +775,7 @@ func TestRemoteFilesContentDerivedPreconditions(t *testing.T) {
 	// External process modifies file from "updated data v1" (15 bytes) to "tampered bytes!" (15 bytes)
 	// and restores the modification time to the exact writeRes mtime!
 	tamperedBytes := []byte("tampered bytes!") // exactly 15 bytes
-	if err := os.WriteFile(filePath, tamperedBytes, 0644); err != nil {
-		t.Fatal(err)
-	}
+	testWriteFile(t, filePath, tamperedBytes, 0644)
 	resTime := time.Unix(0, writeRes.MtimeNanos)
 	if err := os.Chtimes(filePath, resTime, resTime); err != nil {
 		t.Fatal(err)
@@ -726,7 +788,9 @@ func TestRemoteFilesContentDerivedPreconditions(t *testing.T) {
 		Digest: initialDigest, // does not match tampered bytes
 	}
 	failBody := strings.NewReader("save attempting to overwrite")
-	_, err = fileService.Write(ctx, filePath, failBody, int64(len("save attempting to overwrite")), staleExpected, true)
+	_, err = fileService.Write(
+		ctx, filePath, failBody, int64(len("save attempting to overwrite")), staleExpected, true,
+	)
 	if !errors.Is(err, files.ErrConflict) {
 		t.Fatalf("expected ErrConflict for same-time same-size content change, got: %v", err)
 	}
@@ -744,7 +808,7 @@ func TestRemoteFilesSerializationConflictingHubOperations(t *testing.T) {
 
 	// 1. Two browser saves race on the same file:
 	filePath := filepath.Join(testDir, "two_saves.txt")
-	_ = os.WriteFile(filePath, []byte("start"), 0644)
+	testWriteFile(t, filePath, []byte("start"), 0644)
 	readRes, err := fileService.Read(ctx, filePath)
 	if err != nil {
 		t.Fatal(err)
@@ -753,7 +817,7 @@ func TestRemoteFilesSerializationConflictingHubOperations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = readRes.File.Close()
+	_ = readRes.File.Close() //nolint:errcheck // test cleanup
 
 	// Both writers observe the same read result and content digest
 	expected1 := &files.ExpectedMtime{Millis: readRes.Mtime, Nanos: &readRes.MtimeNanos, Digest: initialDigest}
@@ -765,11 +829,15 @@ func TestRemoteFilesSerializationConflictingHubOperations(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		_, errs[0] = fileService.Write(ctx, filePath, strings.NewReader("writer1 content"), int64(len("writer1 content")), expected1, true)
+		_, errs[0] = fileService.Write(
+			ctx, filePath, strings.NewReader("writer1 content"), int64(len("writer1 content")), expected1, true,
+		)
 	}()
 	go func() {
 		defer wg.Done()
-		_, errs[1] = fileService.Write(ctx, filePath, strings.NewReader("writer2 content"), int64(len("writer2 content")), expected2, true)
+		_, errs[1] = fileService.Write(
+			ctx, filePath, strings.NewReader("writer2 content"), int64(len("writer2 content")), expected2, true,
+		)
 	}()
 	wg.Wait()
 
@@ -789,7 +857,7 @@ func TestRemoteFilesSerializationConflictingHubOperations(t *testing.T) {
 
 	// 2. Save / Delete race on the same file:
 	raceFilePath := filepath.Join(testDir, "race_delete.txt")
-	_ = os.WriteFile(raceFilePath, []byte("race"), 0644)
+	testWriteFile(t, raceFilePath, []byte("race"), 0644)
 
 	var wg2 sync.WaitGroup
 	var writeErr, delErr error
@@ -797,7 +865,10 @@ func TestRemoteFilesSerializationConflictingHubOperations(t *testing.T) {
 
 	go func() {
 		defer wg2.Done()
-		_, writeErr = fileService.Write(ctx, raceFilePath, strings.NewReader("write during delete"), int64(len("write during delete")), nil, true)
+		_, writeErr = fileService.Write(
+			ctx, raceFilePath, strings.NewReader("write during delete"),
+			int64(len("write during delete")), nil, true,
+		)
 	}()
 	go func() {
 		defer wg2.Done()
@@ -815,16 +886,19 @@ func TestRemoteFilesSerializationConflictingHubOperations(t *testing.T) {
 	// Either Write ran first then Delete (both succeeded, file gone),
 	// or Delete ran first (Delete succeeded, Write returned ErrConflict/ErrNotFound because target removed).
 	// Crucially, neither leaked temporary staging files or panicked!
-	stagingFiles, _ := filepath.Glob(filepath.Join(testDir, ".vtc-write-*"))
+	stagingFiles, err := filepath.Glob(filepath.Join(testDir, ".vtc-write-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(stagingFiles) != 0 {
 		t.Fatalf("leaked staging files after save/delete race: %v", stagingFiles)
 	}
 
 	// 3. Write and Ancestor Delete race:
 	treeDir := filepath.Join(testDir, "ancestor_tree")
-	_ = os.MkdirAll(filepath.Join(treeDir, "sub"), 0755)
+	testMkdirAll(t, filepath.Join(treeDir, "sub"), 0755)
 	treeFile := filepath.Join(treeDir, "sub", "target.txt")
-	_ = os.WriteFile(treeFile, []byte("nested"), 0644)
+	testWriteFile(t, treeFile, []byte("nested"), 0644)
 
 	var wg3 sync.WaitGroup
 	var ancestorWriteErr, ancestorDelErr error
@@ -832,7 +906,9 @@ func TestRemoteFilesSerializationConflictingHubOperations(t *testing.T) {
 
 	go func() {
 		defer wg3.Done()
-		_, ancestorWriteErr = fileService.Write(ctx, treeFile, strings.NewReader("update nested"), int64(len("update nested")), nil, true)
+		_, ancestorWriteErr = fileService.Write(
+			ctx, treeFile, strings.NewReader("update nested"), int64(len("update nested")), nil, true,
+		)
 	}()
 	go func() {
 		defer wg3.Done()
@@ -843,7 +919,8 @@ func TestRemoteFilesSerializationConflictingHubOperations(t *testing.T) {
 	// Conflicting operations serialized cleanly:
 	// If write was first: write succeeded, then ancestor delete deleted directory.
 	// If delete was first: delete succeeded, write returned ErrNotFound.
-	if ancestorWriteErr != nil && !errors.Is(ancestorWriteErr, files.ErrNotFound) && !errors.Is(ancestorWriteErr, files.ErrConflict) {
+	if ancestorWriteErr != nil && !errors.Is(ancestorWriteErr, files.ErrNotFound) &&
+		!errors.Is(ancestorWriteErr, files.ErrConflict) {
 		t.Fatalf("unexpected ancestor write error: %v", ancestorWriteErr)
 	}
 	if ancestorDelErr != nil {
@@ -862,44 +939,57 @@ func TestRemoteFilesWriteStagingAndAtomicReplacement(t *testing.T) {
 	if !errors.Is(err, files.ErrInvalidBody) {
 		t.Fatalf("expected ErrInvalidBody for length mismatch, got: %v", err)
 	}
-	stagingFiles, _ := filepath.Glob(filepath.Join(testDir, ".vtc-write-*"))
+	stagingFiles, err := filepath.Glob(filepath.Join(testDir, ".vtc-write-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(stagingFiles) != 0 {
 		t.Fatalf("staging file not cleaned up on length mismatch: %v", stagingFiles)
 	}
 
 	// 2. Hard-link limitation check: allowOtherNames = false on existing target returns ErrHasOtherNames
 	existingPath := filepath.Join(testDir, "existing_target.txt")
-	_ = os.WriteFile(existingPath, []byte("target"), 0644)
-	_, err = fileService.Write(ctx, existingPath, strings.NewReader("new content"), int64(len("new content")), nil, false)
+	testWriteFile(t, existingPath, []byte("target"), 0644)
+	_, err = fileService.Write(
+		ctx, existingPath, strings.NewReader("new content"), int64(len("new content")), nil, false,
+	)
 	if !errors.Is(err, files.ErrHasOtherNames) {
 		t.Fatalf("expected ErrHasOtherNames when allowOtherNames=false on existing target, got: %v", err)
 	}
 
 	// With allowOtherNames = true, write succeeds
-	_, err = fileService.Write(ctx, existingPath, strings.NewReader("new content"), int64(len("new content")), nil, true)
+	_, err = fileService.Write(
+		ctx, existingPath, strings.NewReader("new content"), int64(len("new content")), nil, true,
+	)
 	if err != nil {
 		t.Fatalf("write with allowOtherNames=true failed: %v", err)
 	}
-	content, _ := os.ReadFile(existingPath)
-	if string(content) != "new content" {
+	content, err := os.ReadFile(existingPath)
+	if err != nil || string(content) != "new content" {
 		t.Fatalf("content mismatch: %s", string(content))
 	}
 
 	// 3. Metadata preservation: existing file mode 0755 is preserved across replacement
 	scriptPath := filepath.Join(testDir, "script.sh")
-	_ = os.WriteFile(scriptPath, []byte("#!/bin/sh\n"), 0755)
-	_, err = fileService.Write(ctx, scriptPath, strings.NewReader("#!/bin/sh\necho hi\n"), int64(len("#!/bin/sh\necho hi\n")), nil, true)
+	testWriteFile(t, scriptPath, []byte("#!/bin/sh\n"), 0755)
+	_, err = fileService.Write(
+		ctx, scriptPath, strings.NewReader("#!/bin/sh\necho hi\n"),
+		int64(len("#!/bin/sh\necho hi\n")), nil, true,
+	)
 	if err != nil {
 		t.Fatalf("replace script failed: %v", err)
 	}
-	scriptFi, _ := os.Stat(scriptPath)
+	scriptFi, err := os.Stat(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if scriptFi.Mode().Perm() != 0755 {
 		t.Fatalf("expected preserved mode 0755, got: %v", scriptFi.Mode().Perm())
 	}
 
 	// 4. Forced save rechecks target type: writing over directory returns ErrInvalidPath
 	dirTarget := filepath.Join(testDir, "target_dir")
-	_ = os.Mkdir(dirTarget, 0755)
+	testMkdir(t, dirTarget, 0755)
 	_, err = fileService.Write(ctx, dirTarget, strings.NewReader("data"), int64(len("data")), nil, true)
 	if !errors.Is(err, files.ErrInvalidPath) {
 		t.Fatalf("expected ErrInvalidPath when writing over directory, got: %v", err)
@@ -908,19 +998,22 @@ func TestRemoteFilesWriteStagingAndAtomicReplacement(t *testing.T) {
 	// 5. Normal save to non-existent target returns ErrNotFound
 	missingPath := filepath.Join(testDir, "non_existent.txt")
 	now := time.Now().UnixMilli()
-	_, err = fileService.Write(ctx, missingPath, strings.NewReader("data"), int64(len("data")), &files.ExpectedMtime{Millis: now}, true)
+	_, err = fileService.Write(
+		ctx, missingPath, strings.NewReader("data"), int64(len("data")),
+		&files.ExpectedMtime{Millis: now}, true,
+	)
 	if !errors.Is(err, files.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for normal save to missing target, got: %v", err)
 	}
 
 	// 6. Target removed while write was in flight: forced save returns ErrConflict and does not recreate target
 	removedPath := filepath.Join(testDir, "remove_mid_write.txt")
-	_ = os.WriteFile(removedPath, []byte("start data"), 0644)
+	testWriteFile(t, removedPath, []byte("start data"), 0644)
 
 	removeReader := &callbackReader{
 		r: strings.NewReader("new data"),
 		onRead: func() {
-			_ = os.Remove(removedPath)
+			_ = os.Remove(removedPath) //nolint:errcheck // mock remove
 		},
 	}
 	_, err = fileService.Write(ctx, removedPath, removeReader, int64(len("new data")), nil, true)
@@ -933,42 +1026,54 @@ func TestRemoteFilesWriteStagingAndAtomicReplacement(t *testing.T) {
 
 	// 7. Unsupported atomic replacement: server never uses delete-then-rename or truncate-in-place
 	unsupportedFile := filepath.Join(testDir, "unsupported_replacement.txt")
-	_ = os.WriteFile(unsupportedFile, []byte("precious original data"), 0644)
+	testWriteFile(t, unsupportedFile, []byte("precious original data"), 0644)
 
-	fileService.SetAdapterFactoryForTesting(func(ctx context.Context, sshClient *ssh.Client) (*host.SFTPAdapter, error) {
-		ad, err := host.NewSFTPAdapter(ctx, sshClient)
-		if err != nil {
-			return nil, err
-		}
-		ad.SetExtensionForTesting(host.PosixRenameExtension, "", false)
-		return ad, nil
-	})
+	fileService.SetAdapterFactoryForTesting(
+		func(ctx context.Context, sshClient *ssh.Client) (*host.SFTPAdapter, error) {
+			ad, err := host.NewSFTPAdapter(ctx, sshClient)
+			if err != nil {
+				return nil, err
+			}
+			ad.SetExtensionForTesting(host.PosixRenameExtension, "", false)
+			return ad, nil
+		},
+	)
 	defer fileService.SetAdapterFactoryForTesting(nil)
 
-	_, err = fileService.Write(ctx, unsupportedFile, strings.NewReader("new payload"), int64(len("new payload")), nil, true)
+	_, err = fileService.Write(
+		ctx, unsupportedFile, strings.NewReader("new payload"), int64(len("new payload")), nil, true,
+	)
 	if !errors.Is(err, files.ErrWriteFailed) {
 		t.Fatalf("expected ErrWriteFailed when atomic replacement is unsupported, got: %v", err)
 	}
 
 	// Verify original file was neither deleted nor truncated
-	unsupportedContent, err := os.ReadFile(unsupportedFile)
-	if err != nil || string(unsupportedContent) != "precious original data" {
-		t.Fatalf("file content must be preserved intact without truncate or delete: got %q, err: %v", string(unsupportedContent), err)
+	unsupportedContent := testReadFile(t, unsupportedFile)
+	if string(unsupportedContent) != "precious original data" {
+		t.Fatalf(
+			"file content must be preserved intact without truncate or delete: got %q",
+			string(unsupportedContent),
+		)
 	}
 
 	// Verify no staging file left behind
-	stagingFiles, _ = filepath.Glob(filepath.Join(testDir, ".vtc-write-*"))
+	stagingFiles, err = filepath.Glob(filepath.Join(testDir, ".vtc-write-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(stagingFiles) != 0 {
 		t.Fatalf("staging files leaked after unsupported replacement refusal: %v", stagingFiles)
 	}
 
 	// However, creating a brand new file on an unsupported server still works using standard non-overwriting rename
 	brandNewFile := filepath.Join(testDir, "brand_new_file.txt")
-	_, err = fileService.Write(ctx, brandNewFile, strings.NewReader("brand new payload"), int64(len("brand new payload")), nil, true)
+	_, err = fileService.Write(
+		ctx, brandNewFile, strings.NewReader("brand new payload"), int64(len("brand new payload")), nil, true,
+	)
 	if err != nil {
 		t.Fatalf("creating new file on server without posix-rename should succeed: %v", err)
 	}
-	newContent, _ := os.ReadFile(brandNewFile)
+	newContent := testReadFile(t, brandNewFile)
 	if string(newContent) != "brand new payload" {
 		t.Fatalf("new file content mismatch: %s", string(newContent))
 	}
@@ -995,7 +1100,7 @@ func TestRemoteFilesPendingStagingAndOutcomeUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore failed: %v", err)
 	}
-	defer store.Close()
+	defer store.Close() //nolint:errcheck // test cleanup
 
 	testHostID := host.ID("bounded-host")
 	for i := 1; i <= 55; i++ {
@@ -1027,7 +1132,7 @@ func TestRemoteFilesPendingStagingAndOutcomeUnknown(t *testing.T) {
 
 	// 2. Disconnect/Error Before Replacement (Destination untouched, staging cleaned up)
 	targetFile := filepath.Join(testDir, "orig_target.txt")
-	_ = os.WriteFile(targetFile, []byte("original pristine content"), 0644)
+	testWriteFile(t, targetFile, []byte("original pristine content"), 0644)
 
 	// Use an io.Reader that fails immediately
 	errReader := &failingReader{err: io.ErrUnexpectedEOF}
@@ -1041,13 +1146,19 @@ func TestRemoteFilesPendingStagingAndOutcomeUnknown(t *testing.T) {
 	}
 
 	// Verify destination remains unchanged
-	targetContent, err := os.ReadFile(targetFile)
-	if err != nil || string(targetContent) != "original pristine content" {
-		t.Fatalf("destination content must remain unchanged after interrupted upload: got %q", string(targetContent))
+	targetContent := testReadFile(t, targetFile)
+	if string(targetContent) != "original pristine content" {
+		t.Fatalf(
+			"destination content must remain unchanged after interrupted upload: got %q",
+			string(targetContent),
+		)
 	}
 
 	// Verify staging file was cleaned up
-	staged, _ := filepath.Glob(filepath.Join(testDir, ".vtc-write-*"))
+	staged, err := filepath.Glob(filepath.Join(testDir, ".vtc-write-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(staged) != 0 {
 		t.Fatalf("staging files leaked after transfer failure: %v", staged)
 	}
@@ -1055,7 +1166,7 @@ func TestRemoteFilesPendingStagingAndOutcomeUnknown(t *testing.T) {
 	// 3. Restart Cleanup Recovery: Removes owned staging files matching registered token
 	tokenValid := "0123456789abcdef"
 	stageValidPath := filepath.Join(testDir, fmt.Sprintf(".vtc-write-%s", tokenValid))
-	_ = os.WriteFile(stageValidPath, []byte("leftover staging from dead upload"), 0644)
+	testWriteFile(t, stageValidPath, []byte("leftover staging from dead upload"), 0644)
 
 	// Inject pending cleanup record for fileService's host
 	reg := fileServiceLeaseRegistry(t, fileService)
@@ -1075,36 +1186,42 @@ func TestRemoteFilesPendingStagingAndOutcomeUnknown(t *testing.T) {
 	// 4. Refusal to remove unidentifiable staging candidates
 	// A. A normal user file
 	userFile := filepath.Join(testDir, "my_database.db")
-	_ = os.WriteFile(userFile, []byte("crucial database data"), 0644)
-	_ = reg.AddPendingCleanup(ctx, host.PendingCleanupRecord{
+	testWriteFile(t, userFile, []byte("crucial database data"), 0644)
+	if err := reg.AddPendingCleanup(ctx, host.PendingCleanupRecord{
 		ID:          fmt.Sprintf("%s:malicious-1", hostID),
 		HostID:      hostID,
 		StagingPath: userFile,
 		Token:       "0123456789abcdef", // Token doesn't match base name
 		CreatedAt:   time.Now().Unix(),
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// B. A file with staging prefix but non-hex/wrong token
 	wrongTokenFile := filepath.Join(testDir, ".vtc-write-nothexcharacters")
-	_ = os.WriteFile(wrongTokenFile, []byte("arbitrary candidate"), 0644)
-	_ = reg.AddPendingCleanup(ctx, host.PendingCleanupRecord{
+	testWriteFile(t, wrongTokenFile, []byte("arbitrary candidate"), 0644)
+	if err := reg.AddPendingCleanup(ctx, host.PendingCleanupRecord{
 		ID:          fmt.Sprintf("%s:malicious-2", hostID),
 		HostID:      hostID,
 		StagingPath: wrongTokenFile,
 		Token:       "nothexcharacters",
 		CreatedAt:   time.Now().Unix(),
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// C. A directory named like a staging file
 	stageDir := filepath.Join(testDir, ".vtc-write-deadbeefcafebabe")
-	_ = os.Mkdir(stageDir, 0755)
-	_ = reg.AddPendingCleanup(ctx, host.PendingCleanupRecord{
+	testMkdir(t, stageDir, 0755)
+	if err := reg.AddPendingCleanup(ctx, host.PendingCleanupRecord{
 		ID:          fmt.Sprintf("%s:malicious-3", hostID),
 		HostID:      hostID,
 		StagingPath: stageDir,
 		Token:       "deadbeefcafebabe",
 		CreatedAt:   time.Now().Unix(),
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Run pending cleanups!
 	cleanedCount, err := fileService.RunPendingCleanups(ctx)
@@ -1158,7 +1275,9 @@ func fileServiceLeaseRegistry(t *testing.T, fs *host.RemoteFileService) *host.Re
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = r.Close() })
+	t.Cleanup(func() {
+		_ = r.Close() //nolint:errcheck // test cleanup
+	})
 	fs.SetRegistryForTesting(r)
 	return r
 }
@@ -1168,18 +1287,20 @@ func TestRemoteFilesOutcomeUnknownOnReplacementDisconnect(t *testing.T) {
 	ctx := context.Background()
 
 	targetFile := filepath.Join(testDir, "uncertain_outcome.txt")
-	_ = os.WriteFile(targetFile, []byte("precious base file"), 0644)
+	testWriteFile(t, targetFile, []byte("precious base file"), 0644)
 
 	var capturedSSH *ssh.Client
-	fileService.SetAdapterFactoryForTesting(func(ctx context.Context, sshClient *ssh.Client) (*host.SFTPAdapter, error) {
-		capturedSSH = sshClient
-		return host.NewSFTPAdapter(ctx, sshClient)
-	})
+	fileService.SetAdapterFactoryForTesting(
+		func(ctx context.Context, sshClient *ssh.Client) (*host.SFTPAdapter, error) {
+			capturedSSH = sshClient
+			return host.NewSFTPAdapter(ctx, sshClient)
+		},
+	)
 	defer fileService.SetAdapterFactoryForTesting(nil)
 
 	fileService.SetBeforePosixRenameHookForTesting(func() {
 		if capturedSSH != nil {
-			_ = capturedSSH.Close()
+			_ = capturedSSH.Close() //nolint:errcheck // test fault injection
 		}
 	})
 	defer fileService.SetBeforePosixRenameHookForTesting(nil)
@@ -1192,5 +1313,200 @@ func TestRemoteFilesOutcomeUnknownOnReplacementDisconnect(t *testing.T) {
 
 	if !errors.Is(err, host.ErrOutcomeUnknown) {
 		t.Fatalf("expected ErrOutcomeUnknown on disconnect during atomic replacement, got: %v", err)
+	}
+}
+
+func TestPathCoordinatorLockHandleSelfConflict(t *testing.T) {
+	coord := host.GetPathCoordinatorForTesting("self-conflict-host")
+	h1 := coord.NewHandle()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// Locking lexical child then parent with same handle must succeed without self-conflict
+	unlock1, err := h1.Lock(ctx, "/home/u/self/self")
+	if err != nil {
+		t.Fatalf("h1 lock /home/u/self/self: %v", err)
+	}
+	defer unlock1()
+
+	unlock2, err := h1.Lock(ctx, "/home/u/self")
+	if err != nil {
+		t.Fatalf("h1 lock /home/u/self should not self-conflict: %v", err)
+	}
+	defer unlock2()
+
+	// Different handle on conflicting path must fail/timeout
+	h2 := coord.NewHandle()
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel2()
+	_, err = h2.Lock(ctx2, "/home/u/self")
+	if err == nil {
+		t.Fatal("h2 should have conflicted with h1")
+	}
+}
+
+func TestPathCoordinatorDeadlockDetection(t *testing.T) {
+	coord := host.GetPathCoordinatorForTesting("deadlock-host")
+	h1 := coord.NewHandle()
+	h2 := coord.NewHandle()
+
+	ctx := context.Background()
+	u1, err := h1.Lock(ctx, "/path/A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u1()
+
+	u2, err := h2.Lock(ctx, "/path/B")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u2()
+
+	h1Blocked := make(chan struct{})
+	go func() {
+		close(h1Blocked)
+		//nolint:errcheck // intentionally unhandled background lock to trigger deadlock
+		_, _ = h1.Lock(context.Background(), "/path/B")
+	}()
+
+	<-h1Blocked
+	time.Sleep(20 * time.Millisecond) // Let h1 enter waiting map
+
+	// h2 waits for /path/A (held by h1) -> cycle detected!
+	_, err = h2.Lock(context.Background(), "/path/A")
+	if err == nil || !strings.Contains(err.Error(), "deadlock detected") {
+		t.Fatalf("expected deadlock detected, got %v", err)
+	}
+}
+
+func TestRunPendingCleanupsSkipsActiveStaging(t *testing.T) {
+	fileService, testDir := setupTestRemoteFiles(t)
+	reg := fileServiceLeaseRegistry(t, fileService)
+	ctx := context.Background()
+	hostID := host.ID("remote-fs")
+
+	// Create a staging file candidate
+	token := "0123456789abcdef"
+	stagePath := filepath.Join(testDir, fmt.Sprintf(".vtc-write-%s", token))
+	if err := os.WriteFile(stagePath, []byte("active upload in flight"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupID := fmt.Sprintf("%s:active-test", hostID)
+	if err := reg.AddPendingCleanup(ctx, host.PendingCleanupRecord{
+		ID:          cleanupID,
+		HostID:      hostID,
+		StagingPath: stagePath,
+		Token:       token,
+		CreatedAt:   time.Now().Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. When marked active, RunPendingCleanups must skip it
+	host.TrackActiveStagingForTesting(hostID, stagePath)
+	cleaned, err := fileService.RunPendingCleanups(ctx)
+	if err != nil {
+		t.Fatalf("RunPendingCleanups error: %v", err)
+	}
+	if cleaned != 0 {
+		t.Fatalf("expected 0 cleaned while active, got %d", cleaned)
+	}
+	if _, err := os.Stat(stagePath); os.IsNotExist(err) {
+		t.Fatal("active staging file must not be removed")
+	}
+
+	// 2. When untracked (e.g. upload completed or aborted), RunPendingCleanups cleans it
+	host.UntrackActiveStagingForTesting(hostID, stagePath)
+	cleaned, err = fileService.RunPendingCleanups(ctx)
+	if err != nil {
+		t.Fatalf("RunPendingCleanups after untrack error: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expected 1 cleaned after untrack, got %d", cleaned)
+	}
+	if _, err := os.Stat(stagePath); !os.IsNotExist(err) {
+		t.Fatal("abandoned staging file should be removed")
+	}
+}
+
+func TestStagingPublicationOrderProtectsAgainstConcurrentCleanup(t *testing.T) {
+	fileService, testDir := setupTestRemoteFiles(t)
+	ctx := context.Background()
+	targetPath := filepath.Join(testDir, "concurrent_target.txt")
+	content := []byte("payload to survive cleanup")
+
+	cleanupRan := false
+	var cleanedCount int
+	var cleanupErr error
+
+	// Register hook right after AddPendingCleanup has published the DB record.
+	// At this exact moment, RunPendingCleanups runs concurrently.
+	fileService.SetAfterPendingCleanupHookForTesting(func(stagePath string) {
+		cleanedCount, cleanupErr = fileService.RunPendingCleanups(ctx)
+		cleanupRan = true
+
+		// Assert that the staging file was NOT removed by cleanup because
+		// trackActiveStaging had already protected it before AddPendingCleanup.
+		if _, err := os.Stat(stagePath); os.IsNotExist(err) {
+			t.Errorf("staging file %s was prematurely removed by RunPendingCleanups!", stagePath)
+		}
+	})
+
+	res, err := fileService.Write(ctx, targetPath, bytes.NewReader(content), int64(len(content)), nil, false)
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if !cleanupRan {
+		t.Fatal("expected afterPendingCleanupHook to execute")
+	}
+	if cleanupErr != nil {
+		t.Fatalf("RunPendingCleanups error: %v", cleanupErr)
+	}
+	if cleanedCount != 0 {
+		t.Fatalf("expected 0 files cleaned during active upload, got %d", cleanedCount)
+	}
+
+	// Verify target file was written successfully
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if !bytes.Equal(data, content) {
+		t.Fatalf("content mismatch: got %q, want %q", data, content)
+	}
+	_ = res
+}
+
+func TestAddPendingCleanupFailureAbortsAndUntracks(t *testing.T) {
+	fileService, testDir := setupTestRemoteFiles(t)
+	reg := fileServiceLeaseRegistry(t, fileService)
+	ctx := context.Background()
+	targetPath := filepath.Join(testDir, "failed_reg_target.txt")
+	content := []byte("will fail registration")
+
+	// Close registry so AddPendingCleanup returns an error
+	_ = reg.Close() //nolint:errcheck // intentionally close to trigger error
+
+	_, err := fileService.Write(ctx, targetPath, bytes.NewReader(content), int64(len(content)), nil, false)
+	if err == nil {
+		t.Fatal("expected Write to fail when AddPendingCleanup fails")
+	}
+
+	// Verify active staging is untracked
+	if count := host.ActiveStagingCountForTesting("remote-fs"); count != 0 {
+		t.Fatalf("expected 0 active staging entries after abort, got %d", count)
+	}
+
+	// Verify no staging file remained on disk
+	entries, err := os.ReadDir(testDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".vtc-write-") {
+			t.Fatalf("staging file %s was left on disk after cleanup registration error", e.Name())
+		}
 	}
 }

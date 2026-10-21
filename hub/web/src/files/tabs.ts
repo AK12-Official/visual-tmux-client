@@ -22,6 +22,7 @@ export interface OpenFile {
   id: number
   hostId?: string
   revision?: number
+  connectionRevision?: number
   path: string
   name: string
   /** text is the current editor contents. Empty for a file never read as text. */
@@ -109,6 +110,7 @@ export interface SaveRequest {
   id: number
   hostId?: string
   revision?: number
+  connectionRevision?: number
   /** path is the file the write names. */
   path: string
   /** text is the exact contents the write carries. */
@@ -141,6 +143,7 @@ export function beginSave(file: OpenFile, force = false, allowOtherNames = false
     id: file.id,
     hostId: file.hostId,
     revision: file.revision,
+    connectionRevision: file.connectionRevision,
     path: file.path,
     text: file.text,
     expected: force ? null : file.stamp,
@@ -158,7 +161,14 @@ export async function saveOpenFile(
   request: SaveRequest,
   hostId = request.hostId ?? 'local',
 ): Promise<Stamp | null> {
-  return writeFile(request.path, request.text, request.expected, request.allowOtherNames, hostId)
+  return writeFile(
+    request.path,
+    request.text,
+    request.expected,
+    request.allowOtherNames,
+    hostId,
+    request.connectionRevision,
+  )
 }
 
 /** applySaved folds a successful save back into the file's state.

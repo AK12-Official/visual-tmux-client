@@ -5,6 +5,7 @@ import {
   clearToken,
   createSession,
   errorText,
+  getHostSettings,
   getToken,
   isHeaderSafeToken,
   issueTicket,
@@ -12,6 +13,7 @@ import {
   listSessions,
   renameSession,
   setToken,
+  updateHostSettings,
 } from './api'
 
 function setupMockStorage() {
@@ -92,12 +94,14 @@ test('API endpoints: list, create, rename, kill, ticket', async () => {
   let lastMethod = ''
   let lastBody: unknown = null
   let lastAuth = ''
+  let lastHeaders = new Headers()
 
   globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     lastUrl = String(input)
     lastMethod = init?.method ?? 'GET'
     lastBody = init?.body ? JSON.parse(String(init.body)) : null
-    lastAuth = new Headers(init?.headers).get('Authorization') ?? ''
+    lastHeaders = new Headers(init?.headers)
+    lastAuth = lastHeaders.get('Authorization') ?? ''
 
     if (lastUrl.match(/^\/api\/hosts\/[^/]+\/sessions$/) && lastMethod === 'GET') {
       return new Response(JSON.stringify({
@@ -140,33 +144,33 @@ test('API endpoints: list, create, rename, kill, ticket', async () => {
   }
 
   // listSessions
-  const sessions = await listSessions()
+  const sessions = await listSessions('local')
   assert.equal(sessions.length, 1)
   assert.equal(sessions[0].name, 's1')
   assert.equal(lastAuth, 'Bearer test-token')
 
   // createSession (nameless)
-  const autoCreated = await createSession()
+  const autoCreated = await createSession(undefined, 'local')
   assert.equal(autoCreated.name, 'session-auto-1')
   assert.deepEqual(lastBody, {})
 
   // createSession (explicit name)
-  const explicitCreated = await createSession('my-sess')
+  const explicitCreated = await createSession('my-sess', 'local')
   assert.equal(explicitCreated.name, 'my-sess')
   assert.deepEqual(lastBody, { name: 'my-sess' })
 
   // renameSession
-  const renamed = await renameSession('old-sess', 'new-sess')
+  const renamed = await renameSession('old-sess', 'new-sess', 'local')
   assert.equal(renamed.name, 'new-sess')
   assert.deepEqual(lastBody, { name: 'new-sess' })
 
   // killSession
-  await killSession('kill-sess')
+  await killSession('kill-sess', 'local')
   assert.equal(lastUrl, '/api/hosts/local/sessions/kill-sess')
   assert.equal(lastMethod, 'DELETE')
 
   // issueTicket
-  const ticket = await issueTicket('my-sess')
+  const ticket = await issueTicket('my-sess', 'local')
   assert.equal(ticket, 'secret-ticket-123')
   assert.deepEqual(lastBody, { hostId: 'local', session: 'my-sess' })
 
@@ -175,15 +179,17 @@ test('API endpoints: list, create, rename, kill, ticket', async () => {
   assert.equal(lastUrl, '/api/hosts/remote-1/sessions')
   assert.equal(lastMethod, 'GET')
 
-  await createSession('r-sess', 'remote-1')
+  await createSession('r-sess', 'remote-1', 42)
   assert.equal(lastUrl, '/api/hosts/remote-1/sessions')
   assert.equal(lastMethod, 'POST')
-  assert.deepEqual(lastBody, { name: 'r-sess' })
+  assert.equal(lastHeaders.get('X-Expected-Connection-Revision'), '42')
+  assert.equal((lastBody as { expectedConnectionRevision?: number })?.expectedConnectionRevision, 42)
 
-  await renameSession('old-r', 'new-r', 'remote-1')
+  await renameSession('old-r', 'new-r', 'remote-1', 42)
   assert.equal(lastUrl, '/api/hosts/remote-1/sessions/old-r')
   assert.equal(lastMethod, 'PATCH')
-  assert.deepEqual(lastBody, { name: 'new-r' })
+  assert.equal(lastHeaders.get('X-Expected-Connection-Revision'), '42')
+  assert.equal((lastBody as { expectedConnectionRevision?: number })?.expectedConnectionRevision, 42)
 
   await killSession('dead-r', 'remote-1')
   assert.equal(lastUrl, '/api/hosts/remote-1/sessions/dead-r')
@@ -206,8 +212,50 @@ test('API clears token and throws AuthError on 401', async () => {
   }
 
   await assert.rejects(async () => {
-    await listSessions()
+    await listSessions('local')
   }, AuthError)
 
   assert.equal(getToken(), null) // Token cleared on 401
+})
+
+test('API supports getHostSettings and updateHostSettings', async () => {
+  setupMockStorage()
+  setToken('test-token')
+
+  let lastUrl = ''
+  let lastMethod = ''
+  let lastBody: unknown = null
+
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    lastUrl = String(input)
+    lastMethod = init?.method ?? 'GET'
+    if (init?.body) lastBody = JSON.parse(String(init.body))
+
+    if (lastUrl === '/api/host-settings' && lastMethod === 'GET') {
+      return new Response(JSON.stringify({ defaultHostId: 'server-1', revision: 2 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (lastUrl.startsWith('/api/host-settings?revision=2') && lastMethod === 'PUT') {
+      return new Response(JSON.stringify({ defaultHostId: 'local', revision: 3 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(null, { status: 404 })
+  }
+
+  const settings = await getHostSettings()
+  assert.equal(settings.defaultHostId, 'server-1')
+  assert.equal(settings.revision, 2)
+  assert.equal(lastUrl, '/api/host-settings')
+  assert.equal(lastMethod, 'GET')
+
+  const updated = await updateHostSettings('local', 2)
+  assert.equal(updated.defaultHostId, 'local')
+  assert.equal(updated.revision, 3)
+  assert.equal(lastUrl, '/api/host-settings?revision=2')
+  assert.equal(lastMethod, 'PUT')
+  assert.deepEqual(lastBody, { defaultHostId: 'local', revision: 2 })
 })

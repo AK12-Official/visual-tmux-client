@@ -49,10 +49,16 @@ type TrustStore struct {
 	challenges map[string]TrustChallenge
 }
 
+const (
+	defaultTrustTTL     = 5 * time.Minute
+	challengeTokenBytes = 16
+	defaultDialTimeout  = 10 * time.Second
+)
+
 // NewTrustStore initializes an in-memory challenge store with a default TTL.
 func NewTrustStore(ttl time.Duration) *TrustStore {
 	if ttl <= 0 {
-		ttl = 5 * time.Minute
+		ttl = defaultTrustTTL
 	}
 	return &TrustStore{
 		ttl:        ttl,
@@ -70,12 +76,14 @@ func (s *TrustStore) sweepLocked() {
 }
 
 // CreateChallenge records an observed key challenge.
-func (s *TrustStore) CreateChallenge(hostID ID, revision Revision, endpoint string, key ssh.PublicKey) (ProbeResult, error) {
+func (s *TrustStore) CreateChallenge(
+	hostID ID, revision Revision, endpoint string, key ssh.PublicKey,
+) (ProbeResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked()
 
-	tokenBytes := make([]byte, 16)
+	tokenBytes := make([]byte, challengeTokenBytes)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return ProbeResult{}, err
 	}
@@ -107,7 +115,9 @@ func (s *TrustStore) CreateChallenge(hostID ID, revision Revision, endpoint stri
 }
 
 // Confirm validates challenge parameters and returns the pinned key bytes, consuming the token.
-func (s *TrustStore) Confirm(token string, expectedHostID ID, expectedRevision Revision, expectedEndpoint string) ([]byte, error) {
+func (s *TrustStore) Confirm(
+	token string, expectedHostID ID, expectedRevision Revision, expectedEndpoint string,
+) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked()
@@ -136,7 +146,7 @@ func ProbeEndpoint(ctx context.Context, address string, port uint16, dialTimeout
 	var mu sync.Mutex
 
 	if dialTimeout <= 0 {
-		dialTimeout = 10 * time.Second
+		dialTimeout = defaultDialTimeout
 	}
 
 	dialer := net.Dialer{Timeout: dialTimeout}
@@ -144,7 +154,23 @@ func ProbeEndpoint(ctx context.Context, address string, port uint16, dialTimeout
 	if err != nil {
 		return nil, fmt.Errorf("probe dial: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }() //nolint:errcheck // probe connection cleanup
+
+	deadline := time.Now().Add(dialTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	_ = conn.SetDeadline(deadline) //nolint:errcheck // set probe deadline
+
+	stopCancel := make(chan struct{})
+	defer close(stopCancel)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close() //nolint:errcheck // probe cancellation
+		case <-stopCancel:
+		}
+	}()
 
 	// ClientConfig has NO auth methods configured, guaranteeing no credentials are sent.
 	clientConfig := &ssh.ClientConfig{
@@ -157,9 +183,12 @@ func ProbeEndpoint(ctx context.Context, address string, port uint16, dialTimeout
 		Timeout: dialTimeout,
 	}
 
-	sshConn, chans, reqs, _ := ssh.NewClientConn(conn, endpoint, clientConfig)
+	sshConn, chans, reqs, _ := ssh.NewClientConn( //nolint:errcheck // handshake fails intentionally due to no auth
+		conn, endpoint, clientConfig,
+	)
+	_ = conn.SetDeadline(time.Time{}) //nolint:errcheck // clear deadline
 	if sshConn != nil {
-		_ = sshConn.Close()
+		_ = sshConn.Close() //nolint:errcheck // probe connection cleanup
 	}
 	_ = chans
 	_ = reqs

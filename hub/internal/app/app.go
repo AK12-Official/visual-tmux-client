@@ -114,6 +114,7 @@ func New(cfg *config.Config, prov config.Provenance, staticFS fs.FS, opt ...Opti
 		Files:     fileService,
 		Processes: procFact,
 	}
+	connMgr.SetLocalRuntime(localRuntime)
 	runtimeResolver := host.NewMultiHostResolver(localRuntime, registry, connMgr)
 	wsHandler := ws.NewHandlerWithResolver(
 		ticketStore,
@@ -124,12 +125,7 @@ func New(cfg *config.Config, prov config.Provenance, staticFS fs.FS, opt ...Opti
 		nil,
 	)
 
-	routerCfg := newRouterConfig(cfg, staticFS)
-	routerCfg.Hosts = registry
-	routerCfg.OnHostChanged = connMgr.Invalidate
-	routerCfg.Capabilities = connMgr
-	routerCfg.TrustStore = host.NewTrustStore(defaultTrustStoreTTL)
-
+	routerCfg := setupHostRouterConfig(cfg, staticFS, registry, connMgr, ticketStore, terminalManager)
 	router := thttp.NewRouterWithResolver(routerCfg, runtimeResolver, ticketStore, wsHandler)
 
 	httpServer := &http.Server{
@@ -192,12 +188,13 @@ func newFileService(cfg *config.Config) (*files.Service, error) {
 // newRouterConfig projects the runtime configuration onto the HTTP router.
 func newRouterConfig(cfg *config.Config, staticFS fs.FS) thttp.RouterConfig {
 	return thttp.RouterConfig{
-		Token:               cfg.Auth.Token,
-		MaxRequestBodyBytes: cfg.Server.MaxRequestBodyBytes,
-		MaxFileSize:         cfg.Files.MaxFileSize,
-		FilesEnabled:        cfg.Files.Enabled,
-		WebConfig:           cfg.Web,
-		StaticFS:            staticFS,
+		Token:                cfg.Auth.Token,
+		MaxRequestBodyBytes:  cfg.Server.MaxRequestBodyBytes,
+		MaxFileSize:          cfg.Files.MaxFileSize,
+		FilesEnabled:         cfg.Files.Enabled,
+		FileOperationTimeout: cfg.Hosts.OperationTimeout.Duration(),
+		WebConfig:            cfg.Web,
+		StaticFS:             staticFS,
 	}
 }
 
@@ -305,4 +302,33 @@ func newWSOptions(cfg *config.Config) ws.Options {
 		MaxDimension:    cfg.Terminal.MaxDimension,
 		TerminalOptions: termOpts,
 	}
+}
+
+func setupHostRouterConfig(
+	cfg *config.Config,
+	staticFS fs.FS,
+	registry *host.Registry,
+	connMgr *host.ConnectionManager,
+	ticketStore *auth.TicketStore,
+	terminalManager *terminal.Manager,
+) thttp.RouterConfig {
+	routerCfg := newRouterConfig(cfg, staticFS)
+	routerCfg.Hosts = registry
+	routerCfg.OnHostConnectionChanged = func(id host.ID) {
+		connMgr.Invalidate(id)
+		ticketStore.InvalidateHost(string(id))
+		terminalManager.CloseHost(string(id))
+	}
+	routerCfg.OnHostRemoved = func(id host.ID) {
+		connMgr.Invalidate(id)
+		ticketStore.InvalidateHost(string(id))
+		terminalManager.CloseHost(string(id))
+	}
+	routerCfg.OnHostMetadataChanged = func(id host.ID) {
+		// Metadata only: active terminals, connections, and tickets are preserved
+	}
+	routerCfg.OnHostChanged = routerCfg.OnHostConnectionChanged
+	routerCfg.Capabilities = connMgr
+	routerCfg.TrustStore = host.NewTrustStore(defaultTrustStoreTTL)
+	return routerCfg
 }

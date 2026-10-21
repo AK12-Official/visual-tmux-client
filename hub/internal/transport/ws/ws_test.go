@@ -722,3 +722,39 @@ func TestWSTargetBoundTickets(t *testing.T) {
 		t.Fatalf("expected non-retryable invalid ticket error on reused ticket, got %+v", emReused)
 	}
 }
+
+type closeOnRedeem struct {
+	mgr *terminal.Manager
+}
+
+func (r closeOnRedeem) Redeem(string, string) error {
+	r.mgr.CloseHost("local")
+	return nil
+}
+
+func TestWSDeletedHostUsesNewEpoch(t *testing.T) {
+	mgr := terminal.NewManager(time.Second)
+	defer mgr.CloseHost("local")
+	handler := NewHandler(closeOnRedeem{mgr: mgr}, &mockFactory{}, mgr, DefaultOptions(), nil, nil)
+	returned := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.Handle("GET /ws/{hostId}/{session}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler.ServeHTTP(w, r)
+		close(returned)
+	}))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, wsURL(ts, "/ws/local/test"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.CloseNow() }() //nolint:errcheck // test cleanup
+
+	<-returned
+	if mgr.ActiveCount() != 0 {
+		t.Fatalf("expected attachment to be rejected with active count 0, got %d", mgr.ActiveCount())
+	}
+}

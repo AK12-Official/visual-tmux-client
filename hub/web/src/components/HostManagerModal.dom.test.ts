@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import '../../test/dom.mjs'
 
-import { mount } from '@vue/test-utils'
+import { mount, flushPromises } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import HostManagerModal from './HostManagerModal.vue'
 import { setToken } from '../api'
@@ -376,6 +376,68 @@ test('HostManagerModal: explicit secret replacement on edit', async () => {
   wrapper.unmount()
 })
 
+for (const succeeds of [true, false]) {
+  test(`HostManagerModal: existing host trust ${succeeds ? 'updates save revision' : 'failure stays unconfirmed'}`, async () => {
+    setToken('test-token')
+    let currentHost = { ...mockHosts[1]!, trusted: false }
+    let finishTrust!: (response: Response) => void
+    const trustResponse = new Promise<Response>((resolve) => { finishTrust = resolve })
+    const requests = setupFetchMock(async (req) => {
+      if (req.url === '/api/hosts') return json({ hosts: [currentHost] })
+      if (req.url === '/api/hosts/server-1/probe') {
+        return json({ endpoint: 'prod.example.com:22', fingerprint: 'SHA256:test', keyType: 'ssh-ed25519', challengeToken: 'existing-challenge' })
+      }
+      if (req.url === '/api/hosts/server-1/trust') return trustResponse
+      if (req.method === 'PUT') {
+        const body = req.body as { revision: number }
+        if (body.revision !== currentHost.revision) return json({ error: 'host_revision_conflict' }, 409)
+        return json({ ...currentHost, revision: currentHost.revision + 1 })
+      }
+      return json({ defaultHostId: null, revision: 1 })
+    })
+    const wrapper = mount(HostManagerModal, { props: { open: true }, attachTo: document.body })
+    try {
+      await flushPromises()
+      await wrapper.find('button[aria-label="Edit Production Server"]').trigger('click')
+      await wrapper.find('#host-field-name').setValue('Unsaved new name')
+      await wrapper.find('#host-field-password').setValue('new-secret')
+      await wrapper.find('.host-probe__probe-btn').trigger('click')
+      await flushPromises()
+      await wrapper.find('.host-probe__trust-btn').trigger('click')
+      await flushPromises()
+      assert.equal(wrapper.find('.host-probe-trusted-indicator').exists(), false)
+      assert.equal(wrapper.find('button[type="submit"]').attributes('disabled'), '')
+      await wrapper.find('form.host-form').trigger('submit')
+      assert.equal(requests.filter((r) => r.method === 'PUT').length, 0)
+
+      if (succeeds) {
+        currentHost = { ...currentHost, revision: 4, trusted: true }
+        finishTrust(json(currentHost))
+      } else {
+        finishTrust(json({ error: 'challenge_expired' }, 409))
+      }
+      await flushPromises()
+      assert.equal(wrapper.find('.host-probe-trusted-indicator').exists(), succeeds)
+      assert.equal((wrapper.find('#host-field-name').element as HTMLInputElement).value, 'Unsaved new name')
+      assert.equal((wrapper.find('#host-field-password').element as HTMLInputElement).value, 'new-secret')
+      if (!succeeds) assert.ok(wrapper.text().includes('challenge_expired'))
+      await wrapper.find('form.host-form').trigger('submit')
+      await flushPromises()
+      const update = requests.find((r) => r.method === 'PUT')!
+      assert.ok(update)
+      const body = update.body as Record<string, unknown>
+      assert.equal(body.revision, succeeds ? 4 : 3)
+      assert.ok(update.url.endsWith(`?revision=${succeeds ? 4 : 3}`))
+      assert.equal(body.challengeToken, undefined)
+      assert.equal(body.name, 'Unsaved new name')
+      assert.deepEqual(body.credentials, { password: 'new-secret' })
+      assert.equal(wrapper.text().includes('host_revision_conflict'), false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+}
+
 test('HostManagerModal: draft fingerprint probing and trust confirmation', async () => {
   setToken('test-token')
   let probeCalled = false
@@ -585,3 +647,320 @@ test('deleting host with unsaved editor drafts displays dirty warning before con
   wrapper.unmount()
 })
 
+test('HostManagerModal: uniform controls on local host (edit, test, default, delete)', async () => {
+  setToken('test-token')
+  let lastSettingsUpdate: unknown = null
+
+  setupFetchMock((req) => {
+    if (req.url === '/api/hosts' && req.method === 'GET') {
+      return json({
+        hosts: [
+          {
+            id: 'local',
+            name: 'Local Host',
+            connectionType: 'local',
+            revision: 1,
+            connectionRevision: 1,
+            hasCredential: false,
+            trusted: true,
+          },
+          {
+            id: 'server-1',
+            name: 'Production Server',
+            connectionType: 'ssh',
+            address: 'prod.example.com',
+            port: 22,
+            username: 'deploy',
+            credentialType: 'password',
+            hasCredential: true,
+            trusted: true,
+            revision: 2,
+            connectionRevision: 1,
+          },
+        ],
+      })
+    }
+    if (req.url === '/api/host-settings' && req.method === 'GET') {
+      return json({ defaultHostId: 'server-1', revision: 2 })
+    }
+    if (req.url.startsWith('/api/host-settings') && req.method === 'PUT') {
+      lastSettingsUpdate = req.body
+      return json({ defaultHostId: 'local', revision: 3 })
+    }
+    return json({}, 200)
+  })
+
+  const wrapper = mount(HostManagerModal, {
+    props: { open: true },
+    attachTo: document.body,
+  })
+  await nextTick()
+  await new Promise((r) => setTimeout(r, 20))
+  await nextTick()
+
+  // Local host card controls must NOT be hidden
+  const localTestBtn = wrapper.find('button[aria-label="Test connection for Local Host"]')
+  assert.ok(localTestBtn.exists(), 'local host must have Test button')
+
+  const localEditBtn = wrapper.find('button[aria-label="Edit Local Host"]')
+  assert.ok(localEditBtn.exists(), 'local host must have Edit button')
+
+  const localSetDefaultBtn = wrapper.find('button[aria-label="Set Local Host as default host"]')
+  assert.ok(localSetDefaultBtn.exists(), 'local host must have Set Default button when not default')
+
+  const localDeleteBtn = wrapper.find('button[aria-label="Remove Local Host"]')
+  assert.ok(localDeleteBtn.exists(), 'local host must have Delete button')
+
+  // Click Set Default on local host
+  await localSetDefaultBtn.trigger('click')
+  await new Promise((r) => setTimeout(r, 20))
+  await nextTick()
+
+  assert.ok(lastSettingsUpdate !== null)
+  assert.deepEqual(lastSettingsUpdate, { defaultHostId: 'local', revision: 2 })
+  assert.ok(wrapper.emitted('default-changed'))
+
+  wrapper.unmount()
+})
+
+test('HostManagerModal: editing local host hides SSH fields and updates name only', async () => {
+  setToken('test-token')
+  let updateBody: unknown = null
+
+  setupFetchMock((req) => {
+    if (req.url === '/api/hosts' && req.method === 'GET') {
+      return json({
+        hosts: [
+          {
+            id: 'local',
+            name: 'Local Host',
+            connectionType: 'local',
+            revision: 1,
+            connectionRevision: 1,
+            hasCredential: false,
+            trusted: true,
+          },
+        ],
+      })
+    }
+    if (req.url.startsWith('/api/hosts/local') && req.method === 'PUT') {
+      updateBody = req.body
+      return json({
+        id: 'local',
+        name: 'Renamed Local',
+        connectionType: 'local',
+        revision: 2,
+        connectionRevision: 1,
+        hasCredential: false,
+        trusted: true,
+      })
+    }
+    return json({}, 200)
+  })
+
+  const wrapper = mount(HostManagerModal, {
+    props: { open: true },
+    attachTo: document.body,
+  })
+  await nextTick()
+  await new Promise((r) => setTimeout(r, 20))
+  await nextTick()
+
+  // Click Edit Local Host
+  const editBtn = wrapper.find('button[aria-label="Edit Local Host"]')
+  assert.ok(editBtn.exists())
+  await editBtn.trigger('click')
+  await nextTick()
+
+  // Verify form view
+  assert.ok(wrapper.find('form.host-form').exists())
+  assert.equal((wrapper.find('#host-field-id').element as HTMLInputElement).value, 'local')
+  assert.equal((wrapper.find('#host-field-id').element as HTMLInputElement).disabled, true)
+  assert.equal((wrapper.find('#host-field-name').element as HTMLInputElement).value, 'Local Host')
+
+  // SSH fields must NOT exist in the DOM for local host
+  assert.ok(!wrapper.find('#host-field-address').exists(), 'address field must not exist for local')
+  assert.ok(!wrapper.find('#host-field-port').exists(), 'port field must not exist for local')
+  assert.ok(!wrapper.find('#host-field-username').exists(), 'username field must not exist for local')
+  assert.ok(!wrapper.find('.host-probe__probe-btn').exists(), 'server key probe must not exist for local')
+  assert.ok(!wrapper.find('input[name="credentialType"]').exists(), 'credentials must not exist for local')
+
+  // Change name and submit
+  await wrapper.find('#host-field-name').setValue('Renamed Local')
+  await wrapper.find('form.host-form').trigger('submit')
+  await new Promise((r) => setTimeout(r, 20))
+  await nextTick()
+
+  assert.ok(updateBody !== null)
+  const payload = updateBody as Record<string, unknown>
+  assert.equal(payload.id, 'local')
+  assert.equal(payload.name, 'Renamed Local')
+  assert.equal(payload.connectionType, 'local')
+  assert.equal(payload.address, undefined, 'irrelevant address must not be sent for local host')
+  assert.equal(payload.port, undefined, 'irrelevant port must not be sent for local host')
+  assert.equal(payload.credentials, undefined, 'irrelevant credentials must not be sent for local host')
+
+  wrapper.unmount()
+})
+
+test('HostManagerModal: adding local host validates ID and name without SSH fields', async () => {
+  setToken('test-token')
+  let createBody: unknown = null
+
+  setupFetchMock((req) => {
+    if (req.url === '/api/hosts' && req.method === 'GET') {
+      return json({ hosts: [] })
+    }
+    if (req.url === '/api/hosts' && req.method === 'POST') {
+      createBody = req.body
+      return json(
+        {
+          id: 'local',
+          name: 'Primary System',
+          connectionType: 'local',
+          revision: 1,
+          connectionRevision: 1,
+          hasCredential: false,
+          trusted: true,
+        },
+        201,
+      )
+    }
+    return json({}, 200)
+  })
+
+  const wrapper = mount(HostManagerModal, {
+    props: { open: true },
+    attachTo: document.body,
+  })
+  await nextTick()
+  await new Promise((r) => setTimeout(r, 20))
+  await nextTick()
+
+  // Open add form
+  await wrapper.find('.host-modal__add-btn').trigger('click')
+  await nextTick()
+
+  // Select Local connection type
+  const localRadio = wrapper.find('input[type="radio"][value="local"]')
+  assert.ok(localRadio.exists(), 'local connection type radio must exist')
+  await localRadio.setValue()
+  await nextTick()
+
+  // Verify SSH fields disappeared
+  assert.ok(!wrapper.find('#host-field-address').exists())
+  assert.ok(!wrapper.find('#host-field-port').exists())
+  assert.ok(!wrapper.find('#host-field-username').exists())
+  assert.ok(!wrapper.find('.host-probe__probe-btn').exists())
+
+  // Fill in ID and name
+  await wrapper.find('#host-field-id').setValue('local')
+  await wrapper.find('#host-field-name').setValue('Primary System')
+
+  // Submit form
+  await wrapper.find('form.host-form').trigger('submit')
+  await new Promise((r) => setTimeout(r, 20))
+  await nextTick()
+
+  assert.ok(createBody !== null)
+  const payload = createBody as Record<string, unknown>
+  assert.equal(payload.id, 'local')
+  assert.equal(payload.name, 'Primary System')
+  assert.equal(payload.connectionType, 'local')
+  assert.equal(payload.address, undefined)
+  assert.equal(payload.port, undefined)
+  assert.equal(payload.username, undefined)
+
+  wrapper.unmount()
+})
+
+test('HostManagerModal: structured capability status renders truthfully rather than by object truthiness', async () => {
+  setToken('test-token')
+
+  setupFetchMock((req) => {
+    if (req.url === '/api/hosts' && req.method === 'GET') {
+      return json({
+        hosts: [
+          {
+            id: 'local',
+            name: 'Local Host',
+            connectionType: 'local',
+            revision: 1,
+            connectionRevision: 1,
+            hasCredential: false,
+            trusted: true,
+          },
+          {
+            id: 'server-1',
+            name: 'Remote Offline',
+            connectionType: 'ssh',
+            address: 'offline.example.com',
+            port: 22,
+            username: 'deploy',
+            hasCredential: true,
+            trusted: true,
+            revision: 1,
+            connectionRevision: 1,
+          },
+        ],
+      })
+    }
+    if (req.url === '/api/hosts/local/capabilities') {
+      // Local host returns not_applicable for SSH and SFTP
+      return json({
+        hostId: 'local',
+        connectionType: 'local',
+        ssh: { state: 'not_applicable', available: false },
+        tmux: { state: 'available', available: true },
+        sftp: { state: 'not_applicable', available: false },
+        posixRename: false,
+      })
+    }
+    if (req.url === '/api/hosts/server-1/capabilities') {
+      // SSH host with unavailable status (non-null object!)
+      return json({
+        hostId: 'server-1',
+        connectionType: 'ssh',
+        ssh: { state: 'unavailable', available: false, error: 'connection refused' },
+        tmux: { state: 'unknown', available: false },
+        sftp: { state: 'unavailable', available: false },
+        posixRename: false,
+      })
+    }
+    return json({}, 200)
+  })
+
+  const wrapper = mount(HostManagerModal, {
+    props: { open: true },
+    attachTo: document.body,
+  })
+  await nextTick()
+  await new Promise((r) => setTimeout(r, 20))
+  await nextTick()
+
+  // 1. Test connection on local host
+  const localTestBtn = wrapper.find('button[aria-label="Test connection for Local Host"]')
+  await localTestBtn.trigger('click')
+  await new Promise((r) => setTimeout(r, 20))
+  await nextTick()
+
+  // Must render N/A for SSH and SFTP, NOT 'Connected' or 'Available'!
+  assert.ok(wrapper.text().includes('SSH: N/A'), 'SSH on local must render N/A')
+  assert.ok(!wrapper.text().includes('SSH: Connected'), 'SSH on local must not render Connected')
+  assert.ok(wrapper.text().includes('tmux: Available'), 'tmux on local must render Available')
+  assert.ok(wrapper.text().includes('SFTP: N/A'), 'SFTP on local must render N/A')
+  assert.ok(!wrapper.text().includes('Atomic Overwrite'), 'Atomic Overwrite must not render when SFTP is N/A')
+
+  // 2. Test connection on remote offline host
+  const remoteTestBtn = wrapper.find('button[aria-label="Test connection for Remote Offline"]')
+  await remoteTestBtn.trigger('click')
+  await new Promise((r) => setTimeout(r, 20))
+  await nextTick()
+
+  // Non-null object with available=false must render Offline, NOT Connected!
+  assert.ok(wrapper.text().includes('SSH: Offline'), 'SSH on offline host must render Offline')
+  assert.ok(wrapper.text().includes('tmux: Missing'), 'tmux on offline host must render Missing')
+  assert.ok(wrapper.text().includes('SFTP: Unavailable'), 'SFTP on offline host must render Unavailable')
+
+  wrapper.unmount()
+})

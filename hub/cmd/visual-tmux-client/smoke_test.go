@@ -60,7 +60,9 @@ func startSmokeServer(
 	t.Helper()
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = dir
-	cmd.Env = append(testTmuxEnv(testutil.SocketDir(t)), env...)
+	stateDir := t.TempDir()
+	cmd.Env = append(testTmuxEnv(testutil.SocketDir(t)), "XDG_CONFIG_HOME="+stateDir)
+	cmd.Env = append(cmd.Env, env...)
 
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {

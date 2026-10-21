@@ -92,7 +92,7 @@ func TestSimultaneousTransferSlowTerminalAndOfflineHost(t *testing.T) {
 	cfg.DialTimeout = 500 * time.Millisecond
 	cfg.HandshakeTimeout = 500 * time.Millisecond
 	connMgr := host.NewConnectionManager(cfg, registry)
-	defer connMgr.Close()
+	defer func() { _ = connMgr.Close() }() //nolint:errcheck // cleanup
 
 	lease1, err := connMgr.Lease(ctx, "online-1")
 	if err != nil {
@@ -158,7 +158,7 @@ func TestSimultaneousTransferSlowTerminalAndOfflineHost(t *testing.T) {
 			case <-slowConsumerStop:
 				return
 			default:
-				_, _ = fmt.Fprintf(proc1, "echo chunk-%d\r\n", i)
+				_, _ = fmt.Fprintf(proc1, "echo chunk-%d\r\n", i) //nolint:errcheck // blast output
 				time.Sleep(5 * time.Millisecond)
 			}
 		}
@@ -248,8 +248,8 @@ func TestSimultaneousTransferSlowTerminalAndOfflineHost(t *testing.T) {
 
 	// 6. Bounded shutdown and process cleanup
 	close(slowConsumerStop)
-	_ = proc1.Close()
-	_ = proc2.Close()
+	_ = proc1.Close() //nolint:errcheck // process cleanup
+	_ = proc2.Close() //nolint:errcheck // process cleanup
 	<-slowConsumerDone
 
 	// Shutdown terminal manager coordination

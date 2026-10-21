@@ -41,6 +41,8 @@ type HostRegistry interface {
 	Get(ctx context.Context, id host.ID) (host.Host, error)
 	Save(ctx context.Context, input host.HostInput, expected host.Revision) (host.Host, error)
 	Delete(ctx context.Context, id host.ID, expected host.Revision) error
+	GetSettings(ctx context.Context) (host.Settings, error)
+	UpdateDefaultHost(ctx context.Context, defaultHostID *host.ID, expected host.Revision) (host.Settings, error)
 }
 
 // RouterConfig holds dependencies and configuration for constructing the HTTP router.
@@ -53,28 +55,39 @@ type RouterConfig struct {
 	MaxFileSize int64
 	// FilesEnabled is published to the browser so it can leave the file manager's
 	// entry point out. It grants nothing: every operation is gated on its own.
-	FilesEnabled  bool
-	WebConfig     config.WebConfig
-	StaticFS      fs.FS
-	Hosts         HostRegistry
-	OnHostChanged func(id host.ID)
-	TrustStore    *host.TrustStore
-	Capabilities  host.CapabilityChecker
-	ProbeDialer   func(ctx context.Context, address string, port uint16, timeout time.Duration) (ssh.PublicKey, error)
+	FilesEnabled            bool
+	FileOperationTimeout    time.Duration
+	WebConfig               config.WebConfig
+	StaticFS                fs.FS
+	Hosts                   HostRegistry
+	OnHostChanged           func(id host.ID)
+	OnHostMetadataChanged   func(id host.ID)
+	OnHostConnectionChanged func(id host.ID)
+	OnHostRemoved           func(id host.ID)
+	TrustStore              *host.TrustStore
+	Capabilities            host.CapabilityChecker
+	ProbeDialer             func(
+		ctx context.Context, address string, port uint16, timeout time.Duration,
+	) (ssh.PublicKey, error)
 }
 
 type handlerState struct {
-	cfg           RouterConfig
-	sessions      SessionService
-	files         FileService
-	tickets       TicketIssuer
-	resolver      host.Resolver
-	runtime       host.Runtime
-	hosts         HostRegistry
-	onHostChanged func(id host.ID)
-	trustStore    *host.TrustStore
-	capabilities  host.CapabilityChecker
-	probeDialer   func(ctx context.Context, address string, port uint16, timeout time.Duration) (ssh.PublicKey, error)
+	cfg                     RouterConfig
+	sessions                SessionService
+	files                   FileService
+	tickets                 TicketIssuer
+	resolver                host.Resolver
+	runtime                 host.Runtime
+	hosts                   HostRegistry
+	onHostChanged           func(id host.ID)
+	onHostMetadataChanged   func(id host.ID)
+	onHostConnectionChanged func(id host.ID)
+	onHostRemoved           func(id host.ID)
+	trustStore              *host.TrustStore
+	capabilities            host.CapabilityChecker
+	probeDialer             func(
+		ctx context.Context, address string, port uint16, timeout time.Duration,
+	) (ssh.PublicKey, error)
 }
 
 // resolve copies handler state for this request; shared routing state is immutable.
@@ -132,6 +145,63 @@ func (s *handlerState) listSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": list})
 }
 
+func (s *handlerState) checkExpectedConnRev(w http.ResponseWriter, r *http.Request, bodyRev *uint64) bool {
+	var (
+		found    bool
+		expected uint64
+	)
+
+	if bodyRev != nil {
+		found = true
+		expected = *bodyRev
+	}
+
+	if q := r.URL.Query().Get("expected_connection_revision"); q != "" {
+		val, err := strconv.ParseUint(q, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return false
+		}
+		if found && val != expected {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return false
+		}
+		found = true
+		expected = val
+	}
+
+	if h := r.Header.Get("X-Expected-Connection-Revision"); h != "" {
+		val, err := strconv.ParseUint(h, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return false
+		}
+		if found && val != expected {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return false
+		}
+		found = true
+		expected = val
+	}
+
+	if found && uint64(s.runtime.Target.ConnectionRevision) != expected {
+		writeError(w, http.StatusConflict, "host_revision_conflict")
+		return false
+	}
+
+	return true
+}
+
+func resolveBodyRevision(snake, camel *uint64) (*uint64, bool) {
+	if snake != nil && camel != nil && *snake != *camel {
+		return nil, false
+	}
+	if snake != nil {
+		return snake, true
+	}
+	return camel, true
+}
+
 func (s *handlerState) createSession(w http.ResponseWriter, r *http.Request) {
 	var ok bool
 	s, ok = s.resolve(w, r, r.PathValue("hostId"))
@@ -142,6 +212,14 @@ func (s *handlerState) createSession(w http.ResponseWriter, r *http.Request) {
 	var req createSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	bodyRev, ok := resolveBodyRevision(req.ExpectedConnectionRevision, req.ExpectedConnRevCamel)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !s.checkExpectedConnRev(w, r, bodyRev) {
 		return
 	}
 	sess, err := s.sessions.CreateSession(r.Context(), req.Name)
@@ -165,6 +243,14 @@ func (s *handlerState) renameSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
+	bodyRev, ok := resolveBodyRevision(req.ExpectedConnectionRevision, req.ExpectedConnRevCamel)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !s.checkExpectedConnRev(w, r, bodyRev) {
+		return
+	}
 	if err := s.sessions.RenameSession(r.Context(), oldName, req.Name); err != nil {
 		mapSessionError(w, err)
 		return
@@ -178,12 +264,15 @@ func (s *handlerState) renameSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *handlerState) killSession(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
 	var ok bool
 	s, ok = s.resolve(w, r, r.PathValue("hostId"))
 	if !ok {
 		return
 	}
-	name := r.PathValue("name")
+	if !s.checkExpectedConnRev(w, r, nil) {
+		return
+	}
 	if err := s.sessions.KillSession(r.Context(), name); err != nil {
 		mapSessionError(w, err)
 		return
@@ -281,15 +370,16 @@ func (s *handlerState) getHost(w http.ResponseWriter, r *http.Request) {
 }
 
 type createHostRequest struct {
-	ID             host.ID          `json:"id"`
-	Name           string           `json:"name"`
-	Address        string           `json:"address"`
-	Port           uint16           `json:"port"`
-	Username       string           `json:"username"`
-	CredentialType string           `json:"credentialType"`
-	Credentials    host.Credentials `json:"credentials"`
-	HostKey        []byte           `json:"hostKey"`
-	ChallengeToken string           `json:"challengeToken"`
+	ID             host.ID             `json:"id"`
+	ConnectionType host.ConnectionType `json:"connectionType"`
+	Name           string              `json:"name"`
+	Address        string              `json:"address"`
+	Port           uint16              `json:"port"`
+	Username       string              `json:"username"`
+	CredentialType string              `json:"credentialType"`
+	Credentials    host.Credentials    `json:"credentials"`
+	HostKey        []byte              `json:"hostKey"`
+	ChallengeToken string              `json:"challengeToken"`
 }
 
 func (s *handlerState) createHost(w http.ResponseWriter, r *http.Request) {
@@ -303,12 +393,16 @@ func (s *handlerState) createHost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if req.ID == host.LocalID {
-		writeError(w, http.StatusBadRequest, "cannot modify local host")
-		return
+	connType := req.ConnectionType
+	if connType == "" {
+		if req.ID == host.LocalID {
+			connType = host.ConnectionTypeLocal
+		} else {
+			connType = host.ConnectionTypeSSH
+		}
 	}
 	hostKey := req.HostKey
-	if req.ChallengeToken != "" && len(hostKey) == 0 && s.trustStore != nil {
+	if connType == host.ConnectionTypeSSH && req.ChallengeToken != "" && len(hostKey) == 0 && s.trustStore != nil {
 		port := req.Port
 		if port == 0 {
 			port = 22
@@ -327,6 +421,7 @@ func (s *handlerState) createHost(w http.ResponseWriter, r *http.Request) {
 	}
 	input := host.HostInput{
 		ID:             req.ID,
+		ConnectionType: connType,
 		Name:           req.Name,
 		Address:        req.Address,
 		Port:           req.Port,
@@ -344,14 +439,15 @@ func (s *handlerState) createHost(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateHostRequest struct {
-	Name           string           `json:"name"`
-	Address        string           `json:"address"`
-	Port           uint16           `json:"port"`
-	Username       string           `json:"username"`
-	CredentialType string           `json:"credentialType"`
-	Credentials    host.Credentials `json:"credentials"`
-	HostKey        []byte           `json:"hostKey"`
-	Revision       host.Revision    `json:"revision"`
+	ConnectionType host.ConnectionType `json:"connectionType,omitempty"`
+	Name           string              `json:"name"`
+	Address        string              `json:"address"`
+	Port           uint16              `json:"port"`
+	Username       string              `json:"username"`
+	CredentialType string              `json:"credentialType"`
+	Credentials    host.Credentials    `json:"credentials"`
+	HostKey        []byte              `json:"hostKey"`
+	Revision       host.Revision       `json:"revision"`
 }
 
 func (s *handlerState) updateHost(w http.ResponseWriter, r *http.Request) {
@@ -360,10 +456,6 @@ func (s *handlerState) updateHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hostID := host.ID(r.PathValue("hostId"))
-	if hostID == host.LocalID {
-		writeError(w, http.StatusBadRequest, "cannot modify local host")
-		return
-	}
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxRequestBodyBytes)
 	var req updateHostRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -382,8 +474,14 @@ func (s *handlerState) updateHost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "revision required")
 		return
 	}
+	old, err := s.hosts.Get(r.Context(), hostID)
+	if err != nil {
+		mapHostError(w, err)
+		return
+	}
 	input := host.HostInput{
 		ID:             hostID,
+		ConnectionType: req.ConnectionType,
 		Name:           req.Name,
 		Address:        req.Address,
 		Port:           req.Port,
@@ -397,8 +495,16 @@ func (s *handlerState) updateHost(w http.ResponseWriter, r *http.Request) {
 		mapHostError(w, err)
 		return
 	}
-	if s.onHostChanged != nil {
-		s.onHostChanged(hostID)
+	if updated.ConnectionRevision != old.ConnectionRevision {
+		if s.onHostConnectionChanged != nil {
+			s.onHostConnectionChanged(hostID)
+		} else if s.onHostChanged != nil {
+			s.onHostChanged(hostID)
+		}
+	} else {
+		if s.onHostMetadataChanged != nil {
+			s.onHostMetadataChanged(hostID)
+		}
 	}
 	writeJSON(w, http.StatusOK, updated)
 }
@@ -409,10 +515,6 @@ func (s *handlerState) deleteHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hostID := host.ID(r.PathValue("hostId"))
-	if hostID == host.LocalID {
-		writeError(w, http.StatusBadRequest, "cannot modify local host")
-		return
-	}
 	var expectedRev host.Revision
 	if revStr := r.URL.Query().Get("revision"); revStr != "" {
 		if v, err := strconv.ParseUint(revStr, 10, 64); err == nil {
@@ -432,10 +534,61 @@ func (s *handlerState) deleteHost(w http.ResponseWriter, r *http.Request) {
 		mapHostError(w, err)
 		return
 	}
-	if s.onHostChanged != nil {
+	if s.onHostRemoved != nil {
+		s.onHostRemoved(hostID)
+	} else if s.onHostChanged != nil {
 		s.onHostChanged(hostID)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type updateHostSettingsRequest struct {
+	DefaultHostID *host.ID      `json:"defaultHostId"`
+	Revision      host.Revision `json:"revision"`
+}
+
+func (s *handlerState) getHostSettings(w http.ResponseWriter, r *http.Request) {
+	if s.hosts == nil {
+		writeError(w, http.StatusNotImplemented, "host_management_disabled")
+		return
+	}
+	settings, err := s.hosts.GetSettings(r.Context())
+	if err != nil {
+		mapHostError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, settings)
+}
+
+func (s *handlerState) updateHostSettings(w http.ResponseWriter, r *http.Request) {
+	if s.hosts == nil {
+		writeError(w, http.StatusNotImplemented, "host_management_disabled")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxRequestBodyBytes)
+	var req updateHostSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	expectedRev := req.Revision
+	if expectedRev == 0 {
+		if revStr := r.URL.Query().Get("revision"); revStr != "" {
+			if v, err := strconv.ParseUint(revStr, 10, 64); err == nil {
+				expectedRev = host.Revision(v)
+			}
+		}
+	}
+	if expectedRev == 0 {
+		writeError(w, http.StatusBadRequest, "revision required")
+		return
+	}
+	settings, err := s.hosts.UpdateDefaultHost(r.Context(), req.DefaultHostID, expectedRev)
+	if err != nil {
+		mapHostError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, settings)
 }
 
 type probeEndpointRequest struct {
@@ -483,13 +636,13 @@ func (s *handlerState) probeHostEndpoint(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	hostID := host.ID(r.PathValue("hostId"))
-	if hostID == host.LocalID {
-		writeError(w, http.StatusBadRequest, "cannot probe local host")
-		return
-	}
 	h, err := s.hosts.Get(r.Context(), hostID)
 	if err != nil {
 		mapHostError(w, err)
+		return
+	}
+	if h.ConnectionType == host.ConnectionTypeLocal {
+		writeError(w, http.StatusBadRequest, "cannot probe local host")
 		return
 	}
 	port := h.Port
@@ -524,7 +677,12 @@ func (s *handlerState) confirmHostTrust(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	hostID := host.ID(r.PathValue("hostId"))
-	if hostID == host.LocalID {
+	h, err := s.hosts.Get(r.Context(), hostID)
+	if err != nil {
+		mapHostError(w, err)
+		return
+	}
+	if h.ConnectionType == host.ConnectionTypeLocal {
 		writeError(w, http.StatusBadRequest, "cannot modify local host")
 		return
 	}
@@ -536,11 +694,6 @@ func (s *handlerState) confirmHostTrust(w http.ResponseWriter, r *http.Request) 
 	}
 	if req.ChallengeToken == "" {
 		writeError(w, http.StatusBadRequest, "challenge token required")
-		return
-	}
-	h, err := s.hosts.Get(r.Context(), hostID)
-	if err != nil {
-		mapHostError(w, err)
 		return
 	}
 	port := h.Port
@@ -573,25 +726,22 @@ func (s *handlerState) confirmHostTrust(w http.ResponseWriter, r *http.Request) 
 		mapHostError(w, err)
 		return
 	}
-	if s.onHostChanged != nil {
-		s.onHostChanged(hostID)
+	if updated.ConnectionRevision != h.ConnectionRevision {
+		if s.onHostConnectionChanged != nil {
+			s.onHostConnectionChanged(hostID)
+		} else if s.onHostChanged != nil {
+			s.onHostChanged(hostID)
+		}
+	} else {
+		if s.onHostMetadataChanged != nil {
+			s.onHostMetadataChanged(hostID)
+		}
 	}
 	writeJSON(w, http.StatusOK, updated)
 }
 
 func (s *handlerState) getHostCapabilities(w http.ResponseWriter, r *http.Request) {
 	hostID := host.ID(r.PathValue("hostId"))
-	if hostID == host.LocalID {
-		writeJSON(w, http.StatusOK, host.HostCapabilities{
-			HostID:   host.LocalID,
-			Revision: host.LocalRevision,
-			Online:   true,
-			SSH:      host.CapabilityStatus{Available: true},
-			Tmux:     host.CapabilityStatus{Available: true},
-			SFTP:     host.CapabilityStatus{Available: false, Error: "not_applicable"},
-		})
-		return
-	}
 	if s.capabilities != nil {
 		caps, err := s.capabilities.CheckCapabilities(r.Context(), hostID)
 		if err != nil {
@@ -610,13 +760,26 @@ func (s *handlerState) getHostCapabilities(w http.ResponseWriter, r *http.Reques
 		mapHostError(w, err)
 		return
 	}
+	const statusUntested = "untested"
+	now := time.Now().UTC()
 	writeJSON(w, http.StatusOK, host.HostCapabilities{
 		HostID:   hostID,
 		Revision: h.Revision,
-		Online:   h.Trusted,
-		SSH:      host.CapabilityStatus{Available: h.Trusted},
-		Tmux:     host.CapabilityStatus{Available: h.Trusted},
-		SFTP:     host.CapabilityStatus{Available: false, Error: "untested"},
+		Online:   false,
+		SSH: host.CapabilityStatus{
+			State: host.CapabilityStateUnknown, Available: false, Error: statusUntested, ObservedAt: now,
+		},
+		Tmux: host.CapabilityStatus{
+			State: host.CapabilityStateUnknown, Available: false, Error: statusUntested, ObservedAt: now,
+		},
+		SFTP: host.CapabilityStatus{
+			State: host.CapabilityStateUnknown, Available: false, Error: statusUntested, ObservedAt: now,
+		},
+		Files: host.FileCapability{
+			State: host.CapabilityStateUnknown, Enabled: false, Error: statusUntested, ObservedAt: now,
+		},
+		ObservedAt: now,
+		Error:      statusUntested,
 	})
 }
 
@@ -626,10 +789,14 @@ func mapHostError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "host_not_found")
 	case errors.Is(err, host.ErrStaleRevision):
 		writeError(w, http.StatusConflict, "host_revision_conflict")
+	case errors.Is(err, host.ErrDuplicateLocal):
+		writeError(w, http.StatusConflict, "duplicate_local_host")
 	case errors.Is(err, host.ErrUnsupported):
 		writeError(w, http.StatusBadRequest, "unsupported_operation")
 	case errors.Is(err, host.ErrUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "host_unavailable")
+	case errors.Is(err, host.ErrOutcomeUnknown):
+		writeError(w, http.StatusBadGateway, "outcome_unknown")
 	default:
 		writeError(w, http.StatusBadRequest, err.Error())
 	}
@@ -667,14 +834,17 @@ func NewRouterWithResolver(
 	}
 
 	state := &handlerState{
-		cfg:           cfg,
-		resolver:      resolver,
-		tickets:       tickets,
-		hosts:         cfg.Hosts,
-		onHostChanged: cfg.OnHostChanged,
-		trustStore:    trustStore,
-		capabilities:  cfg.Capabilities,
-		probeDialer:   probeDialer,
+		cfg:                     cfg,
+		resolver:                resolver,
+		tickets:                 tickets,
+		hosts:                   cfg.Hosts,
+		onHostChanged:           cfg.OnHostChanged,
+		onHostMetadataChanged:   cfg.OnHostMetadataChanged,
+		onHostConnectionChanged: cfg.OnHostConnectionChanged,
+		onHostRemoved:           cfg.OnHostRemoved,
+		trustStore:              trustStore,
+		capabilities:            cfg.Capabilities,
+		probeDialer:             probeDialer,
 	}
 
 	auth := RequireAuth(cfg.Token)
@@ -683,6 +853,9 @@ func NewRouterWithResolver(
 	// Host Administration API (Authenticated)
 	mux.Handle("GET /api/hosts", auth(http.HandlerFunc(state.listHosts)))
 	mux.Handle("POST /api/hosts", auth(http.HandlerFunc(state.createHost)))
+	mux.Handle("GET /api/host-settings", auth(http.HandlerFunc(state.getHostSettings)))
+	mux.Handle("PUT /api/host-settings", auth(http.HandlerFunc(state.updateHostSettings)))
+	mux.Handle("PATCH /api/host-settings", auth(http.HandlerFunc(state.updateHostSettings)))
 	mux.Handle("POST /api/hosts/probe", auth(http.HandlerFunc(state.probeDraftEndpoint)))
 	mux.Handle("GET /api/hosts/{hostId}", auth(http.HandlerFunc(state.getHost)))
 	mux.Handle("PUT /api/hosts/{hostId}", auth(http.HandlerFunc(state.updateHost)))

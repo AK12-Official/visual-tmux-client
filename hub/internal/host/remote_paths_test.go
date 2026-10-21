@@ -64,8 +64,14 @@ func TestValidateRemotePathShape(t *testing.T) {
 }
 
 func parseTestPort(addr string) uint16 {
-	_, portStr, _ := net.SplitHostPort(addr)
-	p, _ := strconv.ParseUint(portStr, 10, 16)
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0
+	}
+	p, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		return 0
+	}
 	return uint16(p)
 }
 
@@ -85,7 +91,10 @@ func TestCanonicalizeRemotePathSymlinkToPseudoFilesystem(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if host.IsBlockedRemotePath(tc.resolved) != tc.wantBlock {
-				t.Fatalf("IsBlockedRemotePath(%q) = %v, want %v", tc.resolved, host.IsBlockedRemotePath(tc.resolved), tc.wantBlock)
+				t.Fatalf(
+					"IsBlockedRemotePath(%q) = %v, want %v",
+					tc.resolved, host.IsBlockedRemotePath(tc.resolved), tc.wantBlock,
+				)
 			}
 		})
 	}
@@ -136,7 +145,7 @@ func TestRemoteCapabilitiesAccountBoundBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }() //nolint:errcheck // cleanup
 
 	hostID := host.ID("remote-boundary")
 	_, err = r.Save(ctx, host.HostInput{
@@ -154,7 +163,7 @@ func TestRemoteCapabilitiesAccountBoundBoundary(t *testing.T) {
 	}
 
 	mgr := host.NewConnectionManager(host.DefaultConnectionConfig(), r)
-	defer mgr.Close()
+	defer func() { _ = mgr.Close() }() //nolint:errcheck // cleanup
 
 	caps, err := mgr.CheckCapabilities(ctx, hostID)
 	if err != nil {

@@ -564,3 +564,77 @@ func TestGhostClientCleanup_OnWriteFailure(t *testing.T) {
 		t.Errorf("expected process to be detached on write failure")
 	}
 }
+
+func TestManagerCloseHost(t *testing.T) {
+	mgr := NewManager(time.Second)
+
+	peerA1 := newFakePeer()
+	procA1 := newFakeProcess()
+	attA1 := NewAttachment(procA1, peerA1, DefaultOptions(), "sess-a1", 80, 24, mgr.Untrack, nil).WithHost("host-a")
+	if err := mgr.Register(attA1); err != nil {
+		t.Fatal(err)
+	}
+	attA1.Start()
+
+	peerA2 := newFakePeer()
+	procA2 := newFakeProcess()
+	attA2 := NewAttachment(procA2, peerA2, DefaultOptions(), "sess-a2", 80, 24, mgr.Untrack, nil).WithHost("host-a")
+	if err := mgr.Register(attA2); err != nil {
+		t.Fatal(err)
+	}
+	attA2.Start()
+
+	peerB := newFakePeer()
+	procB := newFakeProcess()
+	attB := NewAttachment(procB, peerB, DefaultOptions(), "sess-b", 80, 24, mgr.Untrack, nil).WithHost("host-b")
+	if err := mgr.Register(attB); err != nil {
+		t.Fatal(err)
+	}
+	attB.Start()
+
+	if mgr.ActiveCount() != 3 {
+		t.Fatalf("expected 3 attachments, got %d", mgr.ActiveCount())
+	}
+
+	// Close host-a attachments
+	mgr.CloseHost("host-a")
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && mgr.ActiveCount() > 1 {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if mgr.ActiveCount() != 1 {
+		t.Fatalf("expected 1 remaining attachment (for host-b), got %d", mgr.ActiveCount())
+	}
+
+	procA1.mu.Lock()
+	a1Closed := procA1.closed
+	procA1.mu.Unlock()
+	if !a1Closed {
+		t.Fatal("expected procA1 to be detached")
+	}
+
+	procA2.mu.Lock()
+	a2Closed := procA2.closed
+	procA2.mu.Unlock()
+	if !a2Closed {
+		t.Fatal("expected procA2 to be detached")
+	}
+
+	procB.mu.Lock()
+	bClosed := procB.closed
+	procB.mu.Unlock()
+	if bClosed {
+		t.Fatal("host-b process was detached prematurely")
+	}
+
+	// Close host-b attachments
+	mgr.CloseHost("host-b")
+	for time.Now().Before(deadline) && mgr.ActiveCount() > 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if mgr.ActiveCount() != 0 {
+		t.Fatalf("expected 0 remaining attachments, got %d", mgr.ActiveCount())
+	}
+}

@@ -31,17 +31,25 @@ func TestTicketLookupPreservesFailure(t *testing.T) {
 		code   string
 	}{
 		{"absent", session.ErrNotFound, http.StatusNotFound, "session_not_found"},
-		{"unreachable", &host.Error{Code: host.ErrUnavailable, Cause: errors.New("secret diagnostic")}, http.StatusServiceUnavailable, "host_unavailable"},
+		{
+			"unreachable",
+			&host.Error{Code: host.ErrUnavailable, Cause: errors.New("secret diagnostic")},
+			http.StatusServiceUnavailable,
+			"host_unavailable",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tickets := auth.NewTicketStore(time.Minute, nil)
 			router := NewRouter(RouterConfig{Token: "token"}, &failedLookup{err: tc.err}, nil, tickets, nil)
-			req := httptest.NewRequest(http.MethodPost, "/api/ws-ticket", strings.NewReader(`{"hostId":"local","session":"dev"}`))
+			body := `{"hostId":"local","session":"dev"}`
+			req := httptest.NewRequest(http.MethodPost, "/api/ws-ticket", strings.NewReader(body))
 			req.Header.Set("Authorization", "Bearer token")
 			w := httptest.NewRecorder()
 			router.ServeHTTP(w, req)
-			if w.Code != tc.status || !strings.Contains(w.Body.String(), tc.code) || strings.Contains(w.Body.String(), "secret") || tickets.Len() != 0 {
-				t.Fatalf("ticket lookup: status=%d body=%s tickets=%d", w.Code, w.Body.String(), tickets.Len())
+			respStr := w.Body.String()
+			if w.Code != tc.status || !strings.Contains(respStr, tc.code) ||
+				strings.Contains(respStr, "secret") || tickets.Len() != 0 {
+				t.Fatalf("ticket lookup: status=%d body=%s tickets=%d", w.Code, respStr, tickets.Len())
 			}
 		})
 	}

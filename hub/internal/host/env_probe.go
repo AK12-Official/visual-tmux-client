@@ -29,7 +29,7 @@ func ProbeRemoteEnvironment(ctx context.Context, client *ssh.Client) (*RemoteEnv
 	if err != nil {
 		return nil, fmt.Errorf("open ssh session for environment probe: %w", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }() //nolint:errcheck // best-effort session cleanup
 
 	var stdout, stderr bytes.Buffer
 	session.Stdout = &stdout
@@ -44,8 +44,9 @@ func ProbeRemoteEnvironment(ctx context.Context, client *ssh.Client) (*RemoteEnv
 		return nil, fmt.Errorf("%w: probe failed: %s (%w)", ErrUnsupportedEnvironment, errOutput, err)
 	}
 
+	const expectedProbeParts = 3
 	parts := strings.Split(stdout.String(), "---ENV-SEP---")
-	if len(parts) < 3 {
+	if len(parts) < expectedProbeParts {
 		return nil, fmt.Errorf("%w: invalid probe output structure", ErrUnsupportedEnvironment)
 	}
 

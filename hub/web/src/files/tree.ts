@@ -5,6 +5,8 @@ import { listDirectory, type Entry } from './api'
 
 /** TreeState holds what has been fetched so far, keyed by directory path. */
 export interface TreeState {
+  hostId: string
+  connectionRevision?: number
   children: Map<string, Entry[]>
   truncated: Set<string>
   expanded: Set<string>
@@ -21,8 +23,26 @@ export interface TreeState {
   loads: Map<string, number>
 }
 
-export function createTreeState(): TreeState {
-  return { children: new Map(), truncated: new Set(), expanded: new Set(), loads: new Map() }
+let nextLoadTicket = 0
+
+export function createTreeState(hostId = 'local', connectionRevision?: number): TreeState {
+  return {
+    hostId,
+    connectionRevision,
+    children: new Map(),
+    truncated: new Set(),
+    expanded: new Set(),
+    loads: new Map(),
+  }
+}
+
+export function resetTreeState(state: TreeState, hostId = 'local', connectionRevision?: number): void {
+  state.hostId = hostId
+  state.connectionRevision = connectionRevision
+  state.children.clear()
+  state.truncated.clear()
+  state.expanded.clear()
+  state.loads.clear()
 }
 
 export function cachedChildren(state: TreeState, path: string): Entry[] | undefined {
@@ -131,7 +151,7 @@ function join(dir: string, name: string): string {
 /** issue records that a wait for a directory's listing is beginning, and returns
  * the ticket that wait has to present to write it. */
 function issue(state: TreeState, path: string): number {
-  const ticket = (state.loads.get(path) ?? 0) + 1
+  const ticket = ++nextLoadTicket
   state.loads.set(path, ticket)
   return ticket
 }
@@ -165,15 +185,31 @@ export async function loadDirectory(
   path: string,
   force = false,
   hostId = 'local',
+  connectionRevision?: number,
 ): Promise<Entry[]> {
   if (!force) {
-    const cached = state.children.get(path)
-    if (cached) return cached
+    if (
+      state.hostId === hostId &&
+      (connectionRevision === undefined ||
+        state.connectionRevision === undefined ||
+        state.connectionRevision === connectionRevision)
+    ) {
+      const cached = state.children.get(path)
+      if (cached) return cached
+    }
   }
   // Issued after the cache check, because a call that answers from the cache
   // makes no claim about the disk and must not retire a wait that does.
   const ticket = issue(state, path)
   const result = await listDirectory(path, hostId)
+  if (state.hostId !== hostId) return result.entries
+  if (
+    connectionRevision !== undefined &&
+    state.connectionRevision !== undefined &&
+    state.connectionRevision !== connectionRevision
+  ) {
+    return result.entries
+  }
   if (state.loads.get(path) !== ticket) return result.entries
   state.children.set(path, result.entries)
   if (result.truncated) {

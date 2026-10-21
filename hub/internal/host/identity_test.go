@@ -10,7 +10,14 @@ import (
 )
 
 func TestFailureCategoriesStayDistinct(t *testing.T) {
-	categories := []error{host.ErrNotFound, session.ErrNotFound, host.ErrUnavailable, host.ErrUnsupported, host.ErrOutcomeUnknown, host.ErrStaleRevision}
+	categories := []error{
+		host.ErrNotFound,
+		session.ErrNotFound,
+		host.ErrUnavailable,
+		host.ErrUnsupported,
+		host.ErrOutcomeUnknown,
+		host.ErrStaleRevision,
+	}
 	for _, category := range categories {
 		failure := category
 		var code host.ErrorCode

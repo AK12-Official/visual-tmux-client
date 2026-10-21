@@ -51,8 +51,20 @@ type Resolver interface {
 type localResolver struct{ runtime Runtime }
 
 // NewLocalResolver exposes only the immutable built-in local host.
+// NewLocalResolver exposes only the immutable built-in local host.
 func NewLocalResolver(s Sessions, f Files, p terminal.ProcessFactory) Resolver {
-	return &localResolver{runtime: Runtime{Target: Target{HostID: LocalID, Revision: LocalRevision, ConnectionRevision: LocalRevision}, Sessions: s, Files: f, Processes: p}}
+	return &localResolver{
+		runtime: Runtime{
+			Target: Target{
+				HostID:             LocalID,
+				Revision:           LocalRevision,
+				ConnectionRevision: LocalRevision,
+			},
+			Sessions:  s,
+			Files:     f,
+			Processes: p,
+		},
+	}
 }
 
 func (r *localResolver) Resolve(ctx context.Context, id ID) (Runtime, error) {
@@ -80,26 +92,59 @@ func (r *multiHostResolver) Resolve(ctx context.Context, id ID) (Runtime, error)
 	if err := ctx.Err(); err != nil {
 		return Runtime{}, err
 	}
-	if id == "" || id == LocalID {
-		return r.local, nil
-	}
-	if r.reg == nil || r.connMgr == nil {
+	if id == "" {
 		return Runtime{}, &Error{Target: Target{HostID: id}, Code: ErrNotFound}
 	}
-	if _, err := r.reg.Get(ctx, id); err != nil {
+	if r.reg == nil {
+		return Runtime{}, &Error{Target: Target{HostID: id}, Code: ErrNotFound}
+	}
+	h, err := r.reg.Get(ctx, id)
+	if err != nil {
 		return Runtime{}, &Error{Target: Target{HostID: id}, Code: ErrNotFound, Cause: err}
 	}
-	lease, err := r.connMgr.Lease(ctx, id)
-	if err != nil {
-		return Runtime{}, err
+	switch h.ConnectionType {
+	case ConnectionTypeLocal:
+		return Runtime{
+			Target: Target{
+				HostID:             h.ID,
+				Revision:           h.Revision,
+				ConnectionRevision: h.ConnectionRevision,
+			},
+			Sessions:  r.local.Sessions,
+			Files:     r.local.Files,
+			Processes: r.local.Processes,
+		}, nil
+	case ConnectionTypeSSH:
+		if r.connMgr == nil {
+			target := Target{
+				HostID:             id,
+				Revision:           h.Revision,
+				ConnectionRevision: h.ConnectionRevision,
+			}
+			return Runtime{}, &Error{Target: target, Code: ErrUnavailable}
+		}
+		lease, err := r.connMgr.Lease(ctx, id)
+		if err != nil {
+			return Runtime{}, err
+		}
+		sessions := NewRemoteSessionService(lease, "", "tmux")
+		processes := NewRemoteProcessFactory(lease, "tmux")
+		fileService := NewRemoteFileService(lease, 0, 0, "")
+		fileService.SetRegistry(r.reg)
+		return Runtime{
+			Target:    lease.Target,
+			Sessions:  sessions,
+			Files:     fileService,
+			Processes: processes,
+		}, nil
+	default:
+		return Runtime{}, &Error{
+			Target: Target{
+				HostID:             h.ID,
+				Revision:           h.Revision,
+				ConnectionRevision: h.ConnectionRevision,
+			},
+			Code: ErrUnsupported,
+		}
 	}
-	sessions := NewRemoteSessionService(lease, "", "tmux")
-	processes := NewRemoteProcessFactory(lease, "tmux")
-	fileService := NewRemoteFileService(lease, 0, 0, "")
-	return Runtime{
-		Target:    lease.Target,
-		Sessions:  sessions,
-		Files:     fileService,
-		Processes: processes,
-	}, nil
 }

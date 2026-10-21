@@ -88,11 +88,15 @@ type apiError struct {
 }
 
 type createSessionRequest struct {
-	Name string `json:"name"`
+	Name                       string  `json:"name"`
+	ExpectedConnectionRevision *uint64 `json:"expected_connection_revision"`
+	ExpectedConnRevCamel       *uint64 `json:"expectedConnectionRevision"`
 }
 
 type renameSessionRequest struct {
-	Name string `json:"name"`
+	Name                       string  `json:"name"`
+	ExpectedConnectionRevision *uint64 `json:"expected_connection_revision"`
+	ExpectedConnRevCamel       *uint64 `json:"expectedConnectionRevision"`
 }
 
 type wsTicketRequest struct {
@@ -115,18 +119,24 @@ const (
 )
 
 type createFileRequest struct {
-	Path string `json:"path"`
-	Kind string `json:"kind"`
+	Path                       string  `json:"path"`
+	Kind                       string  `json:"kind"`
+	ExpectedConnectionRevision *uint64 `json:"expected_connection_revision,omitempty"`
+	ExpectedConnRevCamel       *uint64 `json:"expectedConnectionRevision,omitempty"`
 }
 
 type renameFileRequest struct {
-	Path    string `json:"path"`
-	NewPath string `json:"new_path"`
+	Path                       string  `json:"path"`
+	NewPath                    string  `json:"new_path"`
+	ExpectedConnectionRevision *uint64 `json:"expected_connection_revision,omitempty"`
+	ExpectedConnRevCamel       *uint64 `json:"expectedConnectionRevision,omitempty"`
 }
 
 type deleteFileRequest struct {
-	Path      string `json:"path"`
-	Recursive bool   `json:"recursive"`
+	Path                       string  `json:"path"`
+	Recursive                  bool    `json:"recursive"`
+	ExpectedConnectionRevision *uint64 `json:"expected_connection_revision,omitempty"`
+	ExpectedConnRevCamel       *uint64 `json:"expectedConnectionRevision,omitempty"`
 }
 
 // writeFileResponse returns the target's resulting modification time, so the

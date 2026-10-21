@@ -59,14 +59,14 @@ func TestDisposableSSHFixturePasswordAuthAndTmuxIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ssh dial: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }() //nolint:errcheck // test cleanup
 
 	// 1. Run a tmux session command via SSH exec and verify environment isolation
 	sess, err := client.NewSession()
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
-	defer sess.Close()
+	defer func() { _ = sess.Close() }() //nolint:errcheck // test cleanup
 
 	var out bytes.Buffer
 	sess.Stdout = &out
@@ -80,7 +80,7 @@ func TestDisposableSSHFixturePasswordAuthAndTmuxIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new session 2: %v", err)
 	}
-	defer sess2.Close()
+	defer func() { _ = sess2.Close() }() //nolint:errcheck // test cleanup
 	var listOut bytes.Buffer
 	sess2.Stdout = &listOut
 	if err := sess2.Run("tmux list-sessions -F '#{session_name}'"); err != nil {
@@ -96,7 +96,7 @@ func TestDisposableSSHFixturePasswordAuthAndTmuxIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new session 3: %v", err)
 	}
-	defer sess3.Close()
+	defer func() { _ = sess3.Close() }() //nolint:errcheck // test cleanup
 	var envOut bytes.Buffer
 	sess3.Stdout = &envOut
 	if err := sess3.Run("env"); err != nil {
@@ -114,7 +114,7 @@ func TestDisposableSSHFixturePasswordAuthAndTmuxIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sftp client: %v", err)
 	}
-	defer sftpClient.Close()
+	defer func() { _ = sftpClient.Close() }() //nolint:errcheck // test cleanup
 
 	f, err := sftpClient.Create("hello.txt")
 	if err != nil {
@@ -123,7 +123,7 @@ func TestDisposableSSHFixturePasswordAuthAndTmuxIsolation(t *testing.T) {
 	if _, err := f.Write([]byte("disposable test content")); err != nil {
 		t.Fatalf("sftp write: %v", err)
 	}
-	_ = f.Close()
+	_ = f.Close() //nolint:errcheck // test cleanup
 
 	// Verify file landed in server.RootDir
 	diskPath := filepath.Join(server.RootDir, "hello.txt")
@@ -164,7 +164,7 @@ func TestDisposableSSHFixturePrivateKeyAndPTY(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ssh dial with private key: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }() //nolint:errcheck // test cleanup
 
 	// Create a tmux session first
 	setupSess, err := client.NewSession()
@@ -174,14 +174,14 @@ func TestDisposableSSHFixturePrivateKeyAndPTY(t *testing.T) {
 	if err := setupSess.Run("tmux new-session -d -s pty-sess 'echo READY; sleep 60'"); err != nil {
 		t.Fatalf("new session: %v", err)
 	}
-	_ = setupSess.Close()
+	_ = setupSess.Close() //nolint:errcheck // test cleanup
 
 	// Attach with PTY
 	ptySess, err := client.NewSession()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ptySess.Close()
+	defer func() { _ = ptySess.Close() }() //nolint:errcheck // test cleanup
 
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          0,
@@ -216,12 +216,14 @@ func TestDisposableSSHFixturePrivateKeyAndPTY(t *testing.T) {
 
 	// Detach cleanly
 	// In tmux, Ctrl+b d detaches: \x02 then d
-	_, _ = stdinPipe.Write([]byte{2, 'd'})
+	if _, err := stdinPipe.Write([]byte{2, 'd'}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Window resize test
 	if err := ptySess.WindowChange(30, 100); err != nil {
 		t.Logf("window change notice: %v", err)
 	}
 
-	_ = ptySess.Close()
+	_ = ptySess.Close() //nolint:errcheck // test cleanup
 }

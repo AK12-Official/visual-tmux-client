@@ -147,6 +147,19 @@ func (s *Service) Enabled() bool {
 	return s.enabled
 }
 
+// Boundary returns the confinement boundary: "root_confined" if explicit roots are configured, or "account_bound".
+func (s *Service) Boundary() string {
+	if s.roots != nil && s.roots.HasRoots() {
+		return "root_confined"
+	}
+	return "account_bound"
+}
+
+// RootHandleConfinement returns true if operations are confined through open root descriptors.
+func (s *Service) RootHandleConfinement() bool {
+	return s.roots != nil && s.roots.HasRoots()
+}
+
 // Close gives back the descriptors the configured roots are held through.
 //
 // A hub holds one per root for its lifetime, so this is the end of that

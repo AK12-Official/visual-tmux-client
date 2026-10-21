@@ -52,7 +52,7 @@ func TestSFTPOpenSSHReplacementAndFaultInjection(t *testing.T) {
 	}
 
 	connMgr := host.NewConnectionManager(host.DefaultConnectionConfig(), registry)
-	defer connMgr.Close()
+	defer connMgr.Close() //nolint:errcheck // test cleanup
 
 	lease, err := connMgr.Lease(ctx, hostID)
 	if err != nil {
@@ -76,13 +76,15 @@ func TestSFTPOpenSSHReplacementAndFaultInjection(t *testing.T) {
 	// 2. Real OpenSSH SFTP atomic replacement test
 	fileSvc := host.NewRemoteFileService(lease, 1024*1024, 100, t.TempDir())
 	targetPath := filepath.Join(server.RootDir, "atomic_replace.txt")
-	_ = os.WriteFile(targetPath, []byte("initial version"), 0644)
+	if err := os.WriteFile(targetPath, []byte("initial version"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	readRes, err := fileSvc.Read(ctx, targetPath)
 	if err != nil {
 		t.Fatalf("read target: %v", err)
 	}
-	_ = readRes.File.Close()
+	_ = readRes.File.Close() //nolint:errcheck // test cleanup
 
 	precondition := &files.ExpectedMtime{
 		Millis: readRes.Mtime,
@@ -97,7 +99,10 @@ func TestSFTPOpenSSHReplacementAndFaultInjection(t *testing.T) {
 		t.Fatal("expected non-zero write mtime after atomic replace")
 	}
 
-	replacedData, _ := os.ReadFile(targetPath)
+	replacedData, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(replacedData) != "replaced version" {
 		t.Fatalf("expected 'replaced version', got %q", string(replacedData))
 	}
@@ -114,7 +119,9 @@ func TestSFTPOpenSSHReplacementAndFaultInjection(t *testing.T) {
 	})
 
 	unsupportedTarget := filepath.Join(server.RootDir, "preserve_me.txt")
-	_ = os.WriteFile(unsupportedTarget, []byte("vital pristine content"), 0644)
+	if err := os.WriteFile(unsupportedTarget, []byte("vital pristine content"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err = fileSvc.Write(ctx, unsupportedTarget, bytes.NewReader([]byte("should fail")), 11, nil, true)
 	if err == nil {
@@ -125,7 +132,10 @@ func TestSFTPOpenSSHReplacementAndFaultInjection(t *testing.T) {
 	}
 
 	// Verify original file was preserved intact (never truncated or deleted)
-	vitalData, _ := os.ReadFile(unsupportedTarget)
+	vitalData, err := os.ReadFile(unsupportedTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(vitalData) != "vital pristine content" {
 		t.Fatalf("vital file modified on unsupported server: %q", string(vitalData))
 	}
@@ -136,7 +146,10 @@ func TestSFTPOpenSSHReplacementAndFaultInjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating brand new file on unsupported server should succeed: %v", err)
 	}
-	brandNewData, _ := os.ReadFile(newFileOnUnsupported)
+	brandNewData, err := os.ReadFile(newFileOnUnsupported)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(brandNewData) != "brand new" {
 		t.Fatalf("unexpected new file content: %q", string(brandNewData))
 	}
@@ -152,12 +165,14 @@ func TestSFTPOpenSSHReplacementAndFaultInjection(t *testing.T) {
 	})
 	fileSvc.SetBeforePosixRenameHookForTesting(func() {
 		if capturedSSH != nil {
-			_ = capturedSSH.Close()
+			_ = capturedSSH.Close() //nolint:errcheck // injected fault
 		}
 	})
 
 	commitDropTarget := filepath.Join(server.RootDir, "drop_at_commit.txt")
-	_ = os.WriteFile(commitDropTarget, []byte("base data"), 0644)
+	if err := os.WriteFile(commitDropTarget, []byte("base data"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err = fileSvc.Write(ctx, commitDropTarget, bytes.NewReader([]byte("commit drop data")), 16, nil, true)
 	if err == nil {
@@ -174,17 +189,26 @@ func TestSFTPOpenSSHReplacementAndFaultInjection(t *testing.T) {
 	// 5. Coarse Metadata and same-time content conflict detection
 	// Simulate an observation where subsecond nanoseconds are not available (Nanos: nil, Millis only)
 	coarseTarget := filepath.Join(server.RootDir, "coarse_file.txt")
-	_ = os.WriteFile(coarseTarget, []byte("coarse origin text"), 0644)
+	if err := os.WriteFile(coarseTarget, []byte("coarse origin text"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
-	coarseStat, _ := os.Stat(coarseTarget)
+	coarseStat, err := os.Stat(coarseTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
 	coarsePrecondition := &files.ExpectedMtime{
 		Millis: coarseStat.ModTime().UnixMilli(),
 		Nanos:  nil, // Coarse timestamp
 	}
 
 	// Content modified on disk concurrently while timestamp is artificially kept at the same millis
-	_ = os.WriteFile(coarseTarget, []byte("concurrent change!"), 0644)
-	_ = os.Chtimes(coarseTarget, coarseStat.ModTime(), coarseStat.ModTime())
+	if err := os.WriteFile(coarseTarget, []byte("concurrent change!"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(coarseTarget, coarseStat.ModTime(), coarseStat.ModTime()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Write should detect same-mtime content modification via digest comparison and reject with ErrConflict
 	_, err = fileSvc.Write(ctx, coarseTarget, bytes.NewReader([]byte("my new text")), 11, coarsePrecondition, true)

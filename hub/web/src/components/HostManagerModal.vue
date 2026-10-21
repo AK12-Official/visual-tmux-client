@@ -4,14 +4,19 @@ import {
   confirmHostTrust,
   createHost,
   deleteHost,
+  getHostSettings,
   listHosts,
   probeDraftHost,
   probeExistingHost,
   testHostCapabilities,
   updateHost,
+  updateHostSettings,
+  type CapabilityStatus,
+  type ConnectionType,
   type HostCapabilities,
   type HostInput,
   type HostItem,
+  type HostSettings,
   type ProbeResult,
 } from '../api'
 import { notify } from '../toasts'
@@ -25,6 +30,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'hosts-changed'): void
+  (e: 'default-changed', id: string | null): void
   (e: 'host-deleted', id: string): void
   (e: 'select-host', id: string): void
 }>()
@@ -37,12 +43,15 @@ type ViewMode = 'list' | 'add' | 'edit'
 const view = ref<ViewMode>('list')
 
 const hosts = ref<HostItem[]>([])
+const hostSettings = ref<HostSettings | null>(null)
+const settingDefault = ref<string | null>(null)
 const loading = ref(false)
 const listError = ref('')
 const activeCapabilities = ref<Record<string, HostCapabilities | 'testing' | null>>({})
 
 // Form state
 const formId = ref('')
+const formConnectionType = ref<ConnectionType>('ssh')
 const formName = ref('')
 const formAddress = ref('')
 const formPort = ref(22)
@@ -59,6 +68,7 @@ const formSubmitting = ref(false)
 
 // Probing state
 const probing = ref(false)
+const confirmingTrust = ref(false)
 const probedResult = ref<ProbeResult | null>(null)
 const probeError = ref('')
 const trustConfirmed = ref(false)
@@ -67,11 +77,55 @@ const trustConfirmed = ref(false)
 const confirmingDeleteHost = ref<HostItem | null>(null)
 const deleteLoading = ref(false)
 
+function isLocal(item: HostItem): boolean {
+  return item.connectionType === 'local' || (!item.connectionType && item.id === 'local')
+}
+
+function isCapAvailable(cap: CapabilityStatus | boolean | undefined): boolean {
+  if (typeof cap === 'boolean') return cap
+  if (!cap) return false
+  return cap.state === 'available' || cap.available === true
+}
+
+function isCapNotApplicable(cap: CapabilityStatus | boolean | undefined): boolean {
+  if (typeof cap === 'boolean' || !cap) return false
+  return cap.state === 'not_applicable'
+}
+
+function getCapPillClass(cap: CapabilityStatus | boolean | undefined): string {
+  if (isCapNotApplicable(cap)) return 'host-cap-pill--na'
+  return isCapAvailable(cap) ? 'host-cap-pill--ok' : 'host-cap-pill--fail'
+}
+
+function getCapLabel(cap: CapabilityStatus | boolean | undefined, kind: 'SSH' | 'tmux' | 'SFTP'): string {
+  if (isCapNotApplicable(cap)) return 'N/A'
+  if (kind === 'SSH') {
+    return isCapAvailable(cap) ? 'Connected' : 'Offline'
+  }
+  if (kind === 'tmux') {
+    return isCapAvailable(cap) ? 'Available' : 'Missing'
+  }
+  return isCapAvailable(cap) ? 'Available' : 'Unavailable'
+}
+
+function shouldShowAtomicOverwrite(caps: HostCapabilities): boolean {
+  if (caps.sftp !== undefined) {
+    if (isCapNotApplicable(caps.sftp)) return false
+    return isCapAvailable(caps.sftp)
+  }
+  return false
+}
+
 async function fetchHosts(): Promise<void> {
   loading.value = true
   listError.value = ''
   try {
-    hosts.value = await listHosts()
+    const [fetchedHosts, fetchedSettings] = await Promise.all([
+      listHosts(),
+      getHostSettings().catch(() => null),
+    ])
+    hosts.value = fetchedHosts
+    hostSettings.value = fetchedSettings ?? { defaultHostId: null, revision: 1 }
     emit('hosts-changed')
   } catch (err) {
     listError.value = err instanceof Error ? err.message : String(err)
@@ -80,8 +134,24 @@ async function fetchHosts(): Promise<void> {
   }
 }
 
+async function onSetDefault(item: HostItem): Promise<void> {
+  if (!hostSettings.value) return
+  settingDefault.value = item.id
+  try {
+    const updated = await updateHostSettings(item.id, hostSettings.value.revision)
+    hostSettings.value = updated
+    notify('info', `Host "${item.name}" set as default`)
+    emit('default-changed', item.id)
+  } catch (err) {
+    notify('error', `Failed to set default host: ${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    settingDefault.value = null
+  }
+}
+
 function resetForm(): void {
   formId.value = ''
+  formConnectionType.value = 'ssh'
   formName.value = ''
   formAddress.value = ''
   formPort.value = 22
@@ -109,6 +179,7 @@ function startAdd(): void {
 function startEdit(item: HostItem): void {
   resetForm()
   formId.value = item.id
+  formConnectionType.value = item.connectionType ?? (item.id === 'local' ? 'local' : 'ssh')
   formName.value = item.name
   formAddress.value = item.address ?? ''
   formPort.value = item.port ?? 22
@@ -128,6 +199,7 @@ function cancelForm(): void {
 }
 
 async function onProbe(): Promise<void> {
+  if (confirmingTrust.value || formSubmitting.value) return
   probeError.value = ''
   probedResult.value = null
   trustConfirmed.value = false
@@ -162,16 +234,31 @@ async function onProbe(): Promise<void> {
 }
 
 async function onConfirmTrust(): Promise<void> {
-  if (!probedResult.value) return
-  trustConfirmed.value = true
+  if (!probedResult.value || confirmingTrust.value || formSubmitting.value) return
+  probeError.value = ''
   if (view.value === 'edit' && formId.value && formChallengeToken.value) {
+    const hostId = formId.value
+    const challengeToken = formChallengeToken.value
+    confirmingTrust.value = true
     try {
-      await confirmHostTrust(formId.value, formChallengeToken.value)
+      const updated = await confirmHostTrust(hostId, challengeToken)
+      // Trust is a persisted edit: subsequent saves must use its new revision.
+      // Do not replace the user's unsaved fields with the returned host record.
+      if (formId.value !== hostId || formChallengeToken.value !== challengeToken) return
+      formEditRevision.value = updated.revision
+      formChallengeToken.value = '' // The server has consumed this challenge.
+      trustConfirmed.value = true
       notify('info', 'Host fingerprint trusted')
       await fetchHosts()
     } catch (err) {
-      probeError.value = err instanceof Error ? err.message : String(err)
+      if (formId.value === hostId && formChallengeToken.value === challengeToken) {
+        probeError.value = err instanceof Error ? err.message : String(err)
+      }
+    } finally {
+      confirmingTrust.value = false
     }
+  } else {
+    trustConfirmed.value = true
   }
 }
 
@@ -228,7 +315,7 @@ function validateForm(): boolean {
       errors.id = 'Host ID is required'
     } else if (!/^[a-z0-9][a-z0-9_-]*$/.test(trimmedId)) {
       errors.id = 'Host ID must start with a lowercase letter or digit and contain only lowercase letters, digits, dashes or underscores'
-    } else if (trimmedId === 'local') {
+    } else if (formConnectionType.value === 'ssh' && trimmedId === 'local') {
       errors.id = 'Host ID "local" is reserved for the built-in host'
     }
   }
@@ -238,28 +325,30 @@ function validateForm(): boolean {
     errors.name = 'Host name is required'
   }
 
-  const trimmedAddress = formAddress.value.trim()
-  if (!trimmedAddress) {
-    errors.address = 'Host address is required'
-  }
-
-  const port = Number(formPort.value)
-  if (!port || port < 1 || port > 65535) {
-    errors.port = 'Port must be between 1 and 65535'
-  }
-
-  const trimmedUsername = formUsername.value.trim()
-  if (!trimmedUsername) {
-    errors.username = 'Username is required'
-  }
-
-  // Authentication validation
-  if (view.value === 'add') {
-    if (formCredentialType.value === 'password' && !formPassword.value) {
-      errors.password = 'Password is required for new host'
+  if (formConnectionType.value === 'ssh') {
+    const trimmedAddress = formAddress.value.trim()
+    if (!trimmedAddress) {
+      errors.address = 'Host address is required'
     }
-    if (formCredentialType.value === 'private_key' && !formPrivateKey.value.trim()) {
-      errors.privateKey = 'Private key is required for new host'
+
+    const port = Number(formPort.value)
+    if (!port || port < 1 || port > 65535) {
+      errors.port = 'Port must be between 1 and 65535'
+    }
+
+    const trimmedUsername = formUsername.value.trim()
+    if (!trimmedUsername) {
+      errors.username = 'Username is required'
+    }
+
+    // Authentication validation
+    if (view.value === 'add') {
+      if (formCredentialType.value === 'password' && !formPassword.value) {
+        errors.password = 'Password is required for new host'
+      }
+      if (formCredentialType.value === 'private_key' && !formPrivateKey.value.trim()) {
+        errors.privateKey = 'Private key is required for new host'
+      }
     }
   }
 
@@ -268,36 +357,42 @@ function validateForm(): boolean {
 }
 
 async function onSubmit(): Promise<void> {
+  if (confirmingTrust.value || formSubmitting.value) return
   formGeneralError.value = ''
   if (!validateForm()) return
 
   formSubmitting.value = true
   try {
+    const isConnLocal = formConnectionType.value === 'local'
     const input: HostInput = {
       id: formId.value.trim(),
       name: formName.value.trim(),
-      address: formAddress.value.trim(),
-      port: Number(formPort.value),
-      username: formUsername.value.trim(),
-      credentialType: formCredentialType.value,
+      connectionType: formConnectionType.value,
     }
 
-    if (formChallengeToken.value && trustConfirmed.value) {
-      input.challengeToken = formChallengeToken.value
-    }
+    if (!isConnLocal) {
+      input.address = formAddress.value.trim()
+      input.port = Number(formPort.value)
+      input.username = formUsername.value.trim()
+      input.credentialType = formCredentialType.value
 
-    // Secret retention semantics:
-    // Only send credentials when user has entered a new secret.
-    // If left blank during edit, omit credentials to retain saved secret.
-    const hasNewPassword = formCredentialType.value === 'password' && formPassword.value !== ''
-    const hasNewKey =
-      formCredentialType.value === 'private_key' && formPrivateKey.value.trim() !== ''
-    if (hasNewPassword) {
-      input.credentials = { password: formPassword.value }
-    } else if (hasNewKey) {
-      input.credentials = {
-        privateKey: formPrivateKey.value.trim(),
-        passphrase: formPassphrase.value ? formPassphrase.value : undefined,
+      if (formChallengeToken.value && trustConfirmed.value) {
+        input.challengeToken = formChallengeToken.value
+      }
+
+      // Secret retention semantics:
+      // Only send credentials when user has entered a new secret.
+      // If left blank during edit, omit credentials to retain saved secret.
+      const hasNewPassword = formCredentialType.value === 'password' && formPassword.value !== ''
+      const hasNewKey =
+        formCredentialType.value === 'private_key' && formPrivateKey.value.trim() !== ''
+      if (hasNewPassword) {
+        input.credentials = { password: formPassword.value }
+      } else if (hasNewKey) {
+        input.credentials = {
+          privateKey: formPrivateKey.value.trim(),
+          passphrase: formPassphrase.value ? formPassphrase.value : undefined,
+        }
       }
     }
 
@@ -334,7 +429,7 @@ watch(
     await fetchHosts()
     if (props.initialHostId) {
       const match = hosts.value.find((h) => h.id === props.initialHostId)
-      if (match && match.id !== 'local') {
+      if (match) {
         startEdit(match)
       }
     }
@@ -393,7 +488,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       <header class="host-modal__header">
         <h2 id="host-modal-title" class="host-modal__title">
           <span v-if="view === 'list'">Host Management</span>
-          <span v-else-if="view === 'add'">Add Remote Host</span>
+          <span v-else-if="view === 'add'">Add Host</span>
           <span v-else>Edit Host: {{ formName || formId }}</span>
         </h2>
         <button
@@ -412,7 +507,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         <div v-if="view === 'list'" class="host-list-view">
           <div class="host-list-view__actions">
             <button class="host-btn host-btn--primary host-modal__add-btn" type="button" @click="startAdd">
-              + Add Remote Host
+              + Add Host
             </button>
             <button class="host-btn host-btn--subtle" type="button" :disabled="loading" @click="fetchHosts">
               {{ loading ? 'Refreshing…' : 'Refresh' }}
@@ -432,22 +527,25 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           </div>
 
           <ul v-else class="host-cards" role="list">
-            <li v-for="item in hosts" :key="item.id" class="host-card" :class="{ 'host-card--local': item.id === 'local' }">
+            <li v-for="item in hosts" :key="item.id" class="host-card" :class="{ 'host-card--local': isLocal(item) }">
               <div class="host-card__main">
                 <div class="host-card__title-row">
                   <span class="host-card__name">{{ item.name }}</span>
-                  <span class="host-badge" :class="item.id === 'local' ? 'host-badge--local' : 'host-badge--remote'">
-                    {{ item.id === 'local' ? 'local' : item.id }}
+                  <span class="host-badge" :class="isLocal(item) ? 'host-badge--local' : 'host-badge--remote'">
+                    {{ isLocal(item) ? 'local' : item.id }}
                   </span>
-                  <span v-if="item.id !== 'local'" class="host-badge" :class="item.trusted ? 'host-badge--green' : 'host-badge--warning'">
+                  <span v-if="hostSettings?.defaultHostId === item.id" class="host-badge host-badge--default">
+                    default
+                  </span>
+                  <span v-if="!isLocal(item)" class="host-badge" :class="item.trusted ? 'host-badge--green' : 'host-badge--warning'">
                     {{ item.trusted ? 'trusted' : 'untrusted' }}
                   </span>
-                  <span v-if="item.hasCredential" class="host-badge host-badge--info">
+                  <span v-if="!isLocal(item) && item.hasCredential" class="host-badge host-badge--info">
                     {{ item.credentialType || 'authenticated' }}
                   </span>
                 </div>
                 <div class="host-card__meta">
-                  <span v-if="item.id === 'local'">Local system execution (no SSH)</span>
+                  <span v-if="isLocal(item)">Local system execution (no SSH)</span>
                   <span v-else>
                     {{ item.username }}@{{ item.address }}:{{ item.port }} (rev {{ item.revision }})
                   </span>
@@ -461,24 +559,24 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                   <div v-else-if="typeof activeCapabilities[item.id] === 'object'" class="host-caps-result">
                     <span
                       class="host-cap-pill"
-                      :class="(activeCapabilities[item.id] as HostCapabilities).ssh ? 'host-cap-pill--ok' : 'host-cap-pill--fail'"
+                      :class="getCapPillClass((activeCapabilities[item.id] as HostCapabilities).ssh)"
                     >
-                      SSH: {{ (activeCapabilities[item.id] as HostCapabilities).ssh ? 'Connected' : 'Offline' }}
+                      SSH: {{ getCapLabel((activeCapabilities[item.id] as HostCapabilities).ssh, 'SSH') }}
                     </span>
                     <span
                       class="host-cap-pill"
-                      :class="(activeCapabilities[item.id] as HostCapabilities).tmux ? 'host-cap-pill--ok' : 'host-cap-pill--fail'"
+                      :class="getCapPillClass((activeCapabilities[item.id] as HostCapabilities).tmux)"
                     >
-                      tmux: {{ (activeCapabilities[item.id] as HostCapabilities).tmux ? 'Available' : 'Missing' }}
+                      tmux: {{ getCapLabel((activeCapabilities[item.id] as HostCapabilities).tmux, 'tmux') }}
                     </span>
                     <span
                       class="host-cap-pill"
-                      :class="(activeCapabilities[item.id] as HostCapabilities).sftp ? 'host-cap-pill--ok' : 'host-cap-pill--fail'"
+                      :class="getCapPillClass((activeCapabilities[item.id] as HostCapabilities).sftp)"
                     >
-                      SFTP: {{ (activeCapabilities[item.id] as HostCapabilities).sftp ? 'Available' : 'Unavailable' }}
+                      SFTP: {{ getCapLabel((activeCapabilities[item.id] as HostCapabilities).sftp, 'SFTP') }}
                     </span>
                     <span
-                      v-if="(activeCapabilities[item.id] as HostCapabilities).sftp"
+                      v-if="shouldShowAtomicOverwrite(activeCapabilities[item.id] as HostCapabilities)"
                       class="host-cap-pill"
                       :class="(activeCapabilities[item.id] as HostCapabilities).posixRename ? 'host-cap-pill--ok' : 'host-cap-pill--fail'"
                     >
@@ -492,33 +590,41 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
               </div>
 
               <div class="host-card__controls">
-                <template v-if="item.id !== 'local'">
-                  <button
-                    class="host-btn host-btn--subtle"
-                    type="button"
-                    :aria-label="`Test connection for ${item.name}`"
-                    :disabled="activeCapabilities[item.id] === 'testing'"
-                    @click="onTestCapabilities(item)"
-                  >
-                    Test
-                  </button>
-                  <button
-                    class="host-btn host-btn--subtle"
-                    type="button"
-                    :aria-label="`Edit ${item.name}`"
-                    @click="startEdit(item)"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    class="host-btn host-btn--danger"
-                    type="button"
-                    :aria-label="`Remove ${item.name}`"
-                    @click="promptDelete(item)"
-                  >
-                    Delete
-                  </button>
-                </template>
+                <button
+                  class="host-btn host-btn--subtle"
+                  type="button"
+                  :aria-label="`Test connection for ${item.name}`"
+                  :disabled="activeCapabilities[item.id] === 'testing'"
+                  @click="onTestCapabilities(item)"
+                >
+                  Test
+                </button>
+                <button
+                  class="host-btn host-btn--subtle"
+                  type="button"
+                  :aria-label="`Edit ${item.name}`"
+                  @click="startEdit(item)"
+                >
+                  Edit
+                </button>
+                <button
+                  v-if="hostSettings && hostSettings.defaultHostId !== item.id"
+                  class="host-btn host-btn--subtle"
+                  type="button"
+                  :aria-label="`Set ${item.name} as default host`"
+                  :disabled="settingDefault === item.id"
+                  @click="onSetDefault(item)"
+                >
+                  Set Default
+                </button>
+                <button
+                  class="host-btn host-btn--danger"
+                  type="button"
+                  :aria-label="`Remove ${item.name}`"
+                  @click="promptDelete(item)"
+                >
+                  Delete
+                </button>
                 <button
                   class="host-btn host-btn--primary"
                   type="button"
@@ -540,6 +646,36 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           </div>
 
           <div class="host-form__grid">
+            <!-- Connection Type -->
+            <div class="host-field host-field--full">
+              <label class="host-label">Connection Type</label>
+              <div v-if="view === 'add'" class="host-radio-group">
+                <label class="host-radio-label">
+                  <input
+                    v-model="formConnectionType"
+                    type="radio"
+                    value="ssh"
+                    name="connectionType"
+                  />
+                  SSH (Remote Host)
+                </label>
+                <label class="host-radio-label">
+                  <input
+                    v-model="formConnectionType"
+                    type="radio"
+                    value="local"
+                    name="connectionType"
+                  />
+                  Local (Host Execution)
+                </label>
+              </div>
+              <div v-else class="host-readonly-text">
+                <span class="host-badge" :class="formConnectionType === 'local' ? 'host-badge--local' : 'host-badge--remote'">
+                  {{ formConnectionType === 'local' ? 'Local execution' : 'SSH remote host' }}
+                </span>
+              </div>
+            </div>
+
             <!-- Host ID -->
             <div class="host-field">
               <label for="host-field-id" class="host-label">
@@ -574,183 +710,190 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
               <span v-if="formFieldErrors.name" class="host-field-error" role="alert">{{ formFieldErrors.name }}</span>
             </div>
 
-            <!-- Address -->
-            <div class="host-field">
-              <label for="host-field-address" class="host-label">
-                SSH Address <span class="host-req">*</span>
-              </label>
-              <input
-                id="host-field-address"
-                v-model="formAddress"
-                type="text"
-                class="host-input"
-                :class="{ 'host-input--error': formFieldErrors.address }"
-                placeholder="e.g. 192.168.1.100 or ssh.example.com"
-              />
-              <span v-if="formFieldErrors.address" class="host-field-error" role="alert">{{ formFieldErrors.address }}</span>
-            </div>
+            <!-- SSH Specific fields -->
+            <template v-if="formConnectionType === 'ssh'">
+              <!-- Address -->
+              <div class="host-field">
+                <label for="host-field-address" class="host-label">
+                  SSH Address <span class="host-req">*</span>
+                </label>
+                <input
+                  id="host-field-address"
+                  v-model="formAddress"
+                  type="text"
+                  class="host-input"
+                  :class="{ 'host-input--error': formFieldErrors.address }"
+                  placeholder="e.g. 192.168.1.100 or ssh.example.com"
+                />
+                <span v-if="formFieldErrors.address" class="host-field-error" role="alert">{{ formFieldErrors.address }}</span>
+              </div>
 
-            <!-- Port -->
-            <div class="host-field host-field--small">
-              <label for="host-field-port" class="host-label">
-                Port <span class="host-req">*</span>
-              </label>
-              <input
-                id="host-field-port"
-                v-model.number="formPort"
-                type="number"
-                min="1"
-                max="65535"
-                class="host-input"
-                :class="{ 'host-input--error': formFieldErrors.port }"
-              />
-              <span v-if="formFieldErrors.port" class="host-field-error" role="alert">{{ formFieldErrors.port }}</span>
-            </div>
+              <!-- Port -->
+              <div class="host-field host-field--small">
+                <label for="host-field-port" class="host-label">
+                  Port <span class="host-req">*</span>
+                </label>
+                <input
+                  id="host-field-port"
+                  v-model.number="formPort"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  class="host-input"
+                  :class="{ 'host-input--error': formFieldErrors.port }"
+                />
+                <span v-if="formFieldErrors.port" class="host-field-error" role="alert">{{ formFieldErrors.port }}</span>
+              </div>
 
-            <!-- Username -->
-            <div class="host-field">
-              <label for="host-field-username" class="host-label">
-                SSH Username <span class="host-req">*</span>
-              </label>
-              <input
-                id="host-field-username"
-                v-model="formUsername"
-                type="text"
-                class="host-input"
-                :class="{ 'host-input--error': formFieldErrors.username }"
-                placeholder="e.g. root or ubuntu"
-              />
-              <span v-if="formFieldErrors.username" class="host-field-error" role="alert">{{ formFieldErrors.username }}</span>
-            </div>
+              <!-- Username -->
+              <div class="host-field">
+                <label for="host-field-username" class="host-label">
+                  SSH Username <span class="host-req">*</span>
+                </label>
+                <input
+                  id="host-field-username"
+                  v-model="formUsername"
+                  type="text"
+                  class="host-input"
+                  :class="{ 'host-input--error': formFieldErrors.username }"
+                  placeholder="e.g. root or ubuntu"
+                />
+                <span v-if="formFieldErrors.username" class="host-field-error" role="alert">{{ formFieldErrors.username }}</span>
+              </div>
+            </template>
           </div>
 
-          <!-- Fingerprint Probing & Trust Section -->
-          <div class="host-section">
-            <h3 class="host-section__title">Server Key & Trust</h3>
-            <div class="host-section__actions">
-              <button
-                class="host-btn host-btn--subtle host-probe__probe-btn"
-                type="button"
-                :disabled="probing || !formAddress"
-                @click="onProbe"
-              >
-                {{ probing ? 'Probing Server…' : 'Probe Server Fingerprint' }}
-              </button>
-            </div>
-
-            <div v-if="probeError" class="host-alert host-alert--danger" role="alert">
-              {{ probeError }}
-            </div>
-
-            <div v-if="probedResult" class="host-probe-box">
-              <div class="host-probe-row">
-                <span class="host-probe-label">Key Type:</span>
-                <span class="host-probe-val">{{ probedResult.keyType }}</span>
-              </div>
-              <div class="host-probe-row">
-                <span class="host-probe-label">Fingerprint:</span>
-                <code class="host-probe-fingerprint">{{ probedResult.fingerprint }}</code>
-              </div>
-              <div class="host-probe-confirm">
+          <!-- SSH Key & Authentication sections ONLY if SSH -->
+          <template v-if="formConnectionType === 'ssh'">
+            <!-- Fingerprint Probing & Trust Section -->
+            <div class="host-section">
+              <h3 class="host-section__title">Server Key & Trust</h3>
+              <div class="host-section__actions">
                 <button
-                  v-if="!trustConfirmed"
-                  class="host-btn host-btn--primary host-probe__trust-btn"
+                  class="host-btn host-btn--subtle host-probe__probe-btn"
                   type="button"
-                  @click="onConfirmTrust"
+                  :disabled="probing || confirmingTrust || formSubmitting || !formAddress"
+                  @click="onProbe"
                 >
-                  Trust & Pin Fingerprint
+                  {{ probing ? 'Probing Server…' : 'Probe Server Fingerprint' }}
                 </button>
-                <span v-else class="host-probe-trusted-indicator">
-                  Fingerprint trusted
-                </span>
+              </div>
+
+              <div v-if="probeError" class="host-alert host-alert--danger" role="alert">
+                {{ probeError }}
+              </div>
+
+              <div v-if="probedResult" class="host-probe-box">
+                <div class="host-probe-row">
+                  <span class="host-probe-label">Key Type:</span>
+                  <span class="host-probe-val">{{ probedResult.keyType }}</span>
+                </div>
+                <div class="host-probe-row">
+                  <span class="host-probe-label">Fingerprint:</span>
+                  <code class="host-probe-fingerprint">{{ probedResult.fingerprint }}</code>
+                </div>
+                <div class="host-probe-confirm">
+                  <button
+                    v-if="!trustConfirmed"
+                    class="host-btn host-btn--primary host-probe__trust-btn"
+                    type="button"
+                    :disabled="confirmingTrust || formSubmitting"
+                    @click="onConfirmTrust"
+                  >
+                    {{ confirmingTrust ? 'Confirming Fingerprint…' : 'Trust & Pin Fingerprint' }}
+                  </button>
+                  <span v-else class="host-probe-trusted-indicator">
+                    Fingerprint trusted
+                  </span>
+                </div>
               </div>
             </div>
-          </div>
 
-          <!-- Authentication Credentials -->
-          <div class="host-section">
-            <h3 class="host-section__title">Authentication</h3>
-            <div class="host-radio-group">
-              <label class="host-radio-label">
-                <input
-                  v-model="formCredentialType"
-                  type="radio"
-                  value="password"
-                  name="credentialType"
-                />
-                Password
-              </label>
-              <label class="host-radio-label">
-                <input
-                  v-model="formCredentialType"
-                  type="radio"
-                  value="private_key"
-                  name="credentialType"
-                />
-                Private Key
-              </label>
-            </div>
+            <!-- Authentication Credentials -->
+            <div class="host-section">
+              <h3 class="host-section__title">Authentication</h3>
+              <div class="host-radio-group">
+                <label class="host-radio-label">
+                  <input
+                    v-model="formCredentialType"
+                    type="radio"
+                    value="password"
+                    name="credentialType"
+                  />
+                  Password
+                </label>
+                <label class="host-radio-label">
+                  <input
+                    v-model="formCredentialType"
+                    type="radio"
+                    value="private_key"
+                    name="credentialType"
+                  />
+                  Private Key
+                </label>
+              </div>
 
-            <!-- Password Fields -->
-            <div v-if="formCredentialType === 'password'" class="host-field">
-              <label for="host-field-password" class="host-label">
-                Password
-                <span v-if="view === 'add'" class="host-req">*</span>
-                <span v-else class="host-subtle">(leave blank to keep existing password)</span>
-              </label>
-              <input
-                id="host-field-password"
-                v-model="formPassword"
-                type="password"
-                class="host-input"
-                :class="{ 'host-input--error': formFieldErrors.password }"
-                :placeholder="view === 'add' ? 'SSH account password' : '•••••••• (unchanged)'"
-                autocomplete="new-password"
-              />
-              <span v-if="formFieldErrors.password" class="host-field-error" role="alert">{{ formFieldErrors.password }}</span>
-            </div>
-
-            <!-- Private Key Fields -->
-            <div v-else class="host-key-group">
-              <div class="host-field">
-                <label for="host-field-privkey" class="host-label">
-                  Private Key (OpenSSH format)
+              <!-- Password Fields -->
+              <div v-if="formCredentialType === 'password'" class="host-field">
+                <label for="host-field-password" class="host-label">
+                  Password
                   <span v-if="view === 'add'" class="host-req">*</span>
-                  <span v-else class="host-subtle">(leave blank to keep existing key)</span>
-                </label>
-                <textarea
-                  id="host-field-privkey"
-                  v-model="formPrivateKey"
-                  class="host-textarea"
-                  :class="{ 'host-input--error': formFieldErrors.privateKey }"
-                  rows="4"
-                  :placeholder="view === 'add' ? '-----BEGIN OPENSSH PRIVATE KEY-----\n...' : '(unchanged)'"
-                  spellcheck="false"
-                ></textarea>
-                <span v-if="formFieldErrors.privateKey" class="host-field-error" role="alert">{{ formFieldErrors.privateKey }}</span>
-              </div>
-
-              <div class="host-field">
-                <label for="host-field-passphrase" class="host-label">
-                  Passphrase <span class="host-subtle">(optional, if key is encrypted)</span>
+                  <span v-else class="host-subtle">(leave blank to keep existing password)</span>
                 </label>
                 <input
-                  id="host-field-passphrase"
-                  v-model="formPassphrase"
+                  id="host-field-password"
+                  v-model="formPassword"
                   type="password"
                   class="host-input"
-                  placeholder="Passphrase for encrypted key"
+                  :class="{ 'host-input--error': formFieldErrors.password }"
+                  :placeholder="view === 'add' ? 'SSH account password' : '•••••••• (unchanged)'"
                   autocomplete="new-password"
                 />
+                <span v-if="formFieldErrors.password" class="host-field-error" role="alert">{{ formFieldErrors.password }}</span>
+              </div>
+
+              <!-- Private Key Fields -->
+              <div v-else class="host-key-group">
+                <div class="host-field">
+                  <label for="host-field-privkey" class="host-label">
+                    Private Key (OpenSSH format)
+                    <span v-if="view === 'add'" class="host-req">*</span>
+                    <span v-else class="host-subtle">(leave blank to keep existing key)</span>
+                  </label>
+                  <textarea
+                    id="host-field-privkey"
+                    v-model="formPrivateKey"
+                    class="host-textarea"
+                    :class="{ 'host-input--error': formFieldErrors.privateKey }"
+                    rows="4"
+                    :placeholder="view === 'add' ? '-----BEGIN OPENSSH PRIVATE KEY-----\n...' : '(unchanged)'"
+                    spellcheck="false"
+                  ></textarea>
+                  <span v-if="formFieldErrors.privateKey" class="host-field-error" role="alert">{{ formFieldErrors.privateKey }}</span>
+                </div>
+
+                <div class="host-field">
+                  <label for="host-field-passphrase" class="host-label">
+                    Passphrase <span class="host-subtle">(optional, if key is encrypted)</span>
+                  </label>
+                  <input
+                    id="host-field-passphrase"
+                    v-model="formPassphrase"
+                    type="password"
+                    class="host-input"
+                    placeholder="Passphrase for encrypted key"
+                    autocomplete="new-password"
+                  />
+                </div>
               </div>
             </div>
-          </div>
+          </template>
 
           <div class="host-form__actions">
-            <button class="host-btn host-btn--subtle" type="button" :disabled="formSubmitting" @click="cancelForm">
+            <button class="host-btn host-btn--subtle" type="button" :disabled="formSubmitting || confirmingTrust" @click="cancelForm">
               Cancel
             </button>
-            <button class="host-btn host-btn--primary" type="submit" :disabled="formSubmitting">
+            <button class="host-btn host-btn--primary" type="submit" :disabled="formSubmitting || confirmingTrust">
               {{ formSubmitting ? 'Saving…' : (view === 'add' ? 'Create Host' : 'Save Changes') }}
             </button>
           </div>
@@ -940,6 +1083,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   color: var(--th-warning);
   border-color: var(--th-warning);
 }
+.host-badge--default {
+  color: #a855f7;
+  border-color: #a855f7;
+}
 .host-badge--info {
   color: var(--th-accent);
 }
@@ -973,6 +1120,24 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   background: rgba(248, 113, 113, 0.12);
   color: var(--th-danger);
   border: 1px solid rgba(248, 113, 113, 0.3);
+}
+.host-cap-pill--na {
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+.host-cap-pill--unknown {
+  background: rgba(251, 191, 36, 0.12);
+  color: var(--th-warning);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+}
+.host-readonly-text {
+  display: flex;
+  align-items: center;
+  min-height: 2.2rem;
+}
+.host-field--full {
+  grid-column: 1 / -1;
 }
 .host-caps-error {
   color: var(--th-danger);

@@ -43,7 +43,10 @@ func TestCredentialBindingAndRestart(t *testing.T) {
 	if _, err := v.Open("a", "private_key", modified); err == nil {
 		t.Fatal("modified version accepted")
 	}
-	wrong, _ := NewVault(make([]byte, 32))
+	wrong, err := NewVault(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := wrong.Open("a", "private_key", a); err == nil {
 		t.Fatal("wrong key accepted")
 	}

@@ -23,7 +23,9 @@ type spyProbeDialer struct {
 	err   error
 }
 
-func (s *spyProbeDialer) Dial(ctx context.Context, address string, port uint16, timeout time.Duration) (ssh.PublicKey, error) {
+func (s *spyProbeDialer) Dial(
+	ctx context.Context, address string, port uint16, timeout time.Duration,
+) (ssh.PublicKey, error) {
 	s.calls++
 	if s.err != nil {
 		return nil, s.err
@@ -66,7 +68,7 @@ func TestUnauthenticatedEndpointsInitiateNoRemoteWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }() //nolint:errcheck // test cleanup
 
 	router := NewRouter(RouterConfig{
 		Token:        "secret-token",
@@ -128,7 +130,7 @@ func TestProbeAndTrustEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }() //nolint:errcheck // test cleanup
 
 	var invalidated []host.ID
 	router := NewRouter(RouterConfig{
@@ -143,7 +145,7 @@ func TestProbeAndTrustEndpoints(t *testing.T) {
 	authedRequest := func(method, path string, body any) *httptest.ResponseRecorder {
 		var reqBody []byte
 		if body != nil {
-			reqBody, _ = json.Marshal(body)
+			reqBody, _ = json.Marshal(body) //nolint:errcheck // test marshal
 		}
 		req := httptest.NewRequest(method, path, bytes.NewReader(reqBody))
 		req.Header.Set("Authorization", "Bearer admin-token")
@@ -220,7 +222,9 @@ func TestProbeAndTrustEndpoints(t *testing.T) {
 		t.Fatalf("create gamma failed: %d", w.Code)
 	}
 	var gamma host.Host
-	_ = json.NewDecoder(w.Body).Decode(&gamma)
+	if err := json.NewDecoder(w.Body).Decode(&gamma); err != nil {
+		t.Fatal(err)
+	}
 	if gamma.Trusted {
 		t.Fatal("gamma should start untrusted")
 	}
@@ -231,7 +235,9 @@ func TestProbeAndTrustEndpoints(t *testing.T) {
 		t.Fatalf("probe host-gamma failed: %d body=%s", w.Code, w.Body.String())
 	}
 	var gammaProbe host.ProbeResult
-	_ = json.NewDecoder(w.Body).Decode(&gammaProbe)
+	if err := json.NewDecoder(w.Body).Decode(&gammaProbe); err != nil {
+		t.Fatal(err)
+	}
 
 	// Confirm trust with valid token
 	w = authedRequest(http.MethodPost, "/api/hosts/host-gamma/trust", map[string]any{
@@ -241,7 +247,9 @@ func TestProbeAndTrustEndpoints(t *testing.T) {
 		t.Fatalf("confirm trust failed: %d body=%s", w.Code, w.Body.String())
 	}
 	var trustedGamma host.Host
-	_ = json.NewDecoder(w.Body).Decode(&trustedGamma)
+	if err := json.NewDecoder(w.Body).Decode(&trustedGamma); err != nil {
+		t.Fatal(err)
+	}
 	if !trustedGamma.Trusted {
 		t.Fatalf("gamma should now be trusted: %+v", trustedGamma)
 	}
@@ -295,10 +303,24 @@ func TestHostCapabilitiesAndRemoteAuthFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }() //nolint:errcheck // test cleanup
 
 	mockCaps := &mockCapabilitiesChecker{
 		caps: map[host.ID]host.HostCapabilities{
+			"local": {
+				HostID:   "local",
+				Revision: 1,
+				Online:   true,
+				SSH:      host.CapabilityStatus{State: host.CapabilityStateNotApplicable, Available: false},
+				Tmux:     host.CapabilityStatus{State: host.CapabilityStateAvailable, Available: true},
+				SFTP:     host.CapabilityStatus{State: host.CapabilityStateNotApplicable, Available: false},
+				Files: host.FileCapability{
+					State:             host.CapabilityStateAvailable,
+					Enabled:           true,
+					Boundary:          "account_bound",
+					AtomicReplacement: true,
+				},
+			},
 			"h-good": {
 				HostID:   "h-good",
 				Revision: 1,
@@ -356,9 +378,15 @@ func TestHostCapabilitiesAndRemoteAuthFailure(t *testing.T) {
 		t.Fatalf("local capabilities: %d", w.Code)
 	}
 	var localCaps host.HostCapabilities
-	_ = json.NewDecoder(w.Body).Decode(&localCaps)
-	if !localCaps.Online || !localCaps.SSH.Available || !localCaps.Tmux.Available {
+	if err := json.NewDecoder(w.Body).Decode(&localCaps); err != nil {
+		t.Fatal(err)
+	}
+	if !localCaps.Online || localCaps.SSH.Available || !localCaps.Tmux.Available {
 		t.Fatalf("local caps mismatch: %+v", localCaps)
+	}
+	if localCaps.SSH.State != host.CapabilityStateNotApplicable ||
+		localCaps.SFTP.State != host.CapabilityStateNotApplicable {
+		t.Fatalf("expected SSH and SFTP not_applicable: %+v", localCaps)
 	}
 
 	// 2. Good remote host
@@ -373,7 +401,9 @@ func TestHostCapabilitiesAndRemoteAuthFailure(t *testing.T) {
 		t.Fatalf("h-nosftp: %d", w.Code)
 	}
 	var noSftpCaps host.HostCapabilities
-	_ = json.NewDecoder(w.Body).Decode(&noSftpCaps)
+	if err := json.NewDecoder(w.Body).Decode(&noSftpCaps); err != nil {
+		t.Fatal(err)
+	}
 	if !noSftpCaps.Online || !noSftpCaps.Tmux.Available || noSftpCaps.SFTP.Available {
 		t.Fatalf("expected tmux available and sftp unavailable: %+v", noSftpCaps)
 	}
@@ -385,7 +415,9 @@ func TestHostCapabilitiesAndRemoteAuthFailure(t *testing.T) {
 		t.Fatalf("remote auth failure returned HTTP %d (must NOT be 401): body=%s", w.Code, w.Body.String())
 	}
 	var badAuthCaps host.HostCapabilities
-	_ = json.NewDecoder(w.Body).Decode(&badAuthCaps)
+	if err := json.NewDecoder(w.Body).Decode(&badAuthCaps); err != nil {
+		t.Fatal(err)
+	}
 	if badAuthCaps.Online || badAuthCaps.SSH.Available || badAuthCaps.SSH.Error != "authentication_failed" {
 		t.Fatalf("expected authentication_failed in capabilities: %+v", badAuthCaps)
 	}
@@ -396,7 +428,9 @@ func TestHostCapabilitiesAndRemoteAuthFailure(t *testing.T) {
 		t.Fatalf("offline host: %d", w.Code)
 	}
 	var offlineCaps host.HostCapabilities
-	_ = json.NewDecoder(w.Body).Decode(&offlineCaps)
+	if err := json.NewDecoder(w.Body).Decode(&offlineCaps); err != nil {
+		t.Fatal(err)
+	}
 	if offlineCaps.Online || offlineCaps.SSH.Available {
 		t.Fatalf("expected offline host: %+v", offlineCaps)
 	}

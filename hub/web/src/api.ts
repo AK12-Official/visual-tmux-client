@@ -103,19 +103,32 @@ interface SessionsResponse {
   sessions?: Session[]
 }
 
-export async function listSessions(hostId = 'local'): Promise<Session[]> {
+export async function listSessions(hostId: string): Promise<Session[]> {
   const res = await authFetch(`/api/hosts/${encodeURIComponent(hostId)}/sessions`)
   if (!res.ok) throw new Error(await errorText(res))
   const data = (await res.json()) as SessionsResponse | null
   return Array.isArray(data?.sessions) ? data.sessions : []
 }
 
-export async function createSession(name?: string, hostId = 'local'): Promise<Session> {
+export async function createSession(
+  name: string | undefined,
+  hostId: string,
+  expectedConnectionRevision?: number,
+): Promise<Session> {
   const trimmed = name?.trim()
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (expectedConnectionRevision !== undefined) {
+    headers['X-Expected-Connection-Revision'] = String(expectedConnectionRevision)
+  }
+  const payload: { name?: string; expectedConnectionRevision?: number } = {}
+  if (trimmed) payload.name = trimmed
+  if (expectedConnectionRevision !== undefined) {
+    payload.expectedConnectionRevision = expectedConnectionRevision
+  }
   const res = await authFetch(`/api/hosts/${encodeURIComponent(hostId)}/sessions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(trimmed ? { name: trimmed } : {}),
+    headers,
+    body: JSON.stringify(payload),
   })
   if (!res.ok) throw new Error(await errorText(res))
   return (await res.json()) as Session
@@ -124,25 +137,43 @@ export async function createSession(name?: string, hostId = 'local'): Promise<Se
 export async function renameSession(
   oldName: string,
   newName: string,
-  hostId = 'local',
+  hostId: string,
+  expectedConnectionRevision?: number,
 ): Promise<Session> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (expectedConnectionRevision !== undefined) {
+    headers['X-Expected-Connection-Revision'] = String(expectedConnectionRevision)
+  }
+  const payload: { name: string; expectedConnectionRevision?: number } = { name: newName }
+  if (expectedConnectionRevision !== undefined) {
+    payload.expectedConnectionRevision = expectedConnectionRevision
+  }
   const res = await authFetch(
     `/api/hosts/${encodeURIComponent(hostId)}/sessions/${encodeURIComponent(oldName)}`,
     {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newName }),
+      headers,
+      body: JSON.stringify(payload),
     },
   )
   if (!res.ok) throw new Error(await errorText(res))
   return (await res.json()) as Session
 }
 
-export async function killSession(name: string, hostId = 'local'): Promise<void> {
+export async function killSession(
+  name: string,
+  hostId: string,
+  expectedConnectionRevision?: number,
+): Promise<void> {
+  const headers: Record<string, string> = {}
+  if (expectedConnectionRevision !== undefined) {
+    headers['X-Expected-Connection-Revision'] = String(expectedConnectionRevision)
+  }
   const res = await authFetch(
     `/api/hosts/${encodeURIComponent(hostId)}/sessions/${encodeURIComponent(name)}`,
     {
       method: 'DELETE',
+      headers,
     },
   )
   if (!res.ok) throw new Error(await errorText(res))
@@ -153,7 +184,7 @@ interface TicketResponse {
 }
 
 /** Issue a single-use, 30s, session-bound WebSocket ticket. */
-export async function issueTicket(session: string, hostId = 'local'): Promise<string> {
+export async function issueTicket(session: string, hostId: string): Promise<string> {
   const res = await authFetch('/api/ws-ticket', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -167,8 +198,11 @@ export async function issueTicket(session: string, hostId = 'local'): Promise<st
   return data.ticket
 }
 
+export type ConnectionType = 'local' | 'ssh'
+
 export interface HostItem {
   id: string
+  connectionType: ConnectionType
   revision: number
   connectionRevision: number
   name: string
@@ -186,22 +220,32 @@ export interface ProbeResult {
   keyType: string
 }
 
+export type CapabilityState = 'available' | 'unavailable' | 'unknown' | 'not_applicable'
+
 export interface CapabilityStatus {
+  state: CapabilityState
   available: boolean
+  diagnosticCode?: string
+  observedAt?: string
   error?: string
 }
 
 export interface FileCapability {
+  state: CapabilityState
+  available: boolean
   enabled: boolean
   boundary?: string
   rootHandleConfinement?: boolean
   atomicReplacement?: boolean
+  diagnosticCode?: string
+  observedAt?: string
   error?: string
 }
 
 export interface HostCapabilities {
   hostId?: string
   revision?: number
+  connectionType?: ConnectionType
   online?: boolean
   ssh?: CapabilityStatus | boolean
   tmux?: CapabilityStatus | boolean
@@ -219,11 +263,12 @@ export interface HostCredentials {
 
 export interface HostInput {
   id?: string
+  connectionType?: ConnectionType
   revision?: number
   name: string
-  address: string
-  port: number
-  username: string
+  address?: string
+  port?: number
+  username?: string
   credentialType?: 'password' | 'private_key'
   credentials?: HostCredentials
   challengeToken?: string
@@ -317,3 +362,26 @@ export async function testHostCapabilities(id: string): Promise<HostCapabilities
   return (await res.json()) as HostCapabilities
 }
 
+export interface HostSettings {
+  defaultHostId: string | null
+  revision: number
+}
+
+export async function getHostSettings(): Promise<HostSettings> {
+  const res = await authFetch('/api/host-settings')
+  if (!res.ok) throw new Error(await errorText(res))
+  return (await res.json()) as HostSettings
+}
+
+export async function updateHostSettings(
+  defaultHostId: string | null,
+  expectedRevision: number,
+): Promise<HostSettings> {
+  const res = await authFetch(`/api/host-settings?revision=${expectedRevision}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ defaultHostId, revision: expectedRevision }),
+  })
+  if (!res.ok) throw new Error(await errorText(res))
+  return (await res.json()) as HostSettings
+}

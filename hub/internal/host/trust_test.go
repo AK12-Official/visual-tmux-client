@@ -3,6 +3,8 @@ package host_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"errors"
 	"net"
 	"strconv"
@@ -14,18 +16,27 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func TestProbeDoesNotOfferCredentials(t *testing.T) {
-	var authAttempts atomic.Int32
-	hostSigner := generateTestHostKey(t)
+func generateTestRSAHostKey(t *testing.T) ssh.Signer {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer
+}
 
+func TestProbeEndpointReturnsHostKeyWithoutAuth(t *testing.T) {
+	hostSigner := generateTestRSAHostKey(t)
+	var authAttempts atomic.Int64
 	serverConfig := &ssh.ServerConfig{
+		NoClientAuth: false,
 		PasswordCallback: func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 			authAttempts.Add(1)
-			return nil, errors.New("unexpected auth")
-		},
-		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			authAttempts.Add(1)
-			return nil, errors.New("unexpected auth")
+			return nil, errors.New("auth disabled during probe test")
 		},
 	}
 	serverConfig.AddHostKey(hostSigner)
@@ -34,7 +45,7 @@ func TestProbeDoesNotOfferCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }() //nolint:errcheck // cleanup
 
 	go func() {
 		for {
@@ -43,9 +54,9 @@ func TestProbeDoesNotOfferCredentials(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				sshConn, _, _, _ := ssh.NewServerConn(c, serverConfig)
+				sshConn, _, _, _ := ssh.NewServerConn(c, serverConfig) //nolint:errcheck // handshake probe
 				if sshConn != nil {
-					_ = sshConn.Close()
+					_ = sshConn.Close() //nolint:errcheck // close conn
 				}
 			}(tcpConn)
 		}
@@ -55,7 +66,10 @@ func TestProbeDoesNotOfferCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	port, _ := strconv.ParseUint(portStr, 10, 16)
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	ctx := context.Background()
 	key, err := host.ProbeEndpoint(ctx, hostStr, uint16(port), time.Second)
@@ -74,7 +88,7 @@ func TestProbeDoesNotOfferCredentials(t *testing.T) {
 
 func TestTrustChallengeLifecycle(t *testing.T) {
 	store := host.NewTrustStore(50 * time.Millisecond)
-	signer := generateTestHostKey(t)
+	signer := generateTestRSAHostKey(t)
 	pubKey := signer.PublicKey()
 
 	res, err := store.CreateChallenge("host-1", 1, "127.0.0.1:22", pubKey)
@@ -86,17 +100,23 @@ func TestTrustChallengeLifecycle(t *testing.T) {
 	}
 
 	// 1. Mismatched revision
-	if _, err := store.Confirm(res.ChallengeToken, "host-1", 2, "127.0.0.1:22"); !errors.Is(err, host.ErrChallengeMismatch) {
+	if _, err := store.Confirm(
+		res.ChallengeToken, "host-1", 2, "127.0.0.1:22",
+	); !errors.Is(err, host.ErrChallengeMismatch) {
 		t.Fatalf("expected ErrChallengeMismatch for wrong revision, got %v", err)
 	}
 
 	// 2. Mismatched host ID
-	if _, err := store.Confirm(res.ChallengeToken, "other-host", 1, "127.0.0.1:22"); !errors.Is(err, host.ErrChallengeMismatch) {
+	if _, err := store.Confirm(
+		res.ChallengeToken, "other-host", 1, "127.0.0.1:22",
+	); !errors.Is(err, host.ErrChallengeMismatch) {
 		t.Fatalf("expected ErrChallengeMismatch for wrong host ID, got %v", err)
 	}
 
 	// 3. Mismatched endpoint
-	if _, err := store.Confirm(res.ChallengeToken, "host-1", 1, "192.168.1.1:22"); !errors.Is(err, host.ErrChallengeMismatch) {
+	if _, err := store.Confirm(
+		res.ChallengeToken, "host-1", 1, "192.168.1.1:22",
+	); !errors.Is(err, host.ErrChallengeMismatch) {
 		t.Fatalf("expected ErrChallengeMismatch for wrong endpoint, got %v", err)
 	}
 
@@ -110,7 +130,9 @@ func TestTrustChallengeLifecycle(t *testing.T) {
 	}
 
 	// 5. Token is single-use: second confirmation must fail
-	if _, err := store.Confirm(res.ChallengeToken, "host-1", 1, "127.0.0.1:22"); !errors.Is(err, host.ErrChallengeExpired) {
+	if _, err := store.Confirm(
+		res.ChallengeToken, "host-1", 1, "127.0.0.1:22",
+	); !errors.Is(err, host.ErrChallengeExpired) {
 		t.Fatalf("expected ErrChallengeExpired on token reuse, got %v", err)
 	}
 
@@ -120,20 +142,25 @@ func TestTrustChallengeLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(60 * time.Millisecond)
-	if _, err := store.Confirm(expRes.ChallengeToken, "host-2", 1, "127.0.0.1:22"); !errors.Is(err, host.ErrChallengeExpired) {
+	if _, err := store.Confirm(
+		expRes.ChallengeToken, "host-2", 1, "127.0.0.1:22",
+	); !errors.Is(err, host.ErrChallengeExpired) {
 		t.Fatalf("expected ErrChallengeExpired after TTL, got %v", err)
 	}
 }
 
 func TestPinnedHostKeyChecking(t *testing.T) {
-	signer1 := generateTestHostKey(t)
-	signer2 := generateTestHostKey(t)
+	signer1 := generateTestRSAHostKey(t)
+	signer2 := generateTestRSAHostKey(t)
 
 	// Callback with pinned key 1
 	callback := host.PinnedHostKeyCallback(signer1.PublicKey().Marshal())
 
 	// Verifying key 1 should succeed
-	dummyAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:22")
+	dummyAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:22")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := callback("example.com:22", dummyAddr, signer1.PublicKey()); err != nil {
 		t.Fatalf("expected pinned key to match, got %v", err)
 	}
@@ -145,7 +172,9 @@ func TestPinnedHostKeyChecking(t *testing.T) {
 
 	// Unpinned callback must return ErrTrustRequired
 	unpinnedCallback := host.PinnedHostKeyCallback(nil)
-	if err := unpinnedCallback("example.com:22", dummyAddr, signer1.PublicKey()); !errors.Is(err, host.ErrTrustRequired) {
+	if err := unpinnedCallback(
+		"example.com:22", dummyAddr, signer1.PublicKey(),
+	); !errors.Is(err, host.ErrTrustRequired) {
 		t.Fatalf("expected ErrTrustRequired for unpinned key, got %v", err)
 	}
 }

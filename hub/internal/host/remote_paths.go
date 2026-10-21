@@ -83,7 +83,9 @@ func CanonicalizeRemotePath(ctx context.Context, sftpClient *sftp.Client, p stri
 			}
 			if realParent, pErr := sftpClient.RealPath(parent); pErr == nil {
 				if IsBlockedRemotePath(realParent) {
-					return "", fmt.Errorf("%w: %q resolves to pseudo-filesystem %q", ErrRemotePathNotAllowed, p, realParent)
+					return "", fmt.Errorf(
+						"%w: %q resolves to pseudo-filesystem %q", ErrRemotePathNotAllowed, p, realParent,
+					)
 				}
 				break
 			}

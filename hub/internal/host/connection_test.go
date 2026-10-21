@@ -13,14 +13,16 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func setupTestRegistryWithHost(t *testing.T, hostID host.ID, port uint16, hostKey ssh.PublicKey) (*host.Registry, string) {
+func setupTestRegistryWithHost(
+	t *testing.T, hostID host.ID, port uint16, hostKey ssh.PublicKey,
+) (*host.Registry, string) {
 	t.Helper()
 	dir := t.TempDir()
 	r, err := host.NewRegistry(context.Background(), dir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = r.Close() })
+	t.Cleanup(func() { _ = r.Close() }) //nolint:errcheck // test cleanup
 
 	_, err = r.Save(context.Background(), host.HostInput{
 		ID:             hostID,
@@ -42,14 +44,20 @@ func setupTestRegistryWithHost(t *testing.T, hostID host.ID, port uint16, hostKe
 func TestSingleFlightDialing(t *testing.T) {
 	listener, serverKey := startDisposableSSHServer(t, "testuser", "correct-password", nil)
 
-	_, portStr, _ := net.SplitHostPort(listener.Addr().String())
-	port, _ := strconv.ParseUint(portStr, 10, 16)
+	_, portStr, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	reg, _ := setupTestRegistryWithHost(t, "server-1", uint16(port), serverKey)
 
 	cfg := host.DefaultConnectionConfig()
 	mgr := host.NewConnectionManager(cfg, reg)
-	defer mgr.Close()
+	defer mgr.Close() //nolint:errcheck // test cleanup
 
 	// Intercept net.Listener connections to count them
 	// Instead, test single-flight by launching 10 goroutines requesting GetControl on the same lease
@@ -90,7 +98,7 @@ func TestStalledHandshakeTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stalledListener.Close()
+	defer stalledListener.Close() //nolint:errcheck // test cleanup
 
 	go func() {
 		for {
@@ -99,13 +107,19 @@ func TestStalledHandshakeTimeout(t *testing.T) {
 				return
 			}
 			// Just hold the connection open without sending SSH handshake
-			defer c.Close()
+			defer c.Close() //nolint:errcheck // mock conn cleanup
 			time.Sleep(2 * time.Second)
 		}
 	}()
 
-	_, portStr, _ := net.SplitHostPort(stalledListener.Addr().String())
-	port, _ := strconv.ParseUint(portStr, 10, 16)
+	_, portStr, err := net.SplitHostPort(stalledListener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	dummySigner := generateTestHostKey(t)
 	reg, _ := setupTestRegistryWithHost(t, "stalled-server", uint16(port), dummySigner.PublicKey())
@@ -116,7 +130,7 @@ func TestStalledHandshakeTimeout(t *testing.T) {
 		OperationTimeout: time.Second,
 	}
 	mgr := host.NewConnectionManager(cfg, reg)
-	defer mgr.Close()
+	defer mgr.Close() //nolint:errcheck // test cleanup
 
 	lease, err := mgr.Lease(context.Background(), "stalled-server")
 	if err != nil {
@@ -141,17 +155,23 @@ func TestContextCancellationStopsDial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stalledListener.Close()
+	defer stalledListener.Close() //nolint:errcheck // test cleanup
 
-	_, portStr, _ := net.SplitHostPort(stalledListener.Addr().String())
-	port, _ := strconv.ParseUint(portStr, 10, 16)
+	_, portStr, err := net.SplitHostPort(stalledListener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	dummySigner := generateTestHostKey(t)
 	reg, _ := setupTestRegistryWithHost(t, "cancel-server", uint16(port), dummySigner.PublicKey())
 
 	cfg := host.DefaultConnectionConfig()
 	mgr := host.NewConnectionManager(cfg, reg)
-	defer mgr.Close()
+	defer mgr.Close() //nolint:errcheck // test cleanup
 
 	lease, err := mgr.Lease(context.Background(), "cancel-server")
 	if err != nil {
@@ -177,7 +197,7 @@ func TestDialBackoff(t *testing.T) {
 		MaxBackoff:  1 * time.Second,
 	}
 	mgr := host.NewConnectionManager(cfg, reg)
-	defer mgr.Close()
+	defer mgr.Close() //nolint:errcheck // test cleanup
 
 	lease, err := mgr.Lease(context.Background(), "offline-server")
 	if err != nil {
@@ -207,18 +227,30 @@ func TestRevisionedLeasesAndHostIsolation(t *testing.T) {
 	listenerA, keyA := startDisposableSSHServer(t, "testuser", "correct-password", nil)
 	listenerB, keyB := startDisposableSSHServer(t, "testuser", "correct-password", nil)
 
-	_, portAStr, _ := net.SplitHostPort(listenerA.Addr().String())
-	portA, _ := strconv.ParseUint(portAStr, 10, 16)
+	_, portAStr, err := net.SplitHostPort(listenerA.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	portA, err := strconv.ParseUint(portAStr, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	_, portBStr, _ := net.SplitHostPort(listenerB.Addr().String())
-	portB, _ := strconv.ParseUint(portBStr, 10, 16)
+	_, portBStr, err := net.SplitHostPort(listenerB.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	portB, err := strconv.ParseUint(portBStr, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	dir := t.TempDir()
 	reg, err := host.NewRegistry(context.Background(), dir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reg.Close()
+	defer reg.Close() //nolint:errcheck // test cleanup
 
 	_, err = reg.Save(context.Background(), host.HostInput{
 		ID:             "host-A",
@@ -249,7 +281,7 @@ func TestRevisionedLeasesAndHostIsolation(t *testing.T) {
 	}
 
 	mgr := host.NewConnectionManager(host.DefaultConnectionConfig(), reg)
-	defer mgr.Close()
+	defer mgr.Close() //nolint:errcheck // test cleanup
 
 	leaseA1, err := mgr.Lease(context.Background(), "host-A")
 	if err != nil {
@@ -285,19 +317,25 @@ func TestRevisionedLeasesAndHostIsolation(t *testing.T) {
 		t.Fatalf("Host B lease was unexpectedly affected: %v", err)
 	}
 	// Verify host B client is still alive
-	_, _, _ = clientB.SendRequest("ping@test", true, nil)
+	_, _, _ = clientB.SendRequest("ping@test", true, nil) //nolint:errcheck // ping test
 	// Even if rejected as unknown request, connection is still open (not EOF or closed)
 	_ = clientA1
 }
 
 func TestTransportLifecycleSeparation(t *testing.T) {
 	listener, serverKey := startDisposableSSHServer(t, "testuser", "correct-password", nil)
-	_, portStr, _ := net.SplitHostPort(listener.Addr().String())
-	port, _ := strconv.ParseUint(portStr, 10, 16)
+	_, portStr, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	reg, _ := setupTestRegistryWithHost(t, "host-sep", uint16(port), serverKey)
 	mgr := host.NewConnectionManager(host.DefaultConnectionConfig(), reg)
-	defer mgr.Close()
+	defer mgr.Close() //nolint:errcheck // test cleanup
 
 	lease, err := mgr.Lease(context.Background(), "host-sep")
 	if err != nil {
@@ -315,7 +353,7 @@ func TestTransportLifecycleSeparation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer termConn.Close()
+	defer termConn.Close() //nolint:errcheck // test cleanup
 
 	// 3. Dedicated file transport
 	fileConn, err := lease.OpenDedicated(context.Background(), "sftp")
@@ -333,12 +371,12 @@ func TestTransportLifecycleSeparation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("terminal transport was closed by file cancellation: %v", err)
 	}
-	_ = session.Close()
+	_ = session.Close() //nolint:errcheck // test cleanup
 
 	// Verify control client is still alive!
 	controlSession, err := controlClient.NewSession()
 	if err != nil {
 		t.Fatalf("control client was closed by file cancellation: %v", err)
 	}
-	_ = controlSession.Close()
+	_ = controlSession.Close() //nolint:errcheck // test cleanup
 }

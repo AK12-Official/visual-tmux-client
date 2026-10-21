@@ -57,6 +57,7 @@ func TestStartupBannerAndBrowserURL(t *testing.T) {
 
 func TestAppLifecycleAndShutdown(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg.Hosts.StateDir = t.TempDir()
 	cfg.Server.Addr = "127.0.0.1:0"
 	cfg.Shutdown.AttachmentTimeout = config.Duration(100 * time.Millisecond)
 	cfg.Shutdown.HTTPTimeout = config.Duration(100 * time.Millisecond)
@@ -124,6 +125,7 @@ func TestAppLifecycleAndShutdown(t *testing.T) {
 func TestShutdownReleasesTheConfiguredRoots(t *testing.T) {
 	root := t.TempDir()
 	cfg := config.DefaultConfig()
+	cfg.Hosts.StateDir = t.TempDir()
 	cfg.Files.Roots = []string{root}
 	cfg.Server.Addr = "127.0.0.1:0"
 	cfg.Shutdown.AttachmentTimeout = config.Duration(100 * time.Millisecond)
@@ -172,6 +174,7 @@ func TestShutdownReleasesTheConfiguredRoots(t *testing.T) {
 func TestADisabledFileManagerStartsWithUnusableRoots(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "not-mounted")
 	cfg := config.DefaultConfig()
+	cfg.Hosts.StateDir = t.TempDir()
 	cfg.Files.Enabled = false
 	cfg.Files.Roots = []string{missing}
 	cfg.Server.Addr = "127.0.0.1:0"
@@ -238,6 +241,7 @@ func TestAppStart_ListenError(t *testing.T) {
 	defer func() { _ = ln.Close() }() //nolint:errcheck // cleanup
 
 	cfg := config.DefaultConfig()
+	cfg.Hosts.StateDir = t.TempDir()
 	cfg.Server.Addr = ln.Addr().String()
 
 	app, err := New(&cfg, config.Provenance{}, nil, Options{

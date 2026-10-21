@@ -57,8 +57,8 @@ When running in containerized environments (such as Docker or Kubernetes):
    - Restore `hosts.db` and `master.key` together to `state_dir` with `0600` permissions on `master.key`.
    - If the master key is missing or corrupted, the service refuses to start and will **never** overwrite or wipe existing host records without valid authorization.
 3. **Rollback**:
-   - If rolling back to an earlier backup or single-host version, restore the matching `hosts.db` and `master.key` backup.
-   - If reverting to local-only operation without multi-host support, remove or comment out `hosts:` in your configuration YAML; local tmux operation requires no database or master key.
+   - If rolling back to an earlier backup or release, restore the matching `hosts.db` and `master.key` backup.
+   - If downgrading to a pre-v0.5.0 release that operated without multi-host persistence, remove `hosts.db` and `master.key` after restoring your legacy configuration. Current releases mandate durable state initialization at startup and do not operate in a stateless unmanaged mode.
 
 ### Remote File Semantics and Limitations
 

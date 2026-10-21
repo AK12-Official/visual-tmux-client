@@ -138,10 +138,23 @@ func (h *Handler) mapRedeemError(err error) string {
 
 // ServeHTTP implements http.Handler for WebSocket attachments.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	runtime, resolveErr := h.resolver.Resolve(r.Context(), host.ID(r.PathValue("hostId")))
+	rawHostID := r.PathValue("hostId")
+	if rawHostID == "" {
+		rawHostID = string(host.LocalID)
+	}
+	hostIDStr := rawHostID
+	epoch := h.manager.CurrentEpoch(hostIDStr)
+
+	runtime, resolveErr := h.resolver.Resolve(r.Context(), host.ID(rawHostID))
 	if resolveErr != nil {
 		http.Error(w, "host not found", http.StatusNotFound)
 		return
+	}
+	if runtime.Target.HostID != "" {
+		hostIDStr = string(runtime.Target.HostID)
+		if hostIDStr != rawHostID {
+			epoch = h.manager.CurrentEpoch(hostIDStr)
+		}
 	}
 	session := r.PathValue("session")
 
@@ -158,17 +171,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(h.opts.MaxInputMessage)
 
 	ticket := r.URL.Query().Get("ticket")
-	var redeemErr error
-	if tr, ok := h.redeemer.(interface {
-		RedeemForTarget(string, string, uint64, string) error
-	}); ok {
-		hID := string(runtime.Target.HostID)
-		connRev := uint64(runtime.Target.ConnectionRevision)
-		redeemErr = tr.RedeemForTarget(ticket, hID, connRev, session)
-	} else {
-		redeemErr = h.redeemer.Redeem(ticket, session)
-	}
-	if redeemErr != nil {
+	if redeemErr := h.redeemTicket(ticket, runtime, session); redeemErr != nil {
 		sendErrorAndClose(conn, h.mapRedeemError(redeemErr), false)
 		return
 	}
@@ -205,7 +208,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rows,
 		h.manager.Untrack,
 		onResize,
-	)
+	).WithHost(hostIDStr).WithEpoch(epoch)
 
 	if err := h.manager.Register(att); err != nil {
 		_ = proc.Detach() //nolint:errcheck // best effort detach
@@ -214,4 +217,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	att.Start()
+}
+
+func (h *Handler) redeemTicket(ticket string, runtime host.Runtime, session string) error {
+	if tr, ok := h.redeemer.(interface {
+		RedeemForTarget(string, string, uint64, string) error
+	}); ok {
+		hID := string(runtime.Target.HostID)
+		connRev := uint64(runtime.Target.ConnectionRevision)
+		return tr.RedeemForTarget(ticket, hID, connRev, session)
+	}
+	return h.redeemer.Redeem(ticket, session)
 }

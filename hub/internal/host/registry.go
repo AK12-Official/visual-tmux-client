@@ -23,14 +23,10 @@ type Registry struct {
 }
 
 func NewRegistry(ctx context.Context, directory, keyPath string) (*Registry, error) {
-	explicit := directory != "" || keyPath != ""
 	if directory == "" {
 		base, err := os.UserConfigDir()
 		if err != nil {
-			if explicit {
-				return nil, err
-			}
-			return &Registry{}, nil
+			return nil, fmt.Errorf("user config dir: %w", err)
 		}
 		directory = filepath.Join(base, "visual-tmux-client")
 	}
@@ -38,15 +34,27 @@ func NewRegistry(ctx context.Context, directory, keyPath string) (*Registry, err
 		keyPath = filepath.Join(directory, "master.key")
 	}
 	r := &Registry{directory: directory, keyPath: keyPath}
-	_, err := os.Lstat(filepath.Join(directory, "hosts.db"))
-	if explicit || err == nil {
-		if err := r.initialize(ctx); err != nil {
-			return nil, err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission) {
+	if err := r.initialize(ctx); err != nil {
 		return nil, err
 	}
 	return r, nil
+}
+
+const defaultLocalHostName = "Local"
+
+func verifyStoreCredentials(ctx context.Context, store *Store, vault *Vault) error {
+	records, err := store.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if len(record.Credential) > 0 {
+			if _, err := vault.Open(record.ID, record.CredentialType, record.Credential); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (r *Registry) initialize(ctx context.Context) error {
@@ -73,25 +81,32 @@ func (r *Registry) initialize(ctx context.Context) error {
 			return err
 		}
 	}
-	store, err := OpenStore(ctx, r.directory)
+	var validator func(Record) error
+	if vault != nil {
+		validator = func(rec Record) error {
+			if len(rec.Credential) > 0 {
+				_, err := vault.Open(rec.ID, rec.CredentialType, rec.Credential)
+				return err
+			}
+			return nil
+		}
+	}
+	store, err := OpenStore(ctx, r.directory, WithCredentialValidator(validator))
 	if err != nil {
 		return err
 	}
-	fail := func(err error) error { _ = store.Close(); return err }
+	fail := func(err error) error {
+		_ = store.Close() //nolint:errcheck // best-effort store cleanup
+		return err
+	}
 	if !existing {
 		vault, err = LoadVault(r.keyPath, false)
 		if err != nil {
 			return fail(err)
 		}
 	}
-	records, err := store.List(ctx)
-	if err != nil {
+	if err := verifyStoreCredentials(ctx, store, vault); err != nil {
 		return fail(err)
-	}
-	for _, record := range records {
-		if _, err := vault.Open(record.ID, record.CredentialType, record.Credential); err != nil {
-			return fail(err)
-		}
 	}
 	r.store, r.vault = store, vault
 	return nil
@@ -110,20 +125,44 @@ func (r *Registry) Close() error {
 // Host is the only registry projection suitable for authenticated API replies.
 // Host keys and credentials are deliberately excluded from ordinary listings.
 type Host struct {
-	ID                 ID       `json:"id"`
-	Revision           Revision `json:"revision"`
-	ConnectionRevision Revision `json:"connectionRevision"`
-	Name               string   `json:"name"`
-	Address            string   `json:"address,omitempty"`
-	Port               uint16   `json:"port,omitempty"`
-	Username           string   `json:"username,omitempty"`
-	CredentialType     string   `json:"credentialType,omitempty"`
-	HasCredential      bool     `json:"hasCredential"`
-	Trusted            bool     `json:"trusted"`
+	ID                 ID             `json:"id"`
+	Revision           Revision       `json:"revision"`
+	ConnectionRevision Revision       `json:"connectionRevision"`
+	Name               string         `json:"name"`
+	ConnectionType     ConnectionType `json:"connectionType"`
+	Address            string         `json:"address,omitempty"`
+	Port               uint16         `json:"port,omitempty"`
+	Username           string         `json:"username,omitempty"`
+	CredentialType     string         `json:"credentialType,omitempty"`
+	HasCredential      bool           `json:"hasCredential"`
+	Trusted            bool           `json:"trusted"`
 }
 
 func project(record Record) Host {
-	return Host{ID: record.ID, Revision: record.Revision, ConnectionRevision: record.ConnectionRevision, Name: record.Name, Address: record.Address, Port: record.Port, Username: record.Username, CredentialType: record.CredentialType, HasCredential: len(record.Credential) > 0, Trusted: len(record.HostKey) > 0}
+	connType := record.ConnectionType
+	if connType == "" {
+		if record.ID == LocalID {
+			connType = ConnectionTypeLocal
+		} else {
+			connType = ConnectionTypeSSH
+		}
+	}
+	h := Host{
+		ID:                 record.ID,
+		Revision:           record.Revision,
+		ConnectionRevision: record.ConnectionRevision,
+		Name:               record.Name,
+		ConnectionType:     connType,
+	}
+	if connType == ConnectionTypeSSH {
+		h.Address = record.Address
+		h.Port = record.Port
+		h.Username = record.Username
+		h.CredentialType = record.CredentialType
+		h.HasCredential = len(record.Credential) > 0
+		h.Trusted = len(record.HostKey) > 0
+	}
+	return h
 }
 
 func (r *Registry) List(ctx context.Context) ([]Host, error) {
@@ -132,30 +171,39 @@ func (r *Registry) List(ctx context.Context) ([]Host, error) {
 	if r.closed {
 		return nil, errors.New("host registry is closed")
 	}
-	out := []Host{{ID: LocalID, Revision: LocalRevision, ConnectionRevision: LocalRevision, Name: "Local", Trusted: true}}
 	if r.store == nil {
-		return out, nil
+		return []Host{{
+			ID:                 LocalID,
+			Revision:           LocalRevision,
+			ConnectionRevision: LocalRevision,
+			Name:               defaultLocalHostName,
+			ConnectionType:     ConnectionTypeLocal,
+			Trusted:            false,
+		}}, nil
 	}
 	records, err := r.store.List(ctx)
 	if err != nil {
 		return nil, err
 	}
+	out := make([]Host, 0, len(records))
 	for _, record := range records {
 		out = append(out, project(record))
 	}
 	return out, nil
 }
 
-// HostInput provides input for registering or updating a remote host.
+// HostInput provides input for registering or updating a host.
 type HostInput struct {
-	ID             ID          `json:"id"`
-	Name           string      `json:"name"`
-	Address        string      `json:"address"`
-	Port           uint16      `json:"port"`
-	Username       string      `json:"username"`
-	CredentialType string      `json:"credentialType"`
-	Credentials    Credentials `json:"credentials"`
-	HostKey        []byte      `json:"hostKey"`
+	ID             ID             `json:"id"`
+	ConnectionType ConnectionType `json:"connectionType,omitempty"`
+	Name           string         `json:"name"`
+	Address        string         `json:"address,omitempty"`
+	Port           uint16         `json:"port,omitempty"`
+	Username       string         `json:"username,omitempty"`
+	CredentialType string         `json:"credentialType,omitempty"`
+	Credentials    Credentials    `json:"credentials,omitempty"`
+	HostKey        []byte         `json:"hostKey,omitempty"`
+	ChallengeToken string         `json:"challengeToken,omitempty"`
 }
 
 func validHostID(id ID) bool {
@@ -179,10 +227,17 @@ func (r *Registry) Get(ctx context.Context, id ID) (Host, error) {
 	if r.closed {
 		return Host{}, errors.New("host registry is closed")
 	}
-	if id == LocalID {
-		return Host{ID: LocalID, Revision: LocalRevision, ConnectionRevision: LocalRevision, Name: "Local", Trusted: true}, nil
-	}
 	if r.store == nil {
+		if id == LocalID {
+			return Host{
+				ID:                 LocalID,
+				Revision:           LocalRevision,
+				ConnectionRevision: LocalRevision,
+				Name:               defaultLocalHostName,
+				ConnectionType:     ConnectionTypeLocal,
+				Trusted:            false,
+			}, nil
+		}
 		return Host{}, ErrNotFound
 	}
 	record, err := r.store.Get(ctx, id)
@@ -192,15 +247,12 @@ func (r *Registry) Get(ctx context.Context, id ID) (Host, error) {
 	return project(record), nil
 }
 
-// Delete removes a registered host and its credentials; the local host cannot be deleted.
+// Delete removes a registered host and its credentials.
 func (r *Registry) Delete(ctx context.Context, id ID, expected Revision) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return errors.New("host registry is closed")
-	}
-	if id == LocalID {
-		return ErrUnsupported
 	}
 	if r.store == nil {
 		return ErrNotFound
@@ -222,15 +274,15 @@ func (r *Registry) GetCredentials(ctx context.Context, id ID) (Record, Credentia
 	if r.closed {
 		return Record{}, Credentials{}, errors.New("host registry is closed")
 	}
-	if id == LocalID {
-		return Record{}, Credentials{}, ErrUnsupported
-	}
 	if r.store == nil {
 		return Record{}, Credentials{}, ErrNotFound
 	}
 	record, err := r.store.Get(ctx, id)
 	if err != nil {
 		return Record{}, Credentials{}, err
+	}
+	if record.ConnectionType == ConnectionTypeLocal {
+		return Record{}, Credentials{}, ErrUnsupported
 	}
 	if len(record.Credential) == 0 {
 		return record, Credentials{}, nil
@@ -242,23 +294,69 @@ func (r *Registry) GetCredentials(ctx context.Context, id ID) (Record, Credentia
 	return record, creds, nil
 }
 
-// Save creates or updates a host record with credential replacement/retention and revision checks.
-func (r *Registry) Save(ctx context.Context, input HostInput, expected Revision) (Host, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.closed {
-		return Host{}, errors.New("host registry is closed")
+func hasIrrelevantLocalFields(input HostInput) bool {
+	if input.Address != "" || input.Port != 0 || input.Username != "" || input.CredentialType != "" {
+		return true
 	}
-	if err := r.initialize(ctx); err != nil {
-		return Host{}, fmt.Errorf("initialize storage: %w", err)
+	if input.Credentials.Password != "" || input.Credentials.PrivateKey != "" || input.Credentials.Passphrase != "" {
+		return true
 	}
-	if input.ID == LocalID || !validHostID(input.ID) {
-		return Host{}, errors.New("invalid host identifier")
+	return len(input.HostKey) > 0 || input.ChallengeToken != ""
+}
+
+func hasSecretFields(creds Credentials) bool {
+	return creds.Password != "" || creds.PrivateKey != "" || creds.Passphrase != ""
+}
+
+func (r *Registry) sealInputCredential(id ID, credType string, creds Credentials) ([]byte, error) {
+	if credType == "" {
+		return nil, nil
 	}
-	trimmedName := strings.TrimSpace(input.Name)
-	if trimmedName == "" {
-		return Host{}, errors.New("host name cannot be empty")
+	if credType != CredentialTypePassword && credType != CredentialTypePrivateKey {
+		return nil, errors.New("invalid credential type")
 	}
+	if (credType == CredentialTypePassword && creds.Password == "") ||
+		(credType == CredentialTypePrivateKey && creds.PrivateKey == "") {
+		return nil, errors.New("credentials required for configured credential type")
+	}
+	return r.vault.Seal(id, credType, creds)
+}
+
+func (r *Registry) saveNew(ctx context.Context, input HostInput, trimmedName string) (Host, error) {
+	connType := input.ConnectionType
+	if connType == "" {
+		if input.Address != "" || input.CredentialType != "" {
+			connType = ConnectionTypeSSH
+		} else {
+			connType = ConnectionTypeLocal
+		}
+	}
+	if connType != ConnectionTypeLocal && connType != ConnectionTypeSSH {
+		return Host{}, errors.New("invalid connection type")
+	}
+
+	rev, connRev, err := r.store.NextRevisions(ctx, input.ID)
+	if err != nil {
+		return Host{}, err
+	}
+
+	if connType == ConnectionTypeLocal {
+		if hasIrrelevantLocalFields(input) {
+			return Host{}, errors.New("irrelevant fields for local host")
+		}
+		newRecord := Record{
+			ID:                 input.ID,
+			Revision:           rev,
+			ConnectionRevision: connRev,
+			Name:               trimmedName,
+			ConnectionType:     ConnectionTypeLocal,
+		}
+		if err := r.store.Put(ctx, newRecord, 0); err != nil {
+			return Host{}, err
+		}
+		return project(newRecord), nil
+	}
+
 	trimmedAddr := strings.TrimSpace(input.Address)
 	if trimmedAddr == "" {
 		return Host{}, errors.New("host address cannot be empty")
@@ -271,41 +369,32 @@ func (r *Registry) Save(ctx context.Context, input HostInput, expected Revision)
 	if port == 0 {
 		port = 22
 	}
-
-	if expected == 0 {
-		var credBytes []byte
-		if input.CredentialType != "" {
-			if input.CredentialType != "password" && input.CredentialType != "private_key" {
-				return Host{}, errors.New("invalid credential type")
-			}
-			if (input.CredentialType == "password" && input.Credentials.Password == "") ||
-				(input.CredentialType == "private_key" && input.Credentials.PrivateKey == "") {
-				return Host{}, errors.New("credentials required for configured credential type")
-			}
-			var err error
-			credBytes, err = r.vault.Seal(input.ID, input.CredentialType, input.Credentials)
-			if err != nil {
-				return Host{}, err
-			}
-		}
-		newRecord := Record{
-			ID:                 input.ID,
-			Revision:           1,
-			ConnectionRevision: 1,
-			Name:               trimmedName,
-			Address:            trimmedAddr,
-			Port:               port,
-			Username:           trimmedUser,
-			CredentialType:     input.CredentialType,
-			Credential:         credBytes,
-			HostKey:            input.HostKey,
-		}
-		if err := r.store.Put(ctx, newRecord, 0); err != nil {
-			return Host{}, err
-		}
-		return project(newRecord), nil
+	credBytes, err := r.sealInputCredential(input.ID, input.CredentialType, input.Credentials)
+	if err != nil {
+		return Host{}, err
 	}
+	newRecord := Record{
+		ID:                 input.ID,
+		Revision:           rev,
+		ConnectionRevision: connRev,
+		Name:               trimmedName,
+		ConnectionType:     ConnectionTypeSSH,
+		Address:            trimmedAddr,
+		Port:               port,
+		Username:           trimmedUser,
+		CredentialType:     input.CredentialType,
+		Credential:         credBytes,
+		HostKey:            input.HostKey,
+	}
+	if err := r.store.Put(ctx, newRecord, 0); err != nil {
+		return Host{}, err
+	}
+	return project(newRecord), nil
+}
 
+func (r *Registry) saveUpdate(
+	ctx context.Context, input HostInput, trimmedName string, expected Revision,
+) (Host, error) {
 	old, err := r.store.Get(ctx, input.ID)
 	if err != nil {
 		return Host{}, err
@@ -313,52 +402,100 @@ func (r *Registry) Save(ctx context.Context, input HostInput, expected Revision)
 	if old.Revision != expected {
 		return Host{}, ErrStaleRevision
 	}
+	oldConnType := old.ConnectionType
+	if oldConnType == "" {
+		if old.ID == LocalID {
+			oldConnType = ConnectionTypeLocal
+		} else {
+			oldConnType = ConnectionTypeSSH
+		}
+	}
+	if input.ConnectionType != "" && input.ConnectionType != oldConnType {
+		return Host{}, errors.New("cannot change host connection type")
+	}
 
-	credType := old.CredentialType
-	credBytes := old.Credential
-	credChanged := false
+	if oldConnType == ConnectionTypeLocal {
+		if hasIrrelevantLocalFields(input) {
+			return Host{}, errors.New("irrelevant fields for local host")
+		}
+		newRecord := Record{
+			ID:                 input.ID,
+			Revision:           old.Revision + 1,
+			ConnectionRevision: old.ConnectionRevision,
+			Name:               trimmedName,
+			ConnectionType:     ConnectionTypeLocal,
+		}
+		if err := r.store.Put(ctx, newRecord, expected); err != nil {
+			return Host{}, err
+		}
+		return project(newRecord), nil
+	}
 
-	hasNewSecret := input.Credentials.Password != "" || input.Credentials.PrivateKey != "" || input.Credentials.Passphrase != ""
-	if hasNewSecret {
+	return r.saveUpdateSSH(ctx, input, trimmedName, old, expected)
+}
+
+func (r *Registry) resolveCredentialUpdate(
+	input HostInput, old Record,
+) (credType string, credBytes []byte, credChanged bool, err error) {
+	credType = old.CredentialType
+	credBytes = old.Credential
+
+	if hasSecretFields(input.Credentials) {
 		if input.CredentialType != "" {
 			credType = input.CredentialType
 		}
-		if credType != "password" && credType != "private_key" {
-			return Host{}, errors.New("invalid credential type")
+		sealed, sealErr := r.sealInputCredential(input.ID, credType, input.Credentials)
+		if sealErr != nil {
+			return "", nil, false, sealErr
 		}
-		if (credType == "password" && input.Credentials.Password == "") ||
-			(credType == "private_key" && input.Credentials.PrivateKey == "") {
-			return Host{}, errors.New("credentials required for configured credential type")
-		}
-		sealed, err := r.vault.Seal(input.ID, credType, input.Credentials)
-		if err != nil {
-			return Host{}, err
-		}
-		credBytes = sealed
-		credChanged = true
-	} else {
-		// Omitted replacement credentials retain existing credentials
-		if input.CredentialType != "" && input.CredentialType != old.CredentialType {
-			return Host{}, errors.New("cannot change credential type without supplying replacement credentials")
-		}
+		return credType, sealed, true, nil
+	}
+	if input.CredentialType != "" && input.CredentialType != old.CredentialType {
+		return "", nil, false, errors.New("cannot change credential type without supplying replacement credentials")
+	}
+	return credType, credBytes, false, nil
+}
+
+func resolveHostKeyUpdate(inputKey, oldKey []byte, endpointChanged bool) ([]byte, bool) {
+	if len(inputKey) > 0 {
+		return inputKey, !bytes.Equal(inputKey, oldKey)
+	}
+	if endpointChanged {
+		return nil, len(oldKey) > 0
+	}
+	return oldKey, false
+}
+
+func (r *Registry) saveUpdateSSH(
+	ctx context.Context, input HostInput, trimmedName string, old Record, expected Revision,
+) (Host, error) {
+	trimmedAddr := strings.TrimSpace(input.Address)
+	if trimmedAddr == "" {
+		trimmedAddr = old.Address
+	}
+	trimmedUser := strings.TrimSpace(input.Username)
+	if trimmedUser == "" {
+		trimmedUser = old.Username
+	}
+	port := input.Port
+	if port == 0 {
+		port = old.Port
+	}
+	if port == 0 {
+		port = 22
 	}
 
-	var hostKey []byte
-	trustChanged := false
-	if len(input.HostKey) > 0 {
-		hostKey = input.HostKey
-		trustChanged = !bytes.Equal(input.HostKey, old.HostKey)
-	} else if trimmedAddr != old.Address || port != old.Port {
-		// Endpoint edit invalidates trust for previous endpoint
-		hostKey = nil
-		trustChanged = len(old.HostKey) > 0
-	} else {
-		hostKey = old.HostKey
+	credType, credBytes, credChanged, err := r.resolveCredentialUpdate(input, old)
+	if err != nil {
+		return Host{}, err
 	}
+
+	endpointChanged := trimmedAddr != old.Address || port != old.Port
+	hostKey, trustChanged := resolveHostKeyUpdate(input.HostKey, old.HostKey, endpointChanged)
 
 	newRevision := old.Revision + 1
 	newConnRevision := old.ConnectionRevision
-	if trimmedAddr != old.Address || port != old.Port || trimmedUser != old.Username || credChanged || trustChanged {
+	if endpointChanged || trimmedUser != old.Username || credChanged || trustChanged {
 		newConnRevision = newRevision
 	}
 
@@ -367,6 +504,7 @@ func (r *Registry) Save(ctx context.Context, input HostInput, expected Revision)
 		Revision:           newRevision,
 		ConnectionRevision: newConnRevision,
 		Name:               trimmedName,
+		ConnectionType:     ConnectionTypeSSH,
 		Address:            trimmedAddr,
 		Port:               port,
 		Username:           trimmedUser,
@@ -379,6 +517,30 @@ func (r *Registry) Save(ctx context.Context, input HostInput, expected Revision)
 		return Host{}, err
 	}
 	return project(newRecord), nil
+}
+
+// Save creates or updates a host record with credential replacement/retention and revision checks.
+func (r *Registry) Save(ctx context.Context, input HostInput, expected Revision) (Host, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return Host{}, errors.New("host registry is closed")
+	}
+	if err := r.initialize(ctx); err != nil {
+		return Host{}, fmt.Errorf("initialize storage: %w", err)
+	}
+	if !validHostID(input.ID) {
+		return Host{}, errors.New("invalid host identifier")
+	}
+	trimmedName := strings.TrimSpace(input.Name)
+	if trimmedName == "" {
+		return Host{}, errors.New("host name cannot be empty")
+	}
+
+	if expected == 0 {
+		return r.saveNew(ctx, input, trimmedName)
+	}
+	return r.saveUpdate(ctx, input, trimmedName, expected)
 }
 
 func (r *Registry) AddPendingCleanup(ctx context.Context, rec PendingCleanupRecord) error {
@@ -414,4 +576,28 @@ func (r *Registry) ListPendingCleanups(ctx context.Context, hostID ID) ([]Pendin
 		}
 	}
 	return r.store.ListPendingCleanups(ctx, hostID)
+}
+
+func (r *Registry) GetSettings(ctx context.Context) (Settings, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return Settings{}, errors.New("host registry is closed")
+	}
+	if err := r.initialize(ctx); err != nil {
+		return Settings{}, err
+	}
+	return r.store.GetSettings(ctx)
+}
+
+func (r *Registry) UpdateDefaultHost(ctx context.Context, defaultHostID *ID, expected Revision) (Settings, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return Settings{}, errors.New("host registry is closed")
+	}
+	if err := r.initialize(ctx); err != nil {
+		return Settings{}, err
+	}
+	return r.store.UpdateDefaultHost(ctx, defaultHostID, expected)
 }

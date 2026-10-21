@@ -10,10 +10,14 @@ import (
 // ErrManagerClosing is returned when an attachment attempts to register while the manager is shutting down.
 var ErrManagerClosing = errors.New("terminal manager is closing")
 
+// ErrHostClosed is returned when an attachment attempts to register for a host that has been closed or removed.
+var ErrHostClosed = errors.New("host is closed or removed")
+
 // Manager manages the set of active terminal attachments and coordinates shutdown.
 type Manager struct {
 	mu              sync.Mutex
 	attachments     map[*Attachment]struct{}
+	hostEpochs      map[string]uint64
 	closing         bool
 	shutdownTimeout time.Duration
 }
@@ -27,17 +31,29 @@ func NewManager(shutdownTimeout time.Duration) *Manager {
 	}
 	return &Manager{
 		attachments:     make(map[*Attachment]struct{}),
+		hostEpochs:      make(map[string]uint64),
 		shutdownTimeout: shutdownTimeout,
 	}
 }
 
+// CurrentEpoch returns the current generation epoch for a host ID.
+func (m *Manager) CurrentEpoch(hostID string) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.hostEpochs[hostID]
+}
+
 // Register registers an active attachment. If the manager is already closing,
-// it rejects registration and returns ErrManagerClosing.
+// or if the host was closed after the attachment's epoch was captured,
+// it rejects registration and returns an error.
 func (m *Manager) Register(a *Attachment) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closing {
 		return ErrManagerClosing
+	}
+	if a.hostID != "" && a.epoch != m.hostEpochs[a.hostID] {
+		return ErrHostClosed
 	}
 	m.attachments[a] = struct{}{}
 	return nil
@@ -55,6 +71,24 @@ func (m *Manager) ActiveCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.attachments)
+}
+
+// CloseHost closes all active attachments for a specific host ID and increments its epoch,
+// atomically invalidating any in-flight registrations for this host.
+func (m *Manager) CloseHost(hostID string) {
+	m.mu.Lock()
+	m.hostEpochs[hostID]++
+	var list []*Attachment
+	for a := range m.attachments {
+		if a.hostID == hostID {
+			list = append(list, a)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, a := range list {
+		_ = a.ForceClose() //nolint:errcheck // Best-effort forced close during host invalidation
+	}
 }
 
 // Shutdown closes all active attachments within the shutdown timeout.

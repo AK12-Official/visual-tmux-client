@@ -116,6 +116,7 @@ func TestE2ERestartPreservesSession(t *testing.T) {
 		_, _, _, _ = runCmd(tmux, tmuxEnv, "-S", socket, "kill-server") //nolint:errcheck // test cleanup
 	})
 
+	stateDir := t.TempDir()
 	startHub := func() (*exec.Cmd, string, string) {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -126,7 +127,7 @@ func TestE2ERestartPreservesSession(t *testing.T) {
 
 		const token = "e2e-secret-token"
 		cmd := exec.Command(hubBin, "--addr", addr)
-		cmd.Env = append(tmuxEnv, "VISUAL_TMUX_CLIENT_TOKEN="+token)
+		cmd.Env = append(tmuxEnv, "XDG_CONFIG_HOME="+stateDir, "VISUAL_TMUX_CLIENT_TOKEN="+token)
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}

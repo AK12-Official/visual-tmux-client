@@ -36,6 +36,7 @@ const emit = defineEmits<{
   (e: 'rename', oldName: string, newName: string): void
   (e: 'kill', name: string): void
   (e: 'bulkKill', names: string[]): void
+  (e: 'bulk-kill', names: string[]): void
   (e: 'retry'): void
   (e: 'repair'): void
 }>()

@@ -2071,4 +2071,470 @@ test('discardHostDrafts drops tabs belonging to the specified host', async () =>
   wrapper.unmount()
 })
 
+test('RC-2: switching host keeps stale draft revision guard active and disables saving', async () => {
+  resetEditors()
+  setToken('tok')
+  const calls = hubFetch()
+  const wrapper = mount(FileManagerOverlay, {
+    props: {
+      session: 'work',
+      hostId: 'remote-1',
+      hostRevision: 1,
+      availableHostIds: ['remote-1', 'remote-2'],
+    },
+    attachTo: document.body,
+  })
+  try {
+    await flush()
+    await openFile(wrapper, 'a.txt')
+    await type('my stale draft')
+    // Host configuration changes: revision becomes 2
+    await wrapper.setProps({ hostRevision: 2 })
+    await flush()
+    assert.equal((await saveButton(wrapper)).attributes('disabled'), '')
 
+    // Switch active host to remote-2
+    await wrapper.setProps({ hostId: 'remote-2', hostRevision: 1 })
+    await flush()
+    const button = await saveButton(wrapper)
+    assert.equal(
+      button.attributes('disabled'),
+      '',
+      'stale draft for remote-1 must remain disabled when switched to remote-2',
+    )
+
+    // Attempting to save programmatically must be refused
+    await (wrapper.vm as any).save()
+    await flush()
+    const writes = calls.filter((c) => c.url.includes('/files/write'))
+    assert.equal(writes.length, 0, 'no write request should be sent for stale draft')
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+test('R3-1: delete waiting on saving aborts if host connection revision changes', async () => {
+  resetEditors()
+  setToken('tok')
+  const saveDeferred = deferred()
+  const calls = hubFetch({
+    read: () => text('original file content'),
+    write: () => saveDeferred.respond(),
+  })
+  window.confirm = () => true
+  const wrapper = mount(FileManagerOverlay, {
+    props: {
+      session: 'work',
+      hostId: 'remote-1',
+      hostRevision: 1,
+      availableHosts: [
+        { id: 'remote-1', name: 'Remote 1', address: '1.2.3.4', connectionRevision: 1 },
+      ],
+    },
+    attachTo: document.body,
+  })
+  try {
+    await flush()
+    await openFile(wrapper, 'a.txt')
+    await type('pending save content')
+
+    // Start saving (which stays in flight due to saveDeferred)
+    void (wrapper.vm as any).save()
+    await flush()
+
+    // Now user initiates deleteTarget on a.txt
+    const entry = { name: 'a.txt', is_dir: false, size: 5, mtime: 1000 }
+    const deletePromise = (wrapper.vm as any).deleteTarget(entry, '/srv/work/a.txt')
+
+    // While deleteTarget is waiting on saving.idle, remote-1 connection changes: connectionRevision 1 -> 2
+    await wrapper.setProps({
+      availableHosts: [
+        { id: 'remote-1', name: 'Remote 1', address: '5.6.7.8', connectionRevision: 2 },
+      ],
+    })
+    await flush()
+
+    // Release save
+    saveDeferred.release(json({ mtime: 1000, mtime_nanos: '1000000000' }))
+    await flush()
+    await deletePromise
+    await flush()
+
+    // Verify delete was aborted because host connection changed while waiting!
+    assert.equal(
+      calls.filter((c) => c.url.includes('/files/delete')).length,
+      0,
+      'delete request must NOT be sent after host connection revision changed during save wait',
+    )
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+test('R3-2: reconcile updates connectionRevision for target host and enables subsequent save', async () => {
+  resetEditors()
+  setToken('tok')
+  const calls = hubFetch({
+    read: () => text('fresh disk content'),
+  })
+  window.confirm = () => true
+  const wrapper = mount(FileManagerOverlay, {
+    props: {
+      session: 'work',
+      hostId: 'remote-1',
+      hostRevision: 1,
+      availableHosts: [
+        { id: 'remote-1', name: 'Remote 1', address: '1.2.3.4', connectionRevision: 1 },
+      ],
+    },
+    attachTo: document.body,
+  })
+  try {
+    await flush()
+    await openFile(wrapper, 'a.txt')
+    await type('stale edits')
+
+    // Host reconfigured: connection revision becomes 2
+    await wrapper.setProps({
+      hostRevision: 2,
+      availableHosts: [
+        { id: 'remote-1', name: 'Remote 1', address: '5.6.7.8', connectionRevision: 2 },
+      ],
+    })
+    await flush()
+
+    // Save must be disabled
+    let button = await saveButton(wrapper)
+    assert.equal(button.attributes('disabled'), '', 'save should be disabled before reconcile')
+
+    // Reconcile the tab
+    const tabId = (wrapper.vm as any).tabs[0].id
+    await (wrapper.vm as any).reconcile(tabId)
+    await flush()
+
+    // Verify tab now has connectionRevision=2 and revision=2
+    const tab = (wrapper.vm as any).tabs[0]
+    assert.equal(tab.connectionRevision, 2, 'tab should update connectionRevision after reconcile')
+    assert.equal(tab.revision, 2, 'tab should update revision after reconcile')
+
+    // Edit tab and save
+    await type('fresh user edit')
+    await flush()
+
+    button = await saveButton(wrapper)
+    assert.equal(button.attributes('disabled'), undefined, 'save should be enabled after reconcile and edit')
+
+    await (wrapper.vm as any).save()
+    await flush()
+    const writes = calls.filter((c) => c.url.includes('/files/write'))
+    assert.equal(writes.length, 1, 'write request must be successfully sent after reconcile')
+    assert.ok(
+      writes[0].url.includes('expected_connection_revision=2'),
+      'write request must include updated expected_connection_revision=2',
+    )
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+test('R4-W1: late directory listing response from host A does not overwrite host B file tree on host switch', async () => {
+  resetEditors()
+  setToken('tok')
+  const slowA = deferred()
+  const calls: Call[] = []
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method ?? 'GET'
+    calls.push({ url, method, body: typeof init?.body === 'string' ? init.body : '' })
+
+    if (url.includes('/capabilities')) {
+      return json({
+        hostId: url.includes('host-b') ? 'host-b' : 'host-a',
+        revision: 1,
+        online: true,
+        files: { enabled: true, atomicReplacement: true },
+      })
+    }
+    if (url.includes('/working-directory')) {
+      return json({ path: '/srv', substituted: false })
+    }
+    if (url.includes('/api/hosts/host-a/files/list')) {
+      return slowA.respond()
+    }
+    if (url.includes('/api/hosts/host-b/files/list')) {
+      return json({
+        path: '/srv',
+        entries: [{ name: 'B-only.txt', is_dir: false, size: 10, mtime: 1000 }],
+        truncated: false,
+      })
+    }
+    if (url.includes('/files/read')) {
+      return text('content from B')
+    }
+    throw new Error(`unexpected fetch: ${method} ${url}`)
+  }) as typeof fetch
+
+  const wrapper = mount(FileManagerOverlay, {
+    props: {
+      session: 'work',
+      hostId: 'host-a',
+      availableHosts: [
+        { id: 'host-a', name: 'Host A', connectionRevision: 1 },
+        { id: 'host-b', name: 'Host B', connectionRevision: 1 },
+      ],
+    },
+    attachTo: document.body,
+  })
+
+  try {
+    // Flush to let host A's list request be sent and wait on slowA
+    await flush()
+
+    // Now switch host to host-b while host A's list request is still in flight
+    await wrapper.setProps({ hostId: 'host-b' })
+    await flush()
+
+    // Host B's list resolved, verify B's row is showing in DOM
+    const bRow = wrapper.findAll('.tree__row').find((r) => r.text().includes('B-only.txt'))
+    assert.ok(bRow, 'Host B tree should display B-only.txt')
+
+    // Now release Host A's slow list response with A-only.txt
+    slowA.release(
+      json({
+        path: '/srv',
+        entries: [{ name: 'A-only.txt', is_dir: false, size: 10, mtime: 1000 }],
+        truncated: false,
+      }),
+    )
+    await flush()
+
+    // Verify B's file tree is NOT overwritten by Host A's delayed response
+    const rows = wrapper.findAll('.tree__row')
+    const hasA = rows.some((r) => r.text().includes('A-only.txt'))
+    const hasB = rows.some((r) => r.text().includes('B-only.txt'))
+    assert.equal(hasA, false, 'Host A delayed entries must not appear in Host B tree')
+    assert.equal(hasB, true, 'Host B entries must be preserved in tree')
+
+    // Click B-only.txt row to open it
+    await openFile(wrapper, 'B-only.txt')
+    await flush()
+
+    // Verify the read request targeted host-b, NOT host-a
+    const readCalls = calls.filter((c) => c.url.includes('/files/read'))
+    assert.equal(readCalls.length, 1, 'clicking row should send read request')
+    assert.ok(
+      readCalls[0].url.includes('/api/hosts/host-b/files/read'),
+      `read call must target host-b, got ${readCalls[0].url}`,
+    )
+    assert.ok(
+      readCalls[0].url.includes('path=%2Fsrv%2FB-only.txt'),
+      `read call must read B-only.txt, got ${readCalls[0].url}`,
+    )
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+test('R5-W1: updating connectionRevision on same host clears old tree rows and prevents deletion against new target', async () => {
+  let listCalls = 0
+  const slowNewList = deferred()
+  const calls = hubFetch({
+    list: (path: string) => {
+      listCalls += 1
+      if (listCalls === 1) {
+        return json({
+          path,
+          entries: [{ name: 'a.txt', is_dir: false, size: 10, mtime: 1000 }],
+          truncated: false,
+        })
+      }
+      return slowNewList.respond()
+    },
+    delete: () => json({}),
+  })
+
+  const wrapper = mount(FileManagerOverlay, {
+    props: {
+      session: 'work',
+      hostId: 'remote-1',
+      availableHosts: [
+        { id: 'remote-1', name: 'Remote 1', revision: 1, connectionRevision: 1 },
+      ],
+    },
+    attachTo: document.body,
+  })
+
+  try {
+    await flush()
+
+    // 1. In connectionRevision 1, /srv/work is opened with a.txt
+    const rowsBefore = wrapper.findAll('.tree__row')
+    assert.ok(
+      rowsBefore.some((r) => r.text().includes('a.txt')),
+      'a.txt must be rendered in connectionRevision 1',
+    )
+
+    // 2. Host ID remains remote-1, but connection revision updates 1 -> 2
+    await wrapper.setProps({
+      availableHosts: [
+        { id: 'remote-1', name: 'Remote 1', revision: 2, connectionRevision: 2 },
+      ],
+    })
+    await flush()
+
+    // Old tree rows must be cleared immediately (loading indicator or empty tree)
+    const rowsAfter = wrapper.findAll('.tree__row')
+    assert.equal(
+      rowsAfter.length,
+      0,
+      'old directory rows must disappear when connection revision changes',
+    )
+    assert.ok(
+      wrapper.find('.fm__tree .fm__state').text().includes('Loading'),
+      'loading state should be displayed while new connection listing is fetched',
+    )
+
+    // 3. Even if deleteTarget is invoked with the stale entry from rev 1, it must be rejected
+    // and must NOT send a delete request to rev 2!
+    const oldEntry = { name: 'a.txt', is_dir: false, size: 10, mtime: 1000 }
+    await (wrapper.vm as any).deleteTarget(oldEntry, '/srv/work/a.txt')
+    await flush()
+
+    const deleteCalls = calls.filter((c) => c.url.includes('/files/delete'))
+    assert.equal(
+      deleteCalls.length,
+      0,
+      'no delete request should be sent for old entry from prior connection revision',
+    )
+
+    // Verify notice was emitted
+    const notices = wrapper.emitted('notice') ?? []
+    assert.ok(
+      notices.some(
+        (args) =>
+          String(args[0]).includes('directory is reloading') ||
+          String(args[0]).includes('host configuration has changed') ||
+          String(args[0]).includes('not present'),
+      ),
+      `expected refusal notice, got: ${JSON.stringify(notices)}`,
+    )
+
+    // 4. Metadata-only update (revision 2 -> 3, connectionRevision remains 2) must NOT clear tree once loaded
+    slowNewList.release(
+      json({
+        path: '/srv/work',
+        entries: [{ name: 'b.txt', is_dir: false, size: 20, mtime: 2000 }],
+        truncated: false,
+      }),
+    )
+    await flush()
+
+    const rowsNew = wrapper.findAll('.tree__row')
+    assert.ok(
+      rowsNew.some((r) => r.text().includes('b.txt')),
+      'b.txt should be rendered from rev 2 listing',
+    )
+
+    // Update revision only (e.g. host renamed)
+    await wrapper.setProps({
+      availableHosts: [
+        { id: 'remote-1', name: 'Remote 1 Renamed', revision: 3, connectionRevision: 2 },
+      ],
+    })
+    await flush()
+
+    const rowsAfterMetaRename = wrapper.findAll('.tree__row')
+    assert.ok(
+      rowsAfterMetaRename.some((r) => r.text().includes('b.txt')),
+      'tree must remain intact on metadata-only host edit',
+    )
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+test('R6-W1: old delete success does not drop new connection reconciled draft', async () => {
+  resetEditors()
+  setToken('tok')
+  const pendingDelete = deferred()
+  const calls = hubFetch({
+    delete: pendingDelete.respond,
+    write: () => json({ mtime: 3000, mtime_nanos: '3000000000' }),
+  })
+  const hosts = (r: number) => [
+    { id: 'remote-1', name: 'Host A', revision: r, connectionRevision: r, trusted: true },
+  ]
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work', hostId: 'remote-1', hostRevision: 1, availableHosts: hosts(1) },
+    attachTo: document.body,
+  })
+  const origConfirm = window.confirm
+  window.confirm = () => true
+  try {
+    await flush()
+    await openFile(wrapper, 'a.txt')
+    const vm = wrapper.vm as any
+    assert.equal(vm.tabs.length, 1)
+    const originalTabId = vm.tabs[0].id
+    assert.equal(vm.tabs[0].connectionRevision, 1)
+
+    // Trigger delete on connRev 1; the delete request stays pending in flight
+    const deletion = vm.deleteTarget({ name: 'a.txt', is_dir: false }, '/srv/work/a.txt')
+    await flush()
+
+    // Host reconfigured to connectionRevision: 2
+    await wrapper.setProps({ hostRevision: 2, availableHosts: hosts(2) })
+    await flush()
+
+    // Reconcile tab on the new connection
+    await vm.reconcile(originalTabId)
+    await flush()
+    assert.equal(vm.tabs[0].connectionRevision, 2)
+
+    // User types new unsaved draft on the new connection
+    await type('NEW CONNECTION UNSAVED')
+    assert.ok(vm.tabs[0].text.includes('NEW CONNECTION UNSAVED'))
+    assert.equal(vm.tabs[0].text !== vm.tabs[0].saved, true, 'tab must be dirty')
+
+    // Release old delete response (from connRev 1)
+    pendingDelete.release(json({}))
+    await deletion
+    await flush()
+
+    // Assert: tab on connectionRevision 2 is NOT dropped or closed
+    assert.equal(vm.tabs.length, 1, 'old connection delete must not remove new connection tab')
+    assert.equal(vm.tabs[0].id, originalTabId, 'tab id must be preserved')
+    assert.equal(vm.tabs[0].connectionRevision, 2, 'tab connectionRevision must remain 2')
+    assert.ok(vm.tabs[0].text.includes('NEW CONNECTION UNSAVED'), 'draft content must be preserved')
+    assert.equal(vm.tabs[0].text !== vm.tabs[0].saved, true, 'tab must remain dirty')
+
+    // Assert notice emitted about previous connection delete
+    const notices = wrapper.emitted('notice') ?? []
+    assert.ok(
+      notices.some((args) => String(args[0]).includes('previous connection')),
+      `expected notice about previous connection delete, got: ${JSON.stringify(notices)}`,
+    )
+
+    // Verify saving the reconciled draft on connRev 2 works and sends connectionRevision=2
+    await vm.save(vm.tabs[0])
+    await flush()
+    assert.equal(vm.tabs[0].text, vm.tabs[0].saved, 'tab should be marked clean after save')
+    const writes = calls.filter((c) => c.url.includes('/files/write'))
+    assert.ok(writes.length > 0, 'write request must have been sent')
+    assert.ok(
+      writes[writes.length - 1].url.includes('expected_connection_revision=2'),
+      `write request must send expected_connection_revision=2, got ${writes[writes.length - 1].url}`,
+    )
+
+    // Verify that deleting the file on the current connection revision (connRev 2) DOES remove the tab
+    const currentDeletion = vm.deleteTarget({ name: 'a.txt', is_dir: false }, '/srv/work/a.txt')
+    await flush()
+    await currentDeletion
+    await flush()
+    assert.equal(vm.tabs.length, 0, 'delete on current connection revision must clean up tabs')
+  } finally {
+    window.confirm = origConfirm
+    wrapper.unmount()
+  }
+})

@@ -10,6 +10,7 @@ import {
   isExpanded,
   isTruncated,
   loadDirectory,
+  resetTreeState,
   visibleRows,
 } from './tree'
 import type { Entry } from './api'
@@ -377,4 +378,93 @@ test('a refused directory does not leave a partial cache entry', async () => {
 
   await assert.rejects(() => loadDirectory(state, '/srv'))
   assert.equal(cachedChildren(state, '/srv'), undefined)
+})
+
+test('late loadDirectory response from host A is discarded when tree switched to host B', async () => {
+  setup()
+  let resolveHostA!: (value: Response) => void
+  const hostAPromise = new Promise<Response>((resolve) => {
+    resolveHostA = resolve
+  })
+
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.includes('/api/hosts/host-a/files/list')) {
+      return hostAPromise
+    }
+    if (url.includes('/api/hosts/host-b/files/list')) {
+      return new Response(
+        JSON.stringify({
+          path: '/',
+          entries: [entry('B-only.txt')],
+          truncated: false,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    }
+    return new Response(JSON.stringify({ error: 'not_found' }), { status: 404 })
+  }) as typeof fetch
+
+  const state = createTreeState('host-a')
+  // Start loading directory on host A
+  const pendingA = loadDirectory(state, '/', true, 'host-a')
+
+  // Switch tree to host B
+  resetTreeState(state, 'host-b')
+
+  // Load directory on host B and ensure it succeeds and caches B's entries
+  const bEntries = await loadDirectory(state, '/', true, 'host-b')
+  assert.equal(bEntries.length, 1)
+  assert.equal(bEntries[0].name, 'B-only.txt')
+  assert.deepEqual(cachedChildren(state, '/'), bEntries)
+
+  // Now resolve host A's late response
+  resolveHostA(
+    new Response(
+      JSON.stringify({
+        path: '/',
+        entries: [entry('A-only.txt')],
+        truncated: false,
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ),
+  )
+  await pendingA
+
+  // Host B's cache must NOT have been overwritten by host A's response!
+  const cached = cachedChildren(state, '/')
+  assert.ok(cached !== undefined)
+  assert.equal(cached.length, 1)
+  assert.equal(cached[0].name, 'B-only.txt')
+})
+
+test('loadDirectory response is discarded when connectionRevision drifts', async () => {
+  setup()
+  let resolveRev1!: (value: Response) => void
+  const rev1Promise = new Promise<Response>((resolve) => {
+    resolveRev1 = resolve
+  })
+
+  globalThis.fetch = (async () => rev1Promise) as typeof fetch
+
+  const state = createTreeState('host-b', 1)
+  const pending = loadDirectory(state, '/', true, 'host-b', 1)
+
+  // Connection revision changes to 2 while request is in flight
+  state.connectionRevision = 2
+
+  resolveRev1(
+    new Response(
+      JSON.stringify({
+        path: '/',
+        entries: [entry('stale.txt')],
+        truncated: false,
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ),
+  )
+  await pending
+
+  // Response for revision 1 must be discarded
+  assert.equal(cachedChildren(state, '/'), undefined)
 })

@@ -175,7 +175,10 @@ func TestTwoRemoteHostsAndLocalAcceptanceFlow(t *testing.T) {
 	if err := sessSvc1.RenameSession(ctx, "only-pass", "renamed-pass"); err != nil {
 		t.Fatalf("rename session: %v", err)
 	}
-	updatedList1, _ := sessSvc1.ListSessions(ctx)
+	updatedList1, err := sessSvc1.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
 	var updatedNames1 []string
 	for _, s := range updatedList1 {
 		updatedNames1 = append(updatedNames1, s.Name)
@@ -201,7 +204,7 @@ func TestTwoRemoteHostsAndLocalAcceptanceFlow(t *testing.T) {
 	readDone := make(chan struct{})
 	go func() {
 		buf := make([]byte, 1024)
-		_, _ = proc1.Read(buf)
+		_, _ = proc1.Read(buf) //nolint:errcheck // background drain
 		close(readDone)
 	}()
 
@@ -218,9 +221,9 @@ func TestTwoRemoteHostsAndLocalAcceptanceFlow(t *testing.T) {
 	// Detach process
 	if err := proc1.Detach(); err != nil {
 		// Fallback to Close if Detach returned error
-		_ = proc1.Close()
+		_ = proc1.Close() //nolint:errcheck // fallback cleanup
 	} else {
-		_ = proc1.Close()
+		_ = proc1.Close() //nolint:errcheck // post-detach cleanup
 	}
 
 	select {
@@ -261,8 +264,11 @@ func TestTwoRemoteHostsAndLocalAcceptanceFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read file: %v", err)
 	}
-	defer readRes.File.Close()
-	contentBytes, _ := io.ReadAll(readRes.File)
+	defer readRes.File.Close() //nolint:errcheck // test cleanup
+	contentBytes, err := io.ReadAll(readRes.File)
+	if err != nil {
+		t.Fatalf("read file content: %v", err)
+	}
 	if string(contentBytes) != "first line\n" {
 		t.Fatalf("unexpected content: %q", string(contentBytes))
 	}
@@ -283,7 +289,9 @@ func TestTwoRemoteHostsAndLocalAcceptanceFlow(t *testing.T) {
 		Millis: writeRes.Mtime,
 		Nanos:  &writeRes.MtimeNanos,
 	}
-	writeRes2, err := fileSvc1.Write(ctx, targetFile, bytes.NewReader([]byte("updated line\n")), 13, validPrecondition, true)
+	writeRes2, err := fileSvc1.Write(
+		ctx, targetFile, bytes.NewReader([]byte("updated line\n")), 13, validPrecondition, true,
+	)
 	if err != nil {
 		t.Fatalf("write with valid precondition failed: %v", err)
 	}
@@ -304,15 +312,15 @@ func TestTwoRemoteHostsAndLocalAcceptanceFlow(t *testing.T) {
 
 	// 8. Hub Restart Acceptance Flow
 	// Shut down current connection manager and registry
-	_ = connMgr.Close()
-	_ = registry.Close()
+	_ = connMgr.Close()  //nolint:errcheck // test cleanup
+	_ = registry.Close() //nolint:errcheck // test cleanup
 
 	// Reopen registry against the existing SQLite database and master key
 	reopenedRegistry, err := host.NewRegistry(ctx, stateDir, masterKeyPath)
 	if err != nil {
 		t.Fatalf("reopen registry after restart: %v", err)
 	}
-	defer reopenedRegistry.Close()
+	defer reopenedRegistry.Close() //nolint:errcheck // test cleanup
 
 	// Verify all enrolled hosts are restored
 	restoredHosts, err := reopenedRegistry.List(ctx)
@@ -324,7 +332,7 @@ func TestTwoRemoteHostsAndLocalAcceptanceFlow(t *testing.T) {
 	}
 
 	reopenedConnMgr := host.NewConnectionManager(host.DefaultConnectionConfig(), reopenedRegistry)
-	defer reopenedConnMgr.Close()
+	defer reopenedConnMgr.Close() //nolint:errcheck // test cleanup
 
 	// Verify both remote hosts reconnect successfully and tmux sessions survive restart!
 	for _, h := range []host.ID{"remote-pass", "remote-key"} {
@@ -356,7 +364,7 @@ func TestTwoRemoteHostsAndLocalAcceptanceFlow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reattach after restart on %s: %v", h, err)
 		}
-		_ = proc.Close()
+		_ = proc.Close() //nolint:errcheck // test cleanup
 	}
 }
 

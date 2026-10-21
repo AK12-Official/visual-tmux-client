@@ -62,6 +62,30 @@ const (
 
 	PosixRenameExtension = "posix-rename@openssh.com"
 	FsyncExtension       = "fsync@openssh.com"
+
+	defaultMaxEntries = 1000
+
+	initPacketLen     = 9
+	initPayloadLen    = 5
+	sftpProtocolVer3  = 3
+	maxSFTPPacketSize = 256 * 1024
+
+	uint32Size = 4
+	uint64Size = 8
+
+	statusHeaderMinLen = 8
+	statusMsgLenOffset = 12
+	handleHeaderMinLen = 8
+	nameHeaderMinLen   = 8
+
+	s_IFMT   = 0170000
+	s_IFDIR  = 0040000
+	s_IFLNK  = 0120000
+	s_IFSOCK = 0140000
+	s_IFIFO  = 0010000
+	s_IFCHR  = 0020000
+	s_IFBLK  = 0060000
+	permMask = 0777
 )
 
 // SFTPRemoteEntry contains metadata for an entry observed via SFTP.
@@ -152,22 +176,30 @@ func (a *SFTPAdapter) Close() error {
 
 // ReadDirBounded reads directory entries up to maxEntries without consuming the remainder of oversized directories.
 // It stops reading and closes the directory handle as soon as maxEntries has been satisfied.
-func (a *SFTPAdapter) ReadDirBounded(ctx context.Context, dirPath string, maxEntries int) ([]SFTPRemoteEntry, bool, error) {
+func (a *SFTPAdapter) ReadDirBounded(
+	ctx context.Context,
+	dirPath string,
+	maxEntries int,
+) ([]SFTPRemoteEntry, bool, error) {
 	if maxEntries <= 0 {
-		maxEntries = 1000
+		maxEntries = defaultMaxEntries
 	}
 
 	session, err := a.sshClient.NewSession()
 	if err != nil {
 		return nil, false, fmt.Errorf("open sftp channel: %w", err)
 	}
-	defer session.Close()
+	defer func() {
+		_ = session.Close() //nolint:errcheck // bounded readdir session cleanup
+	}()
 
 	rwc, err := session.StdinPipe()
 	if err != nil {
 		return nil, false, err
 	}
-	defer rwc.Close()
+	defer func() {
+		_ = rwc.Close() //nolint:errcheck // stdin pipe cleanup
+	}()
 
 	stdout, err := session.StdoutPipe()
 	if err != nil {
@@ -178,71 +210,91 @@ func (a *SFTPAdapter) ReadDirBounded(ctx context.Context, dirPath string, maxEnt
 		return nil, false, fmt.Errorf("request sftp subsystem: %w", err)
 	}
 
-	// Channel closure on context cancellation for effective cancellation
 	doneCh := make(chan struct{})
 	defer close(doneCh)
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = session.Close()
+			_ = session.Close() //nolint:errcheck // cancel sftp session
 		case <-doneCh:
 		}
 	}()
 
-	// 1. Handshake: send INIT (version 3)
-	initPkt := make([]byte, 9)
-	binary.BigEndian.PutUint32(initPkt[0:4], 5) // length
-	initPkt[4] = sshFxpInit
-	binary.BigEndian.PutUint32(initPkt[5:9], 3) // version 3
-	if _, err := rwc.Write(initPkt); err != nil {
-		return nil, false, fmt.Errorf("send init: %w", err)
+	if err := sendSFTPInit(rwc, stdout); err != nil {
+		return nil, false, err
 	}
 
-	// Read VERSION reply
-	typ, verData, err := readSFTPPacket(stdout)
+	var reqID uint32 = 1
+	handle, err := openSFTPDir(rwc, stdout, reqID, dirPath)
 	if err != nil {
-		return nil, false, fmt.Errorf("read version: %w", err)
+		return nil, false, err
+	}
+	defer func() {
+		reqID++
+		closePkt := buildStringPacket(sshFxpClose, reqID, handle)
+		_ = writeSFTPPacket(rwc, closePkt) //nolint:errcheck // best effort handle close
+	}()
+
+	return fetchDirEntries(ctx, rwc, stdout, handle, &reqID, maxEntries)
+}
+
+func writeSFTPPacket(w io.Writer, p []byte) error {
+	_, err := w.Write(p)
+	return err
+}
+
+func sendSFTPInit(rwc io.Writer, stdout io.Reader) error {
+	initPkt := make([]byte, initPacketLen)
+	binary.BigEndian.PutUint32(initPkt[0:uint32Size], initPayloadLen)
+	initPkt[uint32Size] = sshFxpInit
+	binary.BigEndian.PutUint32(initPkt[uint32Size+1:initPacketLen], sftpProtocolVer3)
+	if _, err := rwc.Write(initPkt); err != nil {
+		return fmt.Errorf("send init: %w", err)
+	}
+	typ, _, err := readSFTPPacket(stdout)
+	if err != nil {
+		return fmt.Errorf("read version: %w", err)
 	}
 	if typ != sshFxpVersion {
-		return nil, false, fmt.Errorf("expected version packet, got %d", typ)
+		return fmt.Errorf("expected version packet, got %d", typ)
 	}
-	_ = verData
+	return nil
+}
 
-	// 2. Open directory: SSH_FXP_OPENDIR
-	var reqID uint32 = 1
+func openSFTPDir(rwc io.Writer, stdout io.Reader, reqID uint32, dirPath string) (string, error) {
 	openPkt := buildStringPacket(sshFxpOpendir, reqID, dirPath)
 	if _, err := rwc.Write(openPkt); err != nil {
-		return nil, false, fmt.Errorf("send opendir: %w", err)
+		return "", fmt.Errorf("send opendir: %w", err)
 	}
 
 	typ, data, err := readSFTPPacket(stdout)
 	if err != nil {
-		return nil, false, fmt.Errorf("read opendir reply: %w", err)
+		return "", fmt.Errorf("read opendir reply: %w", err)
 	}
 	if typ == sshFxpStatus {
-		statusID, code, msg := parseStatus(data)
-		_ = statusID
+		_, code, msg := parseStatus(data)
 		if code == sshFxNoSuchFile {
-			return nil, false, os.ErrNotExist
+			return "", os.ErrNotExist
 		}
 		if code == sshFxPermissionDenied {
-			return nil, false, os.ErrPermission
+			return "", os.ErrPermission
 		}
-		return nil, false, fmt.Errorf("opendir failed (%d): %s", code, msg)
+		return "", fmt.Errorf("opendir failed (%d): %s", code, msg)
 	}
 	if typ != sshFxpHandle {
-		return nil, false, fmt.Errorf("expected handle packet, got %d", typ)
+		return "", fmt.Errorf("expected handle packet, got %d", typ)
 	}
-	handle := parseHandle(data)
+	return parseHandle(data), nil
+}
 
-	// Close handle on exit
-	defer func() {
-		reqID++
-		closePkt := buildStringPacket(sshFxpClose, reqID, handle)
-		_, _ = rwc.Write(closePkt)
-	}()
-
-	// 3. Loop READDIR until maxEntries or EOF
+func fetchDirEntries(
+	ctx context.Context,
+	rwc io.Writer,
+	stdout io.Reader,
+	handle string,
+	reqID *uint32,
+	maxEntries int,
+) ([]SFTPRemoteEntry, bool, error) {
 	var entries []SFTPRemoteEntry
 	var truncated bool
 
@@ -251,8 +303,8 @@ func (a *SFTPAdapter) ReadDirBounded(ctx context.Context, dirPath string, maxEnt
 			return nil, false, ctx.Err()
 		}
 
-		reqID++
-		readPkt := buildStringPacket(sshFxpReaddir, reqID, handle)
+		*reqID++
+		readPkt := buildStringPacket(sshFxpReaddir, *reqID, handle)
 		if _, err := rwc.Write(readPkt); err != nil {
 			return nil, false, fmt.Errorf("send readdir: %w", err)
 		}
@@ -294,7 +346,6 @@ func (a *SFTPAdapter) ReadDirBounded(ctx context.Context, dirPath string, maxEnt
 		}
 
 		if truncated {
-			// Work does NOT scale with oversized directories: stop immediately!
 			break
 		}
 	}
@@ -303,12 +354,12 @@ func (a *SFTPAdapter) ReadDirBounded(ctx context.Context, dirPath string, maxEnt
 }
 
 func readSFTPPacket(r io.Reader) (byte, []byte, error) {
-	var lenBuf [4]byte
+	var lenBuf [uint32Size]byte
 	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
 		return 0, nil, err
 	}
 	pktLen := binary.BigEndian.Uint32(lenBuf[:])
-	if pktLen == 0 || pktLen > 256*1024 {
+	if pktLen == 0 || pktLen > maxSFTPPacketSize {
 		return 0, nil, fmt.Errorf("invalid sftp packet length: %d", pktLen)
 	}
 	buf := make([]byte, pktLen)
@@ -320,160 +371,191 @@ func readSFTPPacket(r io.Reader) (byte, []byte, error) {
 
 func buildStringPacket(typ byte, id uint32, str string) []byte {
 	strBytes := []byte(str)
-	pktLen := uint32(1 + 4 + 4 + len(strBytes))
-	b := make([]byte, 4+pktLen)
-	binary.BigEndian.PutUint32(b[0:4], pktLen)
-	b[4] = typ
-	binary.BigEndian.PutUint32(b[5:9], id)
-	binary.BigEndian.PutUint32(b[9:13], uint32(len(strBytes)))
-	copy(b[13:], strBytes)
+	pktLen := uint32(1 + uint32Size + uint32Size + len(strBytes))
+	b := make([]byte, uint32Size+pktLen)
+	binary.BigEndian.PutUint32(b[0:uint32Size], pktLen)
+	b[uint32Size] = typ
+	binary.BigEndian.PutUint32(b[uint32Size+1:uint32Size+1+uint32Size], id)
+	offset := uint32Size + 1 + uint32Size
+	binary.BigEndian.PutUint32(b[offset:offset+uint32Size], uint32(len(strBytes)))
+	copy(b[offset+uint32Size:], strBytes)
 	return b
 }
 
 func parseStatus(data []byte) (id uint32, code uint32, msg string) {
-	if len(data) < 8 {
+	if len(data) < statusHeaderMinLen {
 		return 0, sshFxFailure, ""
 	}
-	id = binary.BigEndian.Uint32(data[0:4])
-	code = binary.BigEndian.Uint32(data[4:8])
-	if len(data) >= 12 {
-		msgLen := binary.BigEndian.Uint32(data[8:12])
-		if len(data) >= int(12+msgLen) {
-			msg = string(data[12 : 12+msgLen])
+	id = binary.BigEndian.Uint32(data[0:uint32Size])
+	code = binary.BigEndian.Uint32(data[uint32Size:statusHeaderMinLen])
+	if len(data) >= statusMsgLenOffset {
+		msgLen := binary.BigEndian.Uint32(data[statusHeaderMinLen:statusMsgLenOffset])
+		if len(data) >= int(statusMsgLenOffset+msgLen) {
+			msg = string(data[statusMsgLenOffset : statusMsgLenOffset+msgLen])
 		}
 	}
 	return id, code, msg
 }
 
 func parseHandle(data []byte) string {
-	if len(data) < 8 {
+	if len(data) < handleHeaderMinLen {
 		return ""
 	}
-	handleLen := binary.BigEndian.Uint32(data[4:8])
-	if len(data) >= int(8+handleLen) {
-		return string(data[8 : 8+handleLen])
+	handleLen := binary.BigEndian.Uint32(data[uint32Size:handleHeaderMinLen])
+	if len(data) >= int(handleHeaderMinLen+handleLen) {
+		return string(data[handleHeaderMinLen : handleHeaderMinLen+handleLen])
 	}
 	return ""
 }
 
 func parseNameEntries(data []byte) []SFTPRemoteEntry {
-	if len(data) < 8 {
+	if len(data) < nameHeaderMinLen {
 		return nil
 	}
-	count := binary.BigEndian.Uint32(data[4:8])
-	data = data[8:]
+	count := binary.BigEndian.Uint32(data[uint32Size:nameHeaderMinLen])
+	data = data[nameHeaderMinLen:]
 	entries := make([]SFTPRemoteEntry, 0, count)
 
-	for i := uint32(0); i < count && len(data) >= 4; i++ {
-		nameLen := int(binary.BigEndian.Uint32(data[0:4]))
-		data = data[4:]
-		if len(data) < nameLen {
+	for i := uint32(0); i < count && len(data) >= uint32Size; i++ {
+		entry, remaining, ok := parseSingleNameEntry(data)
+		if !ok {
 			break
 		}
-		filename := string(data[:nameLen])
-		data = data[nameLen:]
-
-		// Discard longname
-		if len(data) < 4 {
-			break
-		}
-		longLen := int(binary.BigEndian.Uint32(data[0:4]))
-		data = data[4:]
-		if len(data) < longLen {
-			break
-		}
-		data = data[longLen:]
-
-		// Parse ATTRS
-		if len(data) < 4 {
-			break
-		}
-		flags := binary.BigEndian.Uint32(data[0:4])
-		data = data[4:]
-
-		var size int64
-		if flags&sshFilexferAttrSize != 0 {
-			if len(data) < 8 {
-				break
-			}
-			size = int64(binary.BigEndian.Uint64(data[0:8]))
-			data = data[8:]
-		}
-
-		if flags&sshFilexferAttrUIDGID != 0 {
-			if len(data) < 8 {
-				break
-			}
-			data = data[8:]
-		}
-
-		var mode os.FileMode
-		var isDir, isLink bool
-		if flags&sshFilexferAttrPermissions != 0 {
-			if len(data) < 4 {
-				break
-			}
-			perm := binary.BigEndian.Uint32(data[0:4])
-			mode = os.FileMode(perm & 0777)
-			if perm&0040000 != 0 { // S_IFDIR
-				isDir = true
-				mode |= os.ModeDir
-			}
-			if perm&0120000 != 0 { // S_IFLNK
-				isLink = true
-				mode |= os.ModeSymlink
-			}
-			data = data[4:]
-		}
-
-		var modTime time.Time
-		if flags&sshFilexferAttrACModTime != 0 {
-			if len(data) < 8 {
-				break
-			}
-			_ = binary.BigEndian.Uint32(data[0:4]) // atime
-			mtime := binary.BigEndian.Uint32(data[4:8])
-			modTime = time.Unix(int64(mtime), 0)
-			data = data[8:]
-		}
-
-		if flags&sshFilexferAttrExtended != 0 {
-			if len(data) < 4 {
-				break
-			}
-			extCount := binary.BigEndian.Uint32(data[0:4])
-			data = data[4:]
-			for j := uint32(0); j < extCount; j++ {
-				if len(data) < 4 {
-					break
-				}
-				kLen := int(binary.BigEndian.Uint32(data[0:4]))
-				data = data[4:]
-				if len(data) < kLen {
-					break
-				}
-				data = data[kLen:]
-				if len(data) < 4 {
-					break
-				}
-				vLen := int(binary.BigEndian.Uint32(data[0:4]))
-				data = data[4:]
-				if len(data) < vLen {
-					break
-				}
-				data = data[vLen:]
-			}
-		}
-
-		entries = append(entries, SFTPRemoteEntry{
-			Name:    path.Base(filename),
-			IsDir:   isDir,
-			IsLink:  isLink,
-			Size:    size,
-			ModTime: modTime,
-			Mode:    mode,
-		})
+		entries = append(entries, entry)
+		data = remaining
 	}
 
 	return entries
+}
+
+func parseSingleNameEntry(data []byte) (SFTPRemoteEntry, []byte, bool) {
+	nameLen := int(binary.BigEndian.Uint32(data[0:uint32Size]))
+	data = data[uint32Size:]
+	if len(data) < nameLen {
+		return SFTPRemoteEntry{}, nil, false
+	}
+	filename := string(data[:nameLen])
+	data = data[nameLen:]
+
+	// Discard longname
+	if len(data) < uint32Size {
+		return SFTPRemoteEntry{}, nil, false
+	}
+	longLen := int(binary.BigEndian.Uint32(data[0:uint32Size]))
+	data = data[uint32Size:]
+	if len(data) < longLen {
+		return SFTPRemoteEntry{}, nil, false
+	}
+	data = data[longLen:]
+
+	entry, remaining, ok := parseEntryAttrs(filename, data)
+	return entry, remaining, ok
+}
+
+func parseEntryAttrs(filename string, data []byte) (SFTPRemoteEntry, []byte, bool) {
+	if len(data) < uint32Size {
+		return SFTPRemoteEntry{}, nil, false
+	}
+	flags := binary.BigEndian.Uint32(data[0:uint32Size])
+	data = data[uint32Size:]
+
+	var size int64
+	if flags&sshFilexferAttrSize != 0 {
+		if len(data) < uint64Size {
+			return SFTPRemoteEntry{}, nil, false
+		}
+		size = int64(binary.BigEndian.Uint64(data[0:uint64Size]))
+		data = data[uint64Size:]
+	}
+
+	if flags&sshFilexferAttrUIDGID != 0 {
+		if len(data) < uint64Size {
+			return SFTPRemoteEntry{}, nil, false
+		}
+		data = data[uint64Size:]
+	}
+
+	var mode os.FileMode
+	var isDir, isLink bool
+	if flags&sshFilexferAttrPermissions != 0 {
+		if len(data) < uint32Size {
+			return SFTPRemoteEntry{}, nil, false
+		}
+		perm := binary.BigEndian.Uint32(data[0:uint32Size])
+		mode, isDir, isLink = decodeFilePerm(perm)
+		data = data[uint32Size:]
+	}
+
+	var modTime time.Time
+	if flags&sshFilexferAttrACModTime != 0 {
+		if len(data) < uint64Size {
+			return SFTPRemoteEntry{}, nil, false
+		}
+		mtime := binary.BigEndian.Uint32(data[uint32Size:uint64Size])
+		modTime = time.Unix(int64(mtime), 0)
+		data = data[uint64Size:]
+	}
+
+	if flags&sshFilexferAttrExtended != 0 {
+		data = skipExtendedAttrs(data)
+	}
+
+	return SFTPRemoteEntry{
+		Name:    path.Base(filename),
+		IsDir:   isDir,
+		IsLink:  isLink,
+		Size:    size,
+		ModTime: modTime,
+		Mode:    mode,
+	}, data, true
+}
+
+func decodeFilePerm(perm uint32) (mode os.FileMode, isDir, isLink bool) {
+	mode = os.FileMode(perm & permMask)
+	switch perm & s_IFMT {
+	case s_IFDIR:
+		isDir = true
+		mode |= os.ModeDir
+	case s_IFLNK:
+		isLink = true
+		mode |= os.ModeSymlink
+	case s_IFSOCK:
+		mode |= os.ModeSocket
+	case s_IFIFO:
+		mode |= os.ModeNamedPipe
+	case s_IFCHR:
+		mode |= os.ModeCharDevice
+	case s_IFBLK:
+		mode |= os.ModeDevice
+	}
+	return mode, isDir, isLink
+}
+
+func skipExtendedAttrs(data []byte) []byte {
+	if len(data) < uint32Size {
+		return data
+	}
+	extCount := binary.BigEndian.Uint32(data[0:uint32Size])
+	data = data[uint32Size:]
+	for j := uint32(0); j < extCount; j++ {
+		if len(data) < uint32Size {
+			break
+		}
+		kLen := int(binary.BigEndian.Uint32(data[0:uint32Size]))
+		data = data[uint32Size:]
+		if len(data) < kLen {
+			break
+		}
+		data = data[kLen:]
+		if len(data) < uint32Size {
+			break
+		}
+		vLen := int(binary.BigEndian.Uint32(data[0:uint32Size]))
+		data = data[uint32Size:]
+		if len(data) < vLen {
+			break
+		}
+		data = data[vLen:]
+	}
+	return data
 }
