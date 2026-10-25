@@ -319,7 +319,10 @@ test('offline host preserves cached sessions and marks them stale', async () => 
   const staleBanner = wrapper.find('.session-list__stale')
   assert.ok(staleBanner.exists(), 'stale banner must be displayed')
   assert.ok(staleBanner.text().includes('Stale'), 'stale badge should be visible')
-  assert.ok(staleBanner.text().includes('host_unavailable'), 'error should be shown in stale banner')
+  assert.ok(
+    staleBanner.text().includes('host is unreachable') || staleBanner.text().includes('host_unavailable'),
+    'localized error explanation should be shown in stale banner',
+  )
   wrapper.unmount()
 })
 

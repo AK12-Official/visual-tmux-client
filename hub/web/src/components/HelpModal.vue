@@ -91,7 +91,8 @@ async function loadGuideForLocale(targetLocale: SupportedLocale): Promise<void> 
     }
   } catch (err) {
     if (reqId === currentRequestId && props.open && currentLocale.value === targetLocale) {
-      notify('error', err instanceof Error ? err.message : String(err))
+      const diag = err instanceof Error ? err.message : String(err)
+      notify('error', diag ? `${t('help.error')}: ${diag}` : t('help.error'))
     }
   } finally {
     if (reqId === currentRequestId && props.open && currentLocale.value === targetLocale) {

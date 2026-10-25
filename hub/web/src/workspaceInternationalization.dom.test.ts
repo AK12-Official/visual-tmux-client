@@ -189,7 +189,7 @@ test('Task 5.1: Switching language with active terminal preserves host, session,
   }
 })
 
-test('Task 5.1: Switching language with open file manager preserves open panels, drafts, editor identity, and undo history', async () => {
+test('Task 5.1: Switching language with open file manager preserves open panels, drafts, editor identity, selection, phrases, and typing continuity', async () => {
   setToken('valid-token')
 
   globalThis.fetch = async (input: RequestInfo | URL): Promise<Response> => {
@@ -279,11 +279,14 @@ test('Task 5.1: Switching language with open file manager preserves open panels,
     // Verify search phrase in English mode
     assert.equal(editorInstance.state.phrase('Find'), 'Find')
 
-    // Dispatch an edit to build undo history
+    // Dispatch an edit with an explicit selection range
     editorInstance.dispatch({
       changes: { from: editorInstance.doc.length, to: editorInstance.doc.length, insert: '\ncount++;' },
+      selection: { main: { from: 14, to: 22 } },
     })
     assert.equal(editorInstance.doc, 'let count = 0;\ncount++;')
+    assert.equal(editorInstance.state.selection.main.from, 14)
+    assert.equal(editorInstance.state.selection.main.to, 22)
 
     // Switch language to Simplified Chinese
     setLocale('zh-CN')
@@ -303,11 +306,17 @@ test('Task 5.1: Switching language with open file manager preserves open panels,
     assert.equal(cmInstances.length, 1, 'CodeMirror must NOT be recreated on locale switch')
     assert.equal(cmInstances[0], editorInstance, 'CodeMirror instance identity must remain identical')
 
-    // 4. Phrases in editor updated to Chinese
+    // 4. Editor selection is preserved across locale switch
+    assert.equal(editorInstance.state.selection.main.from, 14, 'Selection start preserved across locale switch')
+    assert.equal(editorInstance.state.selection.main.to, 22, 'Selection end preserved across locale switch')
+
+    // 5. Phrases in editor updated to Chinese
     assert.equal(editorInstance.state.phrase('Find'), '查找')
     assert.equal(editorInstance.state.phrase('Replace'), '替换')
 
-    // 5. User can continue typing and document state remains intact
+    // 6. User can continue typing and document state remains intact
+    // (Note: Full undo/redo stack preservation across real CodeMirror phrase reconfiguration
+    // is verified in src/components/files/codeEditorUndo.real.dom.test.ts)
     editorInstance.dispatch({
       changes: { from: editorInstance.doc.length, to: editorInstance.doc.length, insert: '\n// done' },
     })

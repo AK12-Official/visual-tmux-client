@@ -1,12 +1,34 @@
 <script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { dismiss, useToasts } from '../toasts'
+import { getLocale, onLocaleChange, t, type SupportedLocale } from '../i18n/index'
 
 const toasts = useToasts()
+const currentLocale = ref<SupportedLocale>(getLocale())
+let unlistenLocale: (() => void) | null = null
 
-const LEVEL_TAG: Record<string, string> = {
-  error: 'ERROR',
-  warning: 'WARN',
-  info: 'INFO',
+onMounted(() => {
+  unlistenLocale = onLocaleChange((locale) => {
+    currentLocale.value = locale
+  })
+})
+
+onBeforeUnmount(() => {
+  unlistenLocale?.()
+})
+
+function levelTag(level: string): string {
+  void currentLocale.value
+  switch (level) {
+    case 'error':
+      return t('toasts.levelError')
+    case 'warning':
+      return t('toasts.levelWarn')
+    case 'info':
+      return t('toasts.levelInfo')
+    default:
+      return level.toUpperCase()
+  }
 }
 </script>
 
@@ -14,18 +36,18 @@ const LEVEL_TAG: Record<string, string> = {
   <!-- aria-live so screen readers announce arrivals; the stack grows upward:
        the container is anchored at the bottom and each new toast is appended,
        pushing the earlier ones up. -->
-  <div class="toast-stack" role="region" aria-label="Notifications" aria-live="polite">
+  <div class="toast-stack" role="region" :aria-label="t('toasts.regionLabel')" aria-live="polite">
     <div
-      v-for="t in toasts"
-      :key="t.id"
+      v-for="item in toasts"
+      :key="item.id"
       class="toast"
-      :class="`toast--${t.level}`"
-      :role="t.level === 'error' ? 'alert' : 'status'"
+      :class="`toast--${item.level}`"
+      :role="item.level === 'error' ? 'alert' : 'status'"
       aria-atomic="true"
     >
-      <span class="toast__tag">{{ LEVEL_TAG[t.level] }}</span>
-      <span class="toast__message">{{ t.message }}</span>
-      <button class="toast__close" type="button" aria-label="Dismiss notification" @click="dismiss(t.id)">✕</button>
+      <span class="toast__tag">{{ levelTag(item.level) }}</span>
+      <span class="toast__message">{{ item.message }}</span>
+      <button class="toast__close" type="button" :aria-label="t('toasts.dismiss')" @click="dismiss(item.id)">✕</button>
     </div>
   </div>
 </template>

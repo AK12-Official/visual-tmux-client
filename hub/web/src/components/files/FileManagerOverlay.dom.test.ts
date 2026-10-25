@@ -17,9 +17,11 @@ import '../../../test/dom.mjs'
 
 import { mount } from '@vue/test-utils'
 import type { VueWrapper } from '@vue/test-utils'
+import { nextTick } from 'vue'
 
 import { EditorView, instances, reset as resetEditors } from '../../../test/mocks/codemirror.mjs'
 import { setToken } from '../../api'
+import { setLocale, resetLocaleForTest } from '../../i18n/index'
 import FileManagerOverlay from './FileManagerOverlay.vue'
 
 type Responder = () => Response | Promise<Response>
@@ -2537,4 +2539,211 @@ test('R6-W1: old delete success does not drop new connection reconciled draft', 
     window.confirm = origConfirm
     wrapper.unmount()
   }
+})
+
+test('I18N-R2-01: initial directory failure renders localized persistent error and updates on live language switch', async () => {
+  resetLocaleForTest('zh-CN')
+  try {
+    hubFetch({
+      list: () => json({ error: 'permission_denied' }, 403),
+    })
+
+    const wrapper = mount(FileManagerOverlay, {
+      props: {
+        session: 'dev',
+        hostId: 'local',
+        hostName: 'Local Host',
+      },
+    })
+
+    await flush()
+    await flush()
+
+    // Assert: error state renders localized Chinese text
+    const errorEl = wrapper.find('.fm__state--error')
+    assert.ok(errorEl.exists(), 'persistent error element must exist')
+    assert.equal(
+      errorEl.text(),
+      '无法打开 “/srv/work”：Hub 没有读取或写入该路径的权限',
+      'must render localized Chinese message instead of English or raw error code',
+    )
+
+    // Switch to English
+    setLocale('en')
+    await nextTick()
+    await flush()
+
+    // Assert: error text updates dynamically to English without reloading
+    assert.equal(
+      errorEl.text(),
+      'Could not open /srv/work: the hub is not allowed to read or write it',
+      'must update to English upon locale switch',
+    )
+
+    // Switch back to Chinese
+    setLocale('zh-CN')
+    await nextTick()
+    await flush()
+    assert.equal(
+      errorEl.text(),
+      '无法打开 “/srv/work”：Hub 没有读取或写入该路径的权限',
+    )
+
+    wrapper.unmount()
+  } finally {
+    resetLocaleForTest('en')
+  }
+})
+
+test('I18N-R2-01: navigation error in existing directory renders localized banner, updates on locale switch, and can be dismissed', async () => {
+  resetLocaleForTest('en')
+  try {
+    hubFetch({
+      list: (path) => {
+        if (path === '/srv/work/restricted') {
+          return json({ error: 'host_unavailable' }, 503)
+        }
+        return json({
+          path: '/srv/work',
+          entries: [{ name: 'restricted', is_dir: true, size: 0, mtime: 1000 }],
+          truncated: false,
+        })
+      },
+    })
+
+    const wrapper = mount(FileManagerOverlay, {
+      props: {
+        session: 'dev',
+        hostId: 'local',
+        hostName: 'Local Host',
+      },
+    })
+
+    await flush()
+    await flush()
+
+    const tree = wrapper.findComponent({ name: 'FileTree' })
+    assert.ok(tree.exists(), 'FileTree must exist')
+    tree.vm.$emit('select', '/srv/work/restricted')
+    await flush()
+
+    // Assert: navError banner is shown
+    const navError = wrapper.find('.fm__nav-error')
+    assert.ok(navError.exists(), 'nav error banner must exist')
+    assert.equal(
+      navError.find('span').text(),
+      'Could not open /srv/work/restricted: the host is unreachable or disconnected',
+    )
+
+    // Switch language to zh-CN
+    setLocale('zh-CN')
+    await nextTick()
+    await flush()
+
+    assert.equal(
+      navError.find('span').text(),
+      '无法打开 “/srv/work/restricted”：主机不可达或已断开连接',
+    )
+
+    // Dismiss nav error
+    const dismissBtn = navError.find('.fm__nav-dismiss')
+    assert.equal(dismissBtn.attributes('aria-label'), '忽略')
+    await dismissBtn.trigger('click')
+    await nextTick()
+    assert.ok(!wrapper.find('.fm__nav-error').exists(), 'nav error must be dismissed')
+
+    wrapper.unmount()
+  } finally {
+    resetLocaleForTest('en')
+  }
+})
+
+test('I18N-R3-02: deletion confirm prompt does not interpolate English type words in Chinese mode', async () => {
+  resetLocaleForTest('zh-CN')
+  try {
+    hubFetch({
+      list: () => json({
+        path: '/srv/work',
+        entries: [
+          { name: 'a.txt', is_dir: false, size: 5, mtime: 1000 },
+          { name: 'subfolder', is_dir: true, size: 0, mtime: 1000 },
+        ],
+        truncated: false,
+      }),
+    })
+
+    const wrapper = mount(FileManagerOverlay, {
+      props: {
+        session: 'dev',
+        hostId: 'local',
+        hostName: 'Local Host',
+      },
+    })
+    await flush()
+    await flush()
+
+    const vm = wrapper.vm as any
+    const prompts: string[] = []
+    const origConfirm = window.confirm
+    window.confirm = (msg?: string) => {
+      prompts.push(String(msg))
+      return false // Cancel deletion
+    }
+
+    try {
+      // 1. Delete file in Chinese mode
+      await vm.deleteTarget({ name: 'a.txt', is_dir: false }, '/srv/work/a.txt')
+      assert.equal(prompts.length, 1)
+      assert.equal(prompts[0], '确定删除文件“a.txt”吗？此操作无法撤销。')
+      assert.ok(!prompts[0].includes('file'), 'must not contain English word file')
+
+      // 2. Delete directory in Chinese mode
+      await vm.deleteTarget({ name: 'subfolder', is_dir: true }, '/srv/work/subfolder')
+      assert.equal(prompts.length, 2)
+      assert.equal(prompts[1], '确定删除目录“subfolder”吗？此操作无法撤销。')
+      assert.ok(!prompts[1].includes('directory'), 'must not contain English word directory')
+
+      // 3. Switch to English mode
+      setLocale('en')
+      await nextTick()
+
+      await vm.deleteTarget({ name: 'a.txt', is_dir: false }, '/srv/work/a.txt')
+      assert.equal(prompts.length, 3)
+      assert.equal(prompts[2], 'Delete the file a.txt? This cannot be undone.')
+
+      await vm.deleteTarget({ name: 'subfolder', is_dir: true }, '/srv/work/subfolder')
+      assert.equal(prompts.length, 4)
+      assert.equal(prompts[3], 'Delete the directory subfolder? This cannot be undone.')
+    } finally {
+      window.confirm = origConfirm
+      wrapper.unmount()
+    }
+  } finally {
+    resetLocaleForTest('en')
+  }
+})
+
+test('I18N-R4-03: FileManagerOverlay host tooltip is localized in English and Chinese and updates dynamically', async () => {
+  resetLocaleForTest('en')
+  const wrapper = mount(FileManagerOverlay, {
+    props: { session: 'work', hostId: 'srv-1', hostName: 'Production Server' },
+  })
+  await nextTick()
+
+  const hostEl = wrapper.find('.fm__host')
+  assert.ok(hostEl.exists(), '.fm__host element must exist')
+  assert.equal(hostEl.attributes('title'), 'Host: Production Server')
+
+  // Switch to Chinese
+  setLocale('zh-CN')
+  await nextTick()
+
+  assert.equal(hostEl.attributes('title'), '主机: Production Server')
+
+  // Switch back to English
+  setLocale('en')
+  await nextTick()
+
+  assert.equal(hostEl.attributes('title'), 'Host: Production Server')
+  wrapper.unmount()
 })

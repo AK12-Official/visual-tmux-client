@@ -8,7 +8,8 @@ import { nextTick } from 'vue'
 import App from './App.vue'
 import { clearToken, setToken } from './api'
 import { setConfig, resetConfigForTest, type ClientConfig } from './config'
-import { resetToastsForTest } from './toasts'
+import { notify, resetToastsForTest } from './toasts'
+import ToastStack from './components/ToastStack.vue'
 import {
   setLocale,
   resetLocaleForTest,
@@ -142,5 +143,94 @@ test('automatic browser language changes: handled in auto mode and ignored in ex
     assert.ok(document.documentElement.lang.length > 0)
   } finally {
     cleanup()
+  }
+})
+
+test('login auth error updates live on language selection', async () => {
+  const origFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response('Unauthorized', { status: 401 })
+  try {
+    const wrapper = mount(App)
+    await nextTick()
+
+    const input = wrapper.find('#access-token')
+    await input.setValue('bad-token')
+    await wrapper.find('.auth-card__btn').trigger('click')
+    await nextTick()
+    await new Promise((r) => setTimeout(r, 20))
+    await nextTick()
+
+    const errEl = wrapper.find('.auth-card__error')
+    assert.ok(errEl.exists())
+    assert.equal(errEl.text(), 'Authentication failed. Check the token and try again.')
+
+    // Switch language to Simplified Chinese
+    const select = wrapper.find('#login-lang-select')
+    await select.setValue('zh-CN')
+    await nextTick()
+
+    assert.equal(errEl.text(), '身份验证失败。请检查令牌并重试。')
+
+    // Switch back to English
+    await select.setValue('en')
+    await nextTick()
+    assert.equal(errEl.text(), 'Authentication failed. Check the token and try again.')
+
+    wrapper.unmount()
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})
+
+test('I18N-R2-03: ToastStack region, close button, and level tags localize dynamically on language switch', async () => {
+  resetLocaleForTest('en')
+  resetToastsForTest()
+
+  notify('error', 'Something went wrong')
+  notify('warning', 'Watch out')
+  notify('info', 'For your information')
+
+  const wrapper = mount(ToastStack)
+  await nextTick()
+
+  try {
+    // 1. In English mode
+    const stack = wrapper.find('.toast-stack')
+    assert.equal(stack.attributes('aria-label'), 'Notifications')
+
+    const toasts = wrapper.findAll('.toast')
+    assert.equal(toasts.length, 3)
+
+    const tagsEn = toasts.map((t) => t.find('.toast__tag').text())
+    assert.deepEqual(tagsEn, ['ERROR', 'WARN', 'INFO'])
+
+    const closeBtns = wrapper.findAll('.toast__close')
+    for (const btn of closeBtns) {
+      assert.equal(btn.attributes('aria-label'), 'Dismiss notification')
+    }
+
+    // 2. Switch to Chinese
+    setLocale('zh-CN')
+    await nextTick()
+
+    assert.equal(stack.attributes('aria-label'), '通知')
+
+    const tagsZh = toasts.map((t) => t.find('.toast__tag').text())
+    assert.deepEqual(tagsZh, ['错误', '警告', '提示'])
+
+    for (const btn of closeBtns) {
+      assert.equal(btn.attributes('aria-label'), '关闭通知')
+    }
+
+    // 3. Switch back to English
+    setLocale('en')
+    await nextTick()
+
+    assert.equal(stack.attributes('aria-label'), 'Notifications')
+    assert.deepEqual(toasts.map((t) => t.find('.toast__tag').text()), ['ERROR', 'WARN', 'INFO'])
+  } finally {
+    resetLocaleForTest('en')
+    resetToastsForTest()
+    wrapper.unmount()
   }
 })

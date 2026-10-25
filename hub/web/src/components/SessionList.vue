@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Session } from '../api'
 import { buildSubtitleMap, rowLabel } from '../sessionSubtitle'
 import { notify } from '../toasts'
@@ -10,7 +10,7 @@ import {
   type OrderMode,
   type OrderState,
 } from '../ordering'
-import { t } from '../i18n/index'
+import { getLocale, onLocaleChange, t, type SupportedLocale } from '../i18n/index'
 
 const props = withDefaults(
   defineProps<{
@@ -281,6 +281,64 @@ watch(
 
 const manualMode = computed(() => order.value.mode === 'manual')
 const isRepairable = computed(() => props.hostId !== 'local' && (props.stale || !!props.error))
+
+const currentLocale = ref<SupportedLocale>(getLocale())
+let unlistenLocale: (() => void) | null = null
+
+onMounted(() => {
+  unlistenLocale = onLocaleChange((locale) => {
+    currentLocale.value = locale
+  })
+})
+
+onBeforeUnmount(() => {
+  unlistenLocale?.()
+})
+
+function formatSessionListError(err: string): string {
+  if (err.includes('host_unavailable')) {
+    if (err.includes(':')) {
+      const diag = err.slice(err.indexOf(':') + 1).trim()
+      return t('sessions.hostUnavailableDiag', { diagnostic: diag })
+    }
+    return t('sessions.hostUnavailable')
+  }
+  if (err.includes('host_not_found')) {
+    return t('terminal.hostNotFoundNotice')
+  }
+  if (err.includes('host_revision_conflict')) {
+    return t('errors.host_revision_conflict')
+  }
+  if (err.includes('tmux_unavailable')) {
+    return t('errors.tmux_unavailable')
+  }
+  if (err.includes('ssh authentication failed') || err.includes('untrusted_host_key')) {
+    return t('sessions.hostUnavailableDiag', { diagnostic: err })
+  }
+  return t('sessions.listFailedWithDiagnostic', { diagnostic: err })
+}
+
+const displayError = computed(() => {
+  void currentLocale.value
+  if (!props.error) return ''
+  return formatSessionListError(props.error)
+})
+
+const displayStaleMsg = computed(() => {
+  void currentLocale.value
+  if (props.error) {
+    return formatSessionListError(props.error)
+  }
+  return t('sessions.cachedSessionsOffline')
+})
+
+function getRowLabel(name: string, subtitle?: string | null): string {
+  void currentLocale.value
+  if (subtitle) {
+    return t('sessions.rowLabelWithSubtitle', { name, subtitle })
+  }
+  return t('sessions.rowLabel', { name })
+}
 </script>
 
 <template>
@@ -317,7 +375,7 @@ const isRepairable = computed(() => props.hostId !== 'local' && (props.stale || 
     </div>
 
     <div v-if="error && sessions.length === 0" class="session-list__error" role="alert" aria-live="polite">
-      <span>{{ error }}</span>
+      <span>{{ displayError }}</span>
       <button class="session-list__btn" type="button" @click="emit('retry')">{{ t('common.retry') }}</button>
       <button v-if="isRepairable" class="session-list__btn session-list__btn--repair" type="button" @click="emit('repair')">{{ t('sessions.editHost') }}</button>
     </div>
@@ -329,7 +387,7 @@ const isRepairable = computed(() => props.hostId !== 'local' && (props.stale || 
     <template v-else>
       <div v-if="stale || error" class="session-list__stale" role="status" aria-live="polite">
         <span class="session-list__stale-badge">{{ t('sessions.staleBadge') }}</span>
-        <span class="session-list__stale-msg">{{ error || t('sessions.cachedSessionsOffline') }}</span>
+        <span class="session-list__stale-msg">{{ displayStaleMsg }}</span>
         <button class="session-list__btn" type="button" @click="emit('retry')">{{ t('common.retry') }}</button>
         <button v-if="isRepairable" class="session-list__btn session-list__btn--repair" type="button" @click="emit('repair')">{{ t('sessions.editHost') }}</button>
       </div>
@@ -347,7 +405,7 @@ const isRepairable = computed(() => props.hostId !== 'local' && (props.stale || 
         }"
         :draggable="manualMode && renaming !== s.name"
         tabindex="0"
-        :aria-label="rowLabel(s.name, subtitles[s.name])"
+        :aria-label="getRowLabel(s.name, subtitles[s.name])"
         :aria-current="s.name === selected && !selecting ? 'true' : undefined"
         @click="selecting ? toggleCheck(s.name) : emit('select', s.name)"
         @keydown.enter.self="selecting ? toggleCheck(s.name) : emit('select', s.name)"

@@ -19,7 +19,7 @@ export const REASONS: Record<string, string> = {
   path_not_allowed: 'that path is outside the directories this hub may open',
   cross_root_move: 'entries cannot be moved between two configured roots',
   not_found: 'it is no longer there',
-  host_not_found: 'that path is not on this machine',
+  host_not_found: 'the host no longer exists',
   permission_denied: 'the hub is not allowed to read or write it',
   file_too_large: 'it is larger than the size limit for one file',
   conflict: 'it changed on disk since it was read',
@@ -50,7 +50,11 @@ export const REASONS: Record<string, string> = {
  * a refusal must still be reportable before the configuration has loaded, which
  * is a caller's problem and not this module's.
  */
-export function reasonFor(code: string, limit: number, format: (bytes: number) => string): string {
+export function reasonFor(
+  code: string,
+  limit: number = 0,
+  format: (bytes: number) => string = (bytes) => `${bytes} B`,
+): string {
   if (code === 'file_too_large' && limit > 0) {
     return t('errors.file_too_large_limit', { limit: format(limit) })
   }

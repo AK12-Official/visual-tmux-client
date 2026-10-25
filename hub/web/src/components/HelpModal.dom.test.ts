@@ -311,3 +311,39 @@ test('Task 4.2: Recover from failed loading on reopening help', async () => {
   assert.ok(wrapper.html().includes('English guide content.'))
   wrapper.unmount()
 })
+
+test('I18N-R4-03: HelpModal fetch failure emits localized error notice with preserved diagnostic in both languages', async () => {
+  globalThis.fetch = async (): Promise<Response> => {
+    return new Response('Not Found', { status: 404, statusText: 'Not Found' })
+  }
+
+  // 1. English
+  resetLocaleForTest('en')
+  resetGuideCacheForTest()
+  resetToastsForTest()
+  const wrapperEn = mount(HelpModal, { props: { open: true } })
+  await nextTick()
+  await new Promise((r) => setTimeout(r, 30))
+  await nextTick()
+
+  const toastsEn = useToasts()
+  const errToastEn = toastsEn.value.find((t) => t.level === 'error')
+  assert.ok(errToastEn, 'Must produce error toast in English')
+  assert.equal(errToastEn.message, 'Failed to load help guide: guide: 404 Not Found')
+  wrapperEn.unmount()
+
+  // 2. Chinese
+  resetLocaleForTest('zh-CN')
+  resetGuideCacheForTest()
+  resetToastsForTest()
+  const wrapperZh = mount(HelpModal, { props: { open: true } })
+  await nextTick()
+  await new Promise((r) => setTimeout(r, 30))
+  await nextTick()
+
+  const toastsZh = useToasts()
+  const errToastZh = toastsZh.value.find((t) => t.level === 'error')
+  assert.ok(errToastZh, 'Must produce error toast in Chinese')
+  assert.equal(errToastZh.message, '加载帮助指南失败: guide: 404 Not Found')
+  wrapperZh.unmount()
+})

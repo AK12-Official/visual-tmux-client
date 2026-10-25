@@ -194,7 +194,7 @@ export class TerminalSession {
         typeof navigator !== 'undefined' ? (navigator.clipboard as Clipboard | undefined) : undefined
       if (!clipboard) {
         this.hooks.onNotice(
-          'Copy failed: the browser exposes no clipboard outside a secure context (HTTPS or localhost).',
+          t('terminal.copyInsecureContextNotice'),
           'warning',
         )
         return false
@@ -202,7 +202,7 @@ export class TerminalSession {
       clipboard.writeText(selection).catch(() => {
         // A blocked clipboard is a degraded-but-recoverable state, not a
         // failure of the terminal itself: warn rather than error.
-        this.hooks.onNotice('Copy failed: the browser blocked the clipboard write.', 'warning')
+        this.hooks.onNotice(t('terminal.copyBlockedNotice'), 'warning')
       })
       return false
     })
@@ -437,7 +437,7 @@ export class TerminalSession {
         this.ended = true
         this.hooks.onState(
           'ended',
-          typeof msg.code === 'number' && msg.code !== 0 ? `Process exited with code ${msg.code}` : undefined,
+          typeof msg.code === 'number' && msg.code !== 0 ? `exit_code:${msg.code}` : undefined,
         )
         break
       case 'error': {

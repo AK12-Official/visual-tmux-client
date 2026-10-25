@@ -2,6 +2,7 @@
 // preferences API is deliberately out of scope this release). Session names
 // are the keys: renames rewrite them in place, kills prune them, and sessions
 // never seen before simply append in server order.
+import { safeStorageGet, safeStorageSet, safeStorageRemove } from './storage'
 
 export type OrderMode = 'default' | 'manual'
 
@@ -44,7 +45,7 @@ function parseOrderState(raw: string | null): OrderState | null {
 export function loadOrder(hostId = 'local'): OrderState {
   try {
     const hostKey = HOST_ORDER_PREFIX + hostId
-    const hostRaw = localStorage.getItem(hostKey)
+    const hostRaw = safeStorageGet(hostKey)
     if (hostRaw !== null) {
       const parsed = parseOrderState(hostRaw)
       if (parsed) return parsed
@@ -54,16 +55,12 @@ export function loadOrder(hostId = 'local'): OrderState {
     // One-time migration for legacy pre-multi-host preferences:
     // migrate to local host only, and never apply to remote hosts.
     if (hostId === 'local') {
-      const legacyRaw = localStorage.getItem(LEGACY_ORDER_KEY)
+      const legacyRaw = safeStorageGet(LEGACY_ORDER_KEY)
       if (legacyRaw !== null) {
         const legacyParsed = parseOrderState(legacyRaw)
         if (legacyParsed) {
           saveOrder(legacyParsed, 'local')
-          try {
-            localStorage.removeItem(LEGACY_ORDER_KEY)
-          } catch {
-            /* ignore */
-          }
+          safeStorageRemove(LEGACY_ORDER_KEY)
           return legacyParsed
         }
       }
@@ -77,14 +74,10 @@ export function loadOrder(hostId = 'local'): OrderState {
 export function saveOrder(state: OrderState, hostId = 'local'): void {
   try {
     const hostKey = HOST_ORDER_PREFIX + hostId
-    localStorage.setItem(hostKey, JSON.stringify(state))
+    safeStorageSet(hostKey, JSON.stringify(state))
     if (hostId === 'local') {
       // Clear legacy key to guarantee migration never runs again or overwrites later edits
-      try {
-        localStorage.removeItem(LEGACY_ORDER_KEY)
-      } catch {
-        /* ignore */
-      }
+      safeStorageRemove(LEGACY_ORDER_KEY)
     }
   } catch {
     /* ignore storage quota / restricted storage */

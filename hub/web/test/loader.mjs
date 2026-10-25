@@ -14,7 +14,12 @@ export async function resolve(specifier, context, nextResolve) {
     '@codemirror/state': './mocks/codemirror.mjs',
     dompurify: './mocks/dompurify.mjs',
   }
-  if (browserOnly[specifier]) {
+  const isRealCM =
+    context.parentURL?.includes('.real.') ||
+    context.parentURL?.includes('/node_modules/@codemirror/') ||
+    context.parentURL?.includes('/node_modules/codemirror/')
+
+  if (browserOnly[specifier] && !(isRealCM && (specifier === 'codemirror' || specifier === '@codemirror/state'))) {
     return nextResolve(new URL(browserOnly[specifier], import.meta.url).href, context)
   }
 

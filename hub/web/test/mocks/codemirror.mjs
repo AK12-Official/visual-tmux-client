@@ -25,9 +25,11 @@ export class EditorView {
       (extension) => typeof extension === 'function',
     )
     this.phrases = {}
+    this.selection = options.selection ?? { main: { from: 0, to: 0 } }
     this.state = {
       doc: { toString: () => this.doc },
       phrase: (p) => this.phrases[p] ?? p,
+      selection: this.selection,
     }
     instances.push(this)
   }
@@ -66,6 +68,10 @@ export class EditorView {
           this.phrases = eff.value.phrases
         }
       }
+    }
+    if (update?.selection) {
+      this.selection = update.selection
+      this.state.selection = update.selection
     }
     const changes = Array.isArray(update?.changes) ? update.changes : [update?.changes]
     const applied = changes.filter(Boolean)

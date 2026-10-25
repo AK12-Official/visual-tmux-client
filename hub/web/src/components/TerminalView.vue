@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { TerminalSession, type ConnState, type NoticeLevel } from '../terminal'
-import { t } from '../i18n/index'
+import { getLocale, onLocaleChange, t, type SupportedLocale } from '../i18n/index'
 
 const props = defineProps<{
   session: string
@@ -24,10 +24,17 @@ const state = ref<ConnState>('connecting')
 // or the session finishing), or the server's message for a refused attachment.
 const endedDetail = ref<string | null>(null)
 let session: TerminalSession | null = null
+const currentLocale = ref<SupportedLocale>(getLocale())
+let unbindLocale: (() => void) | null = null
 
 const displayEndedDetail = computed(() => {
+  void currentLocale.value
   if (!endedDetail.value) return null
   const code = endedDetail.value
+  const exitMatch = code.match(/^(?:exit_code:|Process exited with code )(-?\d+)$/)
+  if (exitMatch) {
+    return t('terminal.processExited', { code: exitMatch[1] })
+  }
   if (code === 'AUTH_FAILED' || code === 'Authentication failed') {
     return t('auth.authFailed')
   }
@@ -38,7 +45,7 @@ const displayEndedDetail = computed(() => {
     return t('errors.host_revision_conflict')
   }
   if (code === 'host_not_found' || code === 'Host no longer exists.') {
-    return t('errors.host_not_found')
+    return t('terminal.hostNotFoundNotice')
   }
   return code
 })
@@ -75,7 +82,8 @@ function attach(): void {
       props.hostId ?? 'local',
     )
   } catch (err) {
-    emit('notice', `Terminal init failed: ${err instanceof Error ? err.message : String(err)}`)
+    const error = err instanceof Error ? err.message : String(err)
+    emit('notice', t('terminal.initFailed', { error }))
   }
 }
 
@@ -88,7 +96,12 @@ function reconnect(): void {
   attach()
 }
 
-onMounted(attach)
+onMounted(() => {
+  unbindLocale = onLocaleChange((loc) => {
+    currentLocale.value = loc
+  })
+  attach()
+})
 
 onActivated(() => {
   session?.refit()
@@ -121,6 +134,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  unbindLocale?.()
   session?.dispose()
   session = null
 })

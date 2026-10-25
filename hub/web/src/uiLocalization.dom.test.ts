@@ -116,12 +116,19 @@ test('Task 3.1 & 3.3: SessionList controls, validation, and confirmation dialogs
   const defaultModeBtn = wrapper.find('.session-list__mode')
   assert.equal(defaultModeBtn.text(), 'Default')
 
+  // Row accessible name in English
+  const rows = wrapper.findAll('.session-list__row')
+  assert.equal(rows[0].attributes('aria-label'), 'Session dev')
+  assert.equal(rows[1].attributes('aria-label'), 'Session prod')
+
   // Switch to Simplified Chinese
   setLocale('zh-CN')
   await nextTick()
 
   assert.equal(createBtn.text(), '+ 新建会话')
   assert.equal(defaultModeBtn.text(), '默认')
+  assert.equal(rows[0].attributes('aria-label'), '会话 dev')
+  assert.equal(rows[1].attributes('aria-label'), '会话 prod')
 
   // Switch to manual mode
   const manualBtn = wrapper.findAll('.session-list__mode')[1]
@@ -184,6 +191,24 @@ test('Task 3.3: TerminalView ended states and diagnostics presentation separate 
   await nextTick()
   assert.equal(wrapper.find('.terminal-view__ended-detail').text(), 'the host configuration has changed; please refresh')
 
+  // Simulate process exit code
+  ;(wrapper.vm as any).endedDetail = 'exit_code:1'
+  await nextTick()
+  assert.equal(wrapper.find('.terminal-view__ended-detail').text(), 'Process exited with code 1')
+
+  setLocale('zh-CN')
+  await nextTick()
+  assert.equal(wrapper.find('.terminal-view__ended-detail').text(), '进程已退出，退出码 1')
+
+  // Legacy string format also maps correctly
+  ;(wrapper.vm as any).endedDetail = 'Process exited with code 137'
+  await nextTick()
+  assert.equal(wrapper.find('.terminal-view__ended-detail').text(), '进程已退出，退出码 137')
+
+  setLocale('en')
+  await nextTick()
+  assert.equal(wrapper.find('.terminal-view__ended-detail').text(), 'Process exited with code 137')
+
   // Simulate unknown diagnostic
   ;(wrapper.vm as any).endedDetail = 'Socket pipe broken abruptly [errno 104]'
   await nextTick()
@@ -191,4 +216,68 @@ test('Task 3.3: TerminalView ended states and diagnostics presentation separate 
   assert.equal(wrapper.find('.terminal-view__ended-detail').text(), 'Socket pipe broken abruptly [errno 104]')
 
   wrapper.unmount()
+})
+
+test('I18N-R3-01: SessionList error display maps wire error codes to localized descriptions and updates on language switch', async () => {
+  resetLocaleForTest('zh-CN')
+  // 1. Empty session list with error
+  const wrapper = mount(SessionList, {
+    props: {
+      sessions: [],
+      error: 'host_unavailable',
+      selected: null,
+      active: {},
+      hostId: 'remote-1',
+      hostName: 'Remote Host',
+    },
+  })
+  await nextTick()
+
+  try {
+    const errorEl = wrapper.find('.session-list__error')
+    assert.ok(errorEl.exists(), 'error element must exist')
+    assert.ok(errorEl.text().includes('主机不可达或已断开连接。'), 'must render localized message in Chinese')
+    assert.ok(!errorEl.text().includes('host_unavailable重试'), 'must not render raw wire code')
+
+    // Switch to English
+    setLocale('en')
+    await nextTick()
+
+    assert.ok(errorEl.text().includes('The host is unreachable or disconnected.'), 'must update to English upon locale switch')
+
+    // 2. Error with diagnostic detail: 'host_unavailable: ssh authentication failed'
+    await wrapper.setProps({ error: 'host_unavailable: ssh authentication failed' })
+    await nextTick()
+
+    assert.ok(errorEl.text().includes('The host is unreachable or disconnected (ssh authentication failed).'))
+
+    // Switch to Chinese
+    setLocale('zh-CN')
+    await nextTick()
+    assert.ok(errorEl.text().includes('主机不可达或已断开连接（ssh authentication failed）。'))
+
+    // 3. Error with host_not_found
+    await wrapper.setProps({ error: 'host_not_found' })
+    await nextTick()
+    assert.ok(errorEl.text().includes('主机已不存在。'))
+
+    // 4. Stale session list with error
+    await wrapper.setProps({
+      sessions: [{ name: 'cached-session', windows: 1, active: false }],
+      error: 'host_unavailable',
+      stale: true,
+    })
+    await nextTick()
+
+    const staleEl = wrapper.find('.session-list__stale')
+    assert.ok(staleEl.exists(), 'stale element must exist')
+    assert.ok(staleEl.text().includes('主机不可达或已断开连接。'))
+
+    setLocale('en')
+    await nextTick()
+    assert.ok(staleEl.text().includes('The host is unreachable or disconnected.'))
+  } finally {
+    resetLocaleForTest('en')
+    wrapper.unmount()
+  }
 })

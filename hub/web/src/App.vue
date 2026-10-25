@@ -23,7 +23,8 @@ import {
   type ConnState,
 } from './terminal'
 import { getConfig, resolveFontSize } from './config'
-import { getPreference, setLocale, onLocaleChange, t, type LanguagePreference } from './i18n/index'
+import { getPreference, setLocale, onLocaleChange, getLocale, t, type LanguagePreference, type SupportedLocale } from './i18n/index'
+import { safeStorageGet, safeStorageSet, safeStorageRemove } from './storage'
 import SessionList from './components/SessionList.vue'
 import TerminalView from './components/TerminalView.vue'
 import ToastStack from './components/ToastStack.vue'
@@ -41,8 +42,19 @@ const FileManagerOverlay = defineAsyncComponent(
 
 const token = ref(getToken() ?? '')
 const tokenInput = ref('')
-const authError = ref('')
+type AuthErrorState = { key: string; params?: Record<string, unknown> } | { raw: string } | null
+const authError = ref<AuthErrorState>(null)
 const authBusy = ref(false)
+const currentLocale = ref<SupportedLocale>(getLocale())
+
+const displayAuthError = computed(() => {
+  void currentLocale.value
+  if (!authError.value) return ''
+  if ('key' in authError.value) {
+    return t(authError.value.key, authError.value.params)
+  }
+  return authError.value.raw
+})
 
 function localizedConnState(s: ConnState | 'connecting' | 'disconnected'): string {
   switch (s) {
@@ -74,6 +86,12 @@ const hostDiscoveryLoading = ref(false)
 const hostDiscoveryError = ref('')
 const hasInitializedWorkspace = ref(false)
 
+const displayHostDiscoveryError = computed(() => {
+  void currentLocale.value
+  if (!hostDiscoveryError.value) return ''
+  return t('hosts.discoveryFailed', { error: hostDiscoveryError.value })
+})
+
 const currentHost = computed<HostItem | null>(() => {
   if (!currentHostId.value) return null
   return availableHosts.value.find((h) => h.id === currentHostId.value) ?? null
@@ -104,13 +122,9 @@ function handleActiveHostRemoved(removedId: string): void {
         disposeTerminalSession(name, host)
       }
     }
-    try {
-      const recent = localStorage.getItem(RECENT_HOST_KEY)
-      if (recent === removedId) {
-        localStorage.removeItem(RECENT_HOST_KEY)
-      }
-    } catch {
-      /* ignore storage quota */
+    const recent = safeStorageGet(RECENT_HOST_KEY)
+    if (recent === removedId) {
+      safeStorageRemove(RECENT_HOST_KEY)
     }
   }
 }
@@ -140,7 +154,7 @@ async function loadAvailableHosts(isBootstrap = false): Promise<void> {
 
     if (isBootstrap || currentHostId.value === null) {
       // 1. Remembered recent host if still registered
-      const recent = localStorage.getItem(RECENT_HOST_KEY)
+      const recent = safeStorageGet(RECENT_HOST_KEY)
       if (recent && availableHosts.value.some((h) => h.id === recent)) {
         selectHost(recent)
         return
@@ -268,14 +282,10 @@ const termConfig = computed(() => getConfig().web.terminal)
 
 function loadFontSize(): number {
   const cfg = getConfig().web.terminal
-  const raw = localStorage.getItem(FONT_SIZE_KEY)
+  const raw = safeStorageGet(FONT_SIZE_KEY)
   const resolved = resolveFontSize(raw, cfg)
   if (raw !== null && String(resolved) !== raw) {
-    try {
-      localStorage.setItem(FONT_SIZE_KEY, String(resolved))
-    } catch {
-      /* ignore storage quota */
-    }
+    safeStorageSet(FONT_SIZE_KEY, String(resolved))
   }
   return resolved
 }
@@ -286,11 +296,7 @@ function setFontSize(px: number): void {
   const cfg = getConfig().web.terminal
   const clamped = Math.min(cfg.max_font_size, Math.max(cfg.min_font_size, px))
   fontSize.value = clamped
-  try {
-    localStorage.setItem(FONT_SIZE_KEY, String(clamped))
-  } catch {
-    /* ignore storage quota */
-  }
+  safeStorageSet(FONT_SIZE_KEY, String(clamped))
 }
 
 const mainEl = ref<HTMLElement | null>(null)
@@ -308,7 +314,7 @@ function toggleFullscreen(): void {
     })
   } else {
     mainEl.value?.requestFullscreen().catch(() => {
-      notify('warning', 'The browser refused to enter fullscreen.')
+      notify('warning', t('terminal.fullscreenRefusedNotice'))
     })
   }
 }
@@ -381,12 +387,15 @@ function insertPathIntoTerminal(text: string, sourceHostId = currentHostId.value
   if (!currentHostId.value || sourceHostId !== currentHostId.value) {
     notify(
       'warning',
-      `Cannot insert path across hosts: file belongs to ${sourceHostId} but active terminal is on ${currentHostId.value}.`,
+      t('terminal.crossHostPathRefusal', {
+        sourceHost: sourceHostId,
+        targetHost: currentHostId.value,
+      }),
     )
     return
   }
   if (selected.value === null || !insertIntoTerminal(selected.value, text, currentHostId.value)) {
-    notify('warning', 'No live terminal to insert into.')
+    notify('warning', t('terminal.noLiveTerminalNotice'))
   }
 }
 
@@ -458,15 +467,11 @@ watch(selectedActive, (live) => {
 // --- Sidebar collapse (persisted) ---
 
 const SIDEBAR_KEY = 'vtc:sidebar-collapsed'
-const sidebarCollapsed = ref(localStorage.getItem(SIDEBAR_KEY) === '1')
+const sidebarCollapsed = ref(safeStorageGet(SIDEBAR_KEY) === '1')
 
 function toggleSidebar(): void {
   sidebarCollapsed.value = !sidebarCollapsed.value
-  try {
-    localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed.value ? '1' : '0')
-  } catch {
-    /* ignore storage quota */
-  }
+  safeStorageSet(SIDEBAR_KEY, sidebarCollapsed.value ? '1' : '0')
 }
 
 // --- In-app help ---
@@ -595,7 +600,7 @@ function handleAuthFailure() {
   selected.value = null
   sessions.value = []
   cleanupSessionState()
-  authError.value = t('auth.authFailed')
+  authError.value = { key: 'auth.authFailed' }
 }
 
 // The main view opens only after the server has accepted the credential:
@@ -607,13 +612,11 @@ async function submitToken() {
   const tok = tokenInput.value.trim()
   if (!tok || authBusy.value) return
   if (!isHeaderSafeToken(tok)) {
-    authError.value =
-      'The token contains characters that cannot be sent in an HTTP header — ' +
-      'check for full-width characters (e.g. from an IME), which look identical but are not.'
+    authError.value = { key: 'auth.headerUnsafeToken' }
     return
   }
   authBusy.value = true
-  authError.value = ''
+  authError.value = null
   try {
     setToken(tok)
     token.value = tok
@@ -623,9 +626,9 @@ async function submitToken() {
     clearToken()
     token.value = ''
     if (err instanceof AuthError) {
-      authError.value = t('auth.authFailed')
+      authError.value = { key: 'auth.authFailed' }
     } else {
-      authError.value = err instanceof Error ? err.message : String(err)
+      authError.value = { raw: err instanceof Error ? err.message : String(err) }
     }
   } finally {
     authBusy.value = false
@@ -650,11 +653,7 @@ function logout() {
 function onHostChange(): void {
   if (!currentHostId.value) return
   activeHostRemoved.value = false
-  try {
-    localStorage.setItem(RECENT_HOST_KEY, currentHostId.value)
-  } catch {
-    /* ignore storage quota */
-  }
+  safeStorageSet(RECENT_HOST_KEY, currentHostId.value)
   selected.value = null
   listError.value = ''
   listStale.value = false
@@ -672,6 +671,31 @@ function onSelectHostFromModal(id: string): void {
 function openHostManagerAdd(): void {
   managerInitialHostId.value = null
   hostManagerOpen.value = true
+}
+
+function formatSessionError(msg: string, action: 'create' | 'rename' | 'kill'): string {
+  if (msg.includes('name_in_use')) {
+    return t('sessions.nameInUse')
+  }
+  if (msg.includes('session_not_found')) {
+    return t('sessions.sessionNotFound')
+  }
+  if (msg.includes('tmux_unavailable')) {
+    return t('errors.tmux_unavailable')
+  }
+  if (msg.includes('host_not_found')) {
+    return t('terminal.hostNotFoundNotice')
+  }
+  if (msg.includes('host_unavailable')) {
+    return t('errors.host_unavailable')
+  }
+  if (msg.includes('host_unsupported')) {
+    return t('errors.host_unsupported')
+  }
+  if (msg.includes('invalid_request')) {
+    return t('errors.invalid_request')
+  }
+  return t(`sessions.${action}FailedWithDiagnostic`, { diagnostic: msg })
 }
 
 // One-click creation: the hub assigns the default name (made unique by its
@@ -706,14 +730,14 @@ async function onCreate() {
     }
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('host_revision_conflict')) {
-      notify('error', `Could not create session on ${targetHostName}: host configuration has changed.`)
+      notify('error', t('sessions.createConflict', { host: targetHostName }))
       return
     }
     if (msg.includes('outcome_unknown')) {
-      notify('warning', `Creation outcome uncertain on ${targetHostName}. Verify sessions before retrying.`)
+      notify('warning', t('sessions.createUncertain', { host: targetHostName }))
       return
     }
-    notify('error', msg)
+    notify('error', formatSessionError(msg, 'create'))
   } finally {
     creating.value = false
   }
@@ -787,14 +811,14 @@ async function onRename(oldName: string, newName: string) {
     }
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('host_revision_conflict')) {
-      notify('error', `Could not rename session on ${targetHostName}: host configuration has changed.`)
+      notify('error', t('sessions.renameConflict', { host: targetHostName }))
       return
     }
     if (msg.includes('outcome_unknown')) {
-      notify('warning', `Rename outcome uncertain on ${targetHostName}. Verify session before retrying.`)
+      notify('warning', t('sessions.renameUncertain', { host: targetHostName }))
       return
     }
-    notify('error', msg)
+    notify('error', formatSessionError(msg, 'rename'))
   }
 }
 
@@ -855,14 +879,14 @@ async function onKill(name: string) {
     }
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('host_revision_conflict')) {
-      notify('error', `Could not kill session on ${targetHostName}: host configuration has changed.`)
+      notify('error', t('sessions.killConflict', { host: targetHostName }))
       return
     }
     if (msg.includes('outcome_unknown')) {
-      notify('warning', `Kill outcome uncertain on ${targetHostName}. Verify session before retrying.`)
+      notify('warning', t('sessions.killUncertain', { host: targetHostName }))
       return
     }
-    notify('error', msg)
+    notify('error', formatSessionError(msg, 'kill'))
   }
 }
 
@@ -882,7 +906,7 @@ async function onBulkKill(names: string[]) {
       currentConnRev !== undefined &&
       currentConnRev !== targetConnectionRev
     ) {
-      notify('warning', `Host configuration changed during bulk kill. Remaining sessions were not killed.`)
+      notify('warning', t('sessions.bulkKillHostConflict'))
       break
     }
     try {
@@ -904,17 +928,17 @@ async function onBulkKill(names: string[]) {
       }
       const msg = err instanceof Error ? err.message : String(err)
       if (msg.includes('host_revision_conflict')) {
-        notify('error', `Could not kill session "${name}" on ${targetHostName}: host configuration changed.`)
+        notify('error', t('sessions.bulkKillItemConflict', { name, host: targetHostName }))
         break
       }
       if (msg.includes('outcome_unknown')) {
-        notify('warning', `Kill outcome uncertain for "${name}" on ${targetHostName}.`)
+        notify('warning', t('sessions.bulkKillItemUncertain', { name, host: targetHostName }))
       }
       failed.push(name)
     }
   }
   if (failed.length > 0) {
-    notify('error', `Failed to kill: ${failed.join(', ')}`)
+    notify('error', t('sessions.bulkKillFailed', { names: failed.join(', ') }))
   }
   if (
     currentHostId.value === targetHostId &&
@@ -947,8 +971,9 @@ function onOffline() {
 let unlistenLocale: (() => void) | null = null
 
 onMounted(async () => {
-  unlistenLocale = onLocaleChange((_locale, pref) => {
+  unlistenLocale = onLocaleChange((locale, pref) => {
     currentPreference.value = pref
+    currentLocale.value = locale
   })
   if (hasToken.value) {
     await loadAvailableHosts(true)
@@ -986,7 +1011,7 @@ onBeforeUnmount(() => {
         <button class="auth-card__btn" type="button" :disabled="authBusy" @click="submitToken">
           {{ authBusy ? t('auth.signingIn') : t('auth.signIn') }}
         </button>
-        <p v-if="authError" class="auth-card__error" role="alert" aria-live="assertive">{{ authError }}</p>
+        <p v-if="displayAuthError" class="auth-card__error" role="alert" aria-live="assertive">{{ displayAuthError }}</p>
         <div class="auth-card__lang-row">
           <label class="sr-only" for="login-lang-select">{{ t('common.language') }}</label>
           <select
@@ -1044,7 +1069,7 @@ onBeforeUnmount(() => {
       </header>
 
       <div v-if="hostDiscoveryError && !hasInitializedWorkspace" class="app__discovery-state app__discovery-state--error" role="alert">
-        <p class="app__discovery-msg">{{ hostDiscoveryError }}</p>
+        <p class="app__discovery-msg">{{ displayHostDiscoveryError }}</p>
         <button class="app__discovery-btn" type="button" @click="loadAvailableHosts(true)">{{ t('common.retry') }}</button>
       </div>
 
@@ -1072,7 +1097,7 @@ onBeforeUnmount(() => {
 
       <div v-else class="app__body">
         <div v-if="hostDiscoveryError" class="app__discovery-state app__discovery-state--error app__discovery-banner" role="alert">
-          <p class="app__discovery-msg">{{ hostDiscoveryError }}</p>
+          <p class="app__discovery-msg">{{ displayHostDiscoveryError }}</p>
           <button class="app__discovery-btn" type="button" @click="loadAvailableHosts(false)">{{ t('common.retry') }}</button>
         </div>
         <div v-if="activeHostRemoved" class="app__removed-banner" role="alert">
@@ -1137,7 +1162,7 @@ onBeforeUnmount(() => {
               :title="selectedActive ? t('terminal.producingOutput') : t('terminal.idle')"
               aria-hidden="true"
             ></span>
-            <span class="app__term-host" :title="`Host: ${currentHostName} (${currentHostId})`">{{ currentHostName }}</span>
+            <span class="app__term-host" :title="t('terminal.hostTitle', { name: currentHostName, id: currentHostId })">{{ currentHostName }}</span>
             <span class="app__term-title">{{ selected }}</span>
             <span
               class="app__term-state"

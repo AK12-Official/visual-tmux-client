@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { renderLoading, renderError } from './bootstrap'
+import { renderLoading, renderError, resetBootstrapForTest, cleanupBootstrap } from './bootstrap'
 import { setLocale, resetLocaleForTest, t } from './i18n/index'
 
 test('renderLoading renders localized loading state', () => {
@@ -63,6 +63,61 @@ test('renderError renders localized error heading and retry button in both langu
   mockBtn.onclick?.()
   assert.equal(retriedZh, true)
   assert.equal(mockBtn.disabled, true)
+
+  resetLocaleForTest('en')
+})
+
+test('I18N-R4-02: pre-mount error and loading states dynamically update on locale change without manual re-render', () => {
+  const buttons: { disabled: boolean; onclick: null | (() => void) }[] = []
+  const el = {
+    innerHTML: '',
+    querySelector(sel: string) {
+      if (sel === '#vtc-retry-btn') {
+        const btn = { disabled: false, onclick: null as null | (() => void) }
+        buttons.push(btn)
+        return btn
+      }
+      return null
+    },
+  } as unknown as HTMLElement
+
+  resetLocaleForTest('en')
+  let retryCount = 0
+  const onRetry = () => {
+    retryCount++
+  }
+
+  // 1. Initial error rendered in English
+  renderError(el, 'Backend unreachable: 503', onRetry)
+  assert.ok(el.innerHTML.includes('Configuration Error'))
+  assert.ok(el.innerHTML.includes('Retry'))
+  assert.ok(el.innerHTML.includes('Backend unreachable: 503'))
+
+  // 2. Locale changes to Chinese -> content should automatically update
+  setLocale('zh-CN')
+  assert.ok(el.innerHTML.includes('配置错误'), 'Heading should dynamically update to Chinese')
+  assert.ok(el.innerHTML.includes('重试'), 'Retry button should dynamically update to Chinese')
+  assert.ok(el.innerHTML.includes('Backend unreachable: 503'), 'Raw diagnostic must be preserved')
+
+  // Verify retry button click works on dynamically re-rendered error
+  const activeBtn = buttons[buttons.length - 1]
+  assert.ok(activeBtn, 'Retry button must exist')
+  activeBtn.onclick?.()
+  assert.equal(retryCount, 1)
+  assert.equal(activeBtn.disabled, true)
+
+  // 3. Loading state also updates dynamically
+  renderLoading(el)
+  assert.ok(el.innerHTML.includes('正在加载配置...'))
+
+  setLocale('en')
+  assert.ok(el.innerHTML.includes('Loading configuration...'), 'Loading text should dynamically update to English')
+
+  // 4. Cleanup removes listener
+  resetBootstrapForTest()
+  setLocale('zh-CN')
+  // After resetBootstrapForTest(), innerHTML should not have been re-rendered to Chinese
+  assert.ok(el.innerHTML.includes('Loading configuration...'), 'Listener must be detached after cleanup')
 
   resetLocaleForTest('en')
 })

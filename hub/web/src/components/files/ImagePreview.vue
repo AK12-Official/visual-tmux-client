@@ -96,7 +96,7 @@ watch(
       shownAt.value = attempt
     } catch (err) {
       if (attempt !== loadAt) return
-      emit('notice', `Could not preview ${path}: ${String(err)}`, 'error')
+      emit('notice', t('files.previewFailed', { path, error: String(err) }), 'error')
     }
   },
   { immediate: true },
