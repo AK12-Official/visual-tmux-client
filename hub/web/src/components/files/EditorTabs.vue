@@ -7,6 +7,7 @@
 import { ref } from 'vue'
 
 import { isDirty, panelElementId, tabElementId, type OpenFile } from '../../files/tabs'
+import { t } from '../../i18n/index'
 
 defineProps<{ files: OpenFile[]; active: string | null; activeId?: number | null }>()
 const emit = defineEmits<{
@@ -109,15 +110,15 @@ defineExpose({ focusActiveTab })
           v-if="isDirty(file)"
           class="tabs__dirty"
           role="img"
-          aria-label="unsaved changes"
-          title="unsaved changes"
+          :aria-label="t('files.dirtyIndicator')"
+          :title="t('files.dirtyIndicator')"
         >●</span>
       </button>
       <button
         class="tabs__close"
         type="button"
         tabindex="-1"
-        :aria-label="`Close ${file.name}`"
+        :aria-label="t('files.closeFileTab', { name: file.name })"
         @click="emit('close', file.path, file.id)"
       >×</button>
     </div>

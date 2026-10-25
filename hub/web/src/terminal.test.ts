@@ -15,6 +15,7 @@ import {
   TerminalSession,
   type TerminalHooks,
 } from './terminal'
+import { resetLocaleForTest } from './i18n/index'
 
 const nonDefaultConfig: ClientConfig = {
   version: 1,
@@ -511,6 +512,7 @@ test("output on host A's dev never triggers activity on host B's same-named sess
 })
 
 test('TerminalSession ends reconnection when host revision conflict occurs', async () => {
+  resetLocaleForTest('en')
   setConfig(nonDefaultConfig)
 
   const originalResizeObserver = globalThis.ResizeObserver

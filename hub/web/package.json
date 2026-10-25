@@ -19,7 +19,8 @@
     "codemirror": "^6.0.2",
     "dompurify": "^3.4.15",
     "marked": "^18.0.12",
-    "vue": "^3.5.0"
+    "vue": "^3.5.0",
+    "vue-i18n": "^11.4.16"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.0",

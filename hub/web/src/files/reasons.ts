@@ -13,6 +13,8 @@
 // derived from the hub's: it is raised by this client (files/api.ts,
 // requireMtime), not by any response.
 
+import { t } from '../i18n/index'
+
 export const REASONS: Record<string, string> = {
   path_not_allowed: 'that path is outside the directories this hub may open',
   cross_root_move: 'entries cannot be moved between two configured roots',
@@ -39,7 +41,6 @@ export const REASONS: Record<string, string> = {
   host_revision_conflict: 'the host configuration has changed; please refresh',
 }
 
-
 /**
  * reasonFor explains a refusal, or reports the code itself when it has none.
  *
@@ -51,7 +52,10 @@ export const REASONS: Record<string, string> = {
  */
 export function reasonFor(code: string, limit: number, format: (bytes: number) => string): string {
   if (code === 'file_too_large' && limit > 0) {
-    return `it is larger than this hub's ${format(limit)} limit for one file`
+    return t('errors.file_too_large_limit', { limit: format(limit) })
   }
-  return REASONS[code] ?? code
+  if (REASONS[code]) {
+    return t(`errors.${code}`)
+  }
+  return code
 }

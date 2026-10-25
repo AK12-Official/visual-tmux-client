@@ -23,6 +23,7 @@ import { createPending } from '../../files/pending'
 import { reasonFor as reasonForCode } from '../../files/reasons'
 import { createPathChanges } from '../../files/pathChanges'
 import { getConfig } from '../../config'
+import { t } from '../../i18n/index'
 import type { Classification } from '../../files/classification'
 import { choosePreview, editable, namesAnImage, presentation, wantsText } from '../../files/preview'
 import { testHostCapabilities, type HostCapabilities, type HostItem } from '../../api'
@@ -186,8 +187,8 @@ const editorVisible = computed(
 const notShown = computed(() => {
   const file = active.value
   if (file === null) return ''
-  if (file.binary === null && !namesAnImage(file.name)) return 'its contents have not been read'
-  return 'it is binary or too large to preview'
+  if (file.binary === null && !namesAnImage(file.name)) return t('files.notShownUnread')
+  return t('files.notShownBinaryOrLarge')
 })
 
 const dirtyHosts = computed(() => {
@@ -357,15 +358,15 @@ const canSaveActive = computed(() => {
 
 const saveButtonTitle = computed(() => {
   if (hostRemoved.value) {
-    return 'Host has been removed. Remote actions are disabled; drafts remain available for local copying.'
+    return t('files.hostRemovedTitle')
   }
   if (revisionStale.value) {
-    return 'Host configuration has changed (revision conflict). Reconcile before saving.'
+    return t('files.revisionConflictTitle')
   }
   if (replacementUnsupported.value) {
-    return 'Overwrite is unavailable on this host: remote server does not support atomic replacement (browse and download remain usable)'
+    return `${t('files.overwriteUnavailable')}: ${t('files.overwriteUnavailableTitle')}`
   }
-  return 'save (the hub refuses if the file changed since it was read)'
+  return t('files.save')
 })
 
 function discardHostDrafts(targetHostId: string) {
@@ -922,7 +923,7 @@ async function save(
     }
     if (err instanceof FileApiError && err.code === 'conflict') {
       const overwrite = window.confirm(
-        `${tab.name} changed on disk since it was opened. Overwrite it with your version?`,
+        t('files.changedOnDiskPrompt', { name: tab.name }),
       )
       // The agreement about other names travels with the retry: the user gave it
       // for this write, and asking for it again on the way to the same write
@@ -938,8 +939,8 @@ async function save(
       const isRemote = (tab.hostId ?? host.value) !== 'local'
       const replace = window.confirm(
         isRemote
-          ? `${tab.name}: remote replacement does not preserve ACLs/xattrs or update other hard-link names (link count cannot be determined). Saving replaces this file, and other names keep the contents they have now. Save anyway?`
-          : `${tab.name} is reachable under other names as well. Saving replaces this file, and other names keep the contents they have now. Save anyway?`,
+          ? t('files.otherNamesRemotePrompt', { name: tab.name })
+          : t('files.otherNamesLocalPrompt', { name: tab.name }),
       )
       if (replace) await save(force, tab.id, true)
       return
@@ -993,7 +994,7 @@ async function reconcile(id: number) {
     let discardEdits = false
     if (currentTab.text !== currentTab.saved && contents.text !== currentTab.text) {
       discardEdits = window.confirm(
-        `${currentTab.name} has unsaved edits that differ from disk. Discard local edits and reload from disk?`,
+        t('files.reconcileDiscardPrompt', { name: currentTab.name }),
       )
     }
 
@@ -1070,7 +1071,7 @@ function isSameTab(id: number): boolean {
 
 function closeTab(path: string, id?: number) {
   const tab = tabs.value.find((candidate) => id !== undefined ? candidate.id === id : candidate.path === path)
-  if (tab && isDirty(tab) && !window.confirm(`${tab.name} has unsaved changes. Close it anyway?`)) {
+  if (tab && isDirty(tab) && !window.confirm(t('files.closeTabUnsavedPrompt', { name: tab.name }))) {
     return
   }
   tabs.value = tabs.value.filter((candidate) => id !== undefined ? candidate.id !== id : candidate.path !== path)
@@ -1107,7 +1108,7 @@ async function replaceTabFocus() {
 /** requestClose warns before discarding unsaved edits, which are not recoverable
  * once the panel is gone. */
 function requestClose() {
-  if (dirty.value && !window.confirm('Files have unsaved changes. Close the file manager anyway?')) {
+  if (dirty.value && !window.confirm(t('files.closeManagerUnsavedPrompt'))) {
     return
   }
   emit('close')
@@ -1229,7 +1230,7 @@ async function createHere(isDir: boolean) {
   // lost either way -- though which of the two the screen is left showing is not
   // guaranteed, since the two listings race -- so there is nothing here for the
   // ordering to protect.
-  const name = window.prompt(isDir ? 'New directory name' : 'New file name')
+  const name = window.prompt(isDir ? t('files.newDirectoryPrompt') : t('files.newFilePrompt'))
   if (!name) return
   const nowConnRev = currentHostConnRev(targetHost)
   if (
@@ -1414,7 +1415,7 @@ function renameTarget(entry: Entry, path: string) {
     emit('notice', `Could not rename ${entry.name}: host configuration has changed.`, 'error')
     return
   }
-  const name = window.prompt('Rename to', entry.name)
+  const name = window.prompt(t('files.renamePrompt'), entry.name)
   if (!name || name === entry.name) return
   const nowConnRev = currentHostConnRev(targetHost)
   if (
@@ -1502,10 +1503,10 @@ async function deleteTarget(entry: Entry, path: string) {
   )
   const unsaved = doomed.filter(isDirty)
 
-  let question = `Delete the ${kind} ${entry.name}? This cannot be undone.`
+  let question = t('files.deleteEntryPrompt', { kind, name: entry.name })
   if (unsaved.length > 0) {
     const names = unsaved.map((tab) => tab.name).join(', ')
-    question += `\n\nOpen with unsaved changes: ${names}. Those edits will be lost.`
+    question += `\n\n${t('files.deleteUnsavedWarning', { names })}`
   }
   if (!window.confirm(question)) {
     return
@@ -1822,26 +1823,27 @@ defineExpose({
       <button
         class="fm__btn"
         type="button"
-        title="go to the parent directory"
+        :title="t('files.goToParent')"
+        :aria-label="t('files.goToParent')"
         :disabled="current === '/' || current === ''"
         @click="goTo(dirname(current))"
       >↑</button>
       <span class="fm__host" :title="`Host: ${hostName || hostId || 'local'}`">{{ hostName || hostId || 'local' }}</span>
       <span class="fm__path" :title="current">{{ current || '…' }}</span>
-      <button class="fm__btn" type="button" title="new file" :disabled="current === ''" @click="createHere(false)">+ file</button>
-      <button class="fm__btn" type="button" title="new directory" :disabled="current === ''" @click="createHere(true)">+ dir</button>
-      <button class="fm__btn" type="button" title="reload this directory" @click="refreshCurrent">↻</button>
-      <button class="fm__btn fm__btn--close" type="button" title="close" @click="requestClose">✕</button>
+      <button class="fm__btn" type="button" :title="t('files.newFile')" :disabled="current === ''" @click="createHere(false)">+ file</button>
+      <button class="fm__btn" type="button" :title="t('files.newFolder')" :disabled="current === ''" @click="createHere(true)">+ dir</button>
+      <button class="fm__btn" type="button" :title="t('files.reloadDirectory')" :aria-label="t('files.reloadDirectory')" @click="refreshCurrent">↻</button>
+      <button class="fm__btn fm__btn--close" type="button" :title="t('common.close')" :aria-label="t('common.close')" @click="requestClose">✕</button>
     </header>
 
     <div class="fm__body">
-      <aside ref="listingRef" class="fm__tree" tabindex="-1" aria-label="Files">
-        <p v-if="loading" class="fm__state">Loading…</p>
+      <aside ref="listingRef" class="fm__tree" tabindex="-1" :aria-label="t('files.title')">
+        <p v-if="loading" class="fm__state">{{ t('common.loading') }}</p>
         <p v-else-if="failure" class="fm__state fm__state--error" role="alert">{{ failure }}</p>
         <template v-else>
           <p v-if="navError" class="fm__nav-error" role="alert">
             <span>{{ navError }}</span>
-            <button class="fm__nav-dismiss" type="button" aria-label="Dismiss" @click="navError = ''">
+            <button class="fm__nav-dismiss" type="button" :aria-label="t('common.dismiss')" @click="navError = ''">
               ×
             </button>
           </p>
@@ -1868,7 +1870,7 @@ defineExpose({
           @close="(path, id) => closeTab(path, id)"
         />
 
-        <div v-if="!active" class="fm__state">Select a file to open it.</div>
+        <div v-if="!active" class="fm__state">{{ t('files.selectFilePrompt') }}</div>
 
         <template v-else>
           <div class="fm__actions">
@@ -1878,32 +1880,32 @@ defineExpose({
               :disabled="!canSaveActive"
               :title="saveButtonTitle"
               @click="save(false)"
-            >Save</button>
+            >{{ t('common.save') }}</button>
             <button
               v-if="active && !active.binary"
               class="fm__btn"
               type="button"
-              title="re-read file from disk to reconcile"
+              :title="t('files.reconcileTitle')"
               @click="reconcile(active.id)"
-            >Reconcile</button>
+            >{{ t('files.reconcile') }}</button>
             <button
               v-if="preview === 'markdown'"
               class="fm__btn"
               type="button"
               @click="markdownView.set(active.path, activeIsMarkdownSource ? 'preview' : 'source')"
-            >{{ activeIsMarkdownSource ? 'Preview' : 'Source' }}</button>
+            >{{ activeIsMarkdownSource ? t('files.previewMarkdown') : t('files.sourceMarkdown') }}</button>
             <span class="fm__spacer"></span>
-            <span v-if="isDirty(active)" class="fm__dirty" role="status">unsaved changes</span>
+            <span v-if="isDirty(active)" class="fm__dirty" role="status">{{ t('files.dirtyIndicator') }}</span>
           </div>
 
           <div v-if="hostRemoved" class="fm__removed-banner" role="status">
-            This host has been removed. Remote actions are disabled; drafts remain available for local copying.
+            {{ t('files.hostRemovedBanner') }}
           </div>
           <div v-else-if="revisionStale" class="fm__stale-banner" role="status">
-            Host configuration has changed since this file was opened (revision conflict). Reconcile or reload before saving to the updated host.
+            {{ t('files.revisionConflictBanner') }}
           </div>
           <div v-else-if="replacementUnsupported" class="fm__unsupported-banner" role="status">
-            Overwrite is unavailable on this host: remote server does not support atomic replacement (browse and download remain usable).
+            {{ t('files.overwriteUnavailable') }}: {{ t('files.overwriteUnavailableTitle') }}
           </div>
 
           <!--
@@ -1933,10 +1935,10 @@ defineExpose({
                 :source="active.text"
               />
               <div v-else-if="!editorVisible" class="fm__info">
-                <p class="fm__state">{{ active.name }} is not shown here: {{ notShown }}.</p>
+                <p class="fm__state">{{ t('files.notShownMessage', { name: active.name, reason: notShown }) }}</p>
                 <p class="fm__meta">{{ formatSize(active.size) }} · {{ active.path }}</p>
                 <button class="fm__btn" type="button" @click="download(active.path, active.name)">
-                  Download
+                  {{ t('files.download') }}
                 </button>
               </div>
             </template>

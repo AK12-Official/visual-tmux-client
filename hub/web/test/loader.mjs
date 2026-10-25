@@ -11,6 +11,7 @@ export async function resolve(specifier, context, nextResolve) {
     // The editor and the sanitizer both need a document, which this test
     // environment does not have.
     codemirror: './mocks/codemirror.mjs',
+    '@codemirror/state': './mocks/codemirror.mjs',
     dompurify: './mocks/dompurify.mjs',
   }
   if (browserOnly[specifier]) {

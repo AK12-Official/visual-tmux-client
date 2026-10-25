@@ -9,6 +9,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { issueTicket, AuthError } from './api'
 import { getConfig } from './config'
+import { t } from './i18n/index'
 
 export type ConnState = 'connecting' | 'connected' | 'reconnecting' | 'ended'
 
@@ -234,13 +235,13 @@ export class TerminalSession {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
-    this.hooks.onState('reconnecting', 'Network restored, reconnecting…')
+    this.hooks.onState('reconnecting', t('terminal.networkRestored'))
     void this.connect()
   }
 
   private handleOffline = (): void => {
     if (this.disposed || this.ended) return
-    this.hooks.onState('reconnecting', 'Network offline')
+    this.hooks.onState('reconnecting', t('terminal.networkOffline'))
   }
 
   refit(): void {
@@ -387,28 +388,28 @@ export class TerminalSession {
       const message = err instanceof Error ? err.message : String(err)
       if (err instanceof AuthError || message.includes('AUTH_FAILED')) {
         this.ended = true
-        this.hooks.onState('ended', 'Authentication failed')
-        this.hooks.onNotice('Session connection ended: authentication failed.')
+        this.hooks.onState('ended', 'AUTH_FAILED')
+        this.hooks.onNotice(t('terminal.authFailedNotice'))
         return
       }
       if (message.includes('session_not_found')) {
         // The session is gone; no retry can ever succeed. End instead of
         // retrying quietly forever (the spec forbids silent indefinite retry).
         this.ended = true
-        this.hooks.onState('ended', `Session "${this.session}" no longer exists.`)
-        this.hooks.onNotice(`Session "${this.session}" no longer exists.`)
+        this.hooks.onState('ended', 'session_not_found')
+        this.hooks.onNotice(t('terminal.sessionNotFoundNotice', { name: this.session }))
         return
       }
       if (message.includes('host_revision_conflict')) {
         this.ended = true
-        this.hooks.onState('ended', 'Host configuration changed.')
-        this.hooks.onNotice('Host configuration changed; reconnection stopped.')
+        this.hooks.onState('ended', 'host_revision_conflict')
+        this.hooks.onNotice(t('terminal.hostRevisionConflictNotice'))
         return
       }
       if (message.includes('host_not_found')) {
         this.ended = true
-        this.hooks.onState('ended', 'Host no longer exists.')
-        this.hooks.onNotice('Host no longer exists.')
+        this.hooks.onState('ended', 'host_not_found')
+        this.hooks.onNotice(t('terminal.hostNotFoundNotice'))
         return
       }
       if (this.attempt === 0) {

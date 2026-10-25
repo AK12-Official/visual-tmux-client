@@ -1,63 +1,121 @@
+<script lang="ts">
+// Per-language guide caches and pending loads.
+const cachedHtml: Record<string, string> = {}
+const loads: Record<string, Promise<string>> = {}
+let currentRequestId = 0
+
+export function resetGuideCacheForTest(): void {
+  for (const k of Object.keys(cachedHtml)) {
+    delete cachedHtml[k]
+  }
+  for (const k of Object.keys(loads)) {
+    delete loads[k]
+  }
+  currentRequestId = 0
+}
+
+export function getCachedGuideForTest(locale: string): string | undefined {
+  return cachedHtml[locale]
+}
+</script>
+
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { notify } from '../toasts'
+import { t, getLocale, onLocaleChange, type SupportedLocale } from '../i18n/index'
 
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
+
+const currentLocale = ref<SupportedLocale>(getLocale())
+
+const guideTitle = computed(() => {
+  void currentLocale.value
+  return t('help.guideTitle')
+})
+const closeLabel = computed(() => {
+  void currentLocale.value
+  return t('help.close')
+})
+const loadingText = computed(() => {
+  void currentLocale.value
+  return t('help.loading')
+})
 
 const html = ref<string | null>(null)
 const loading = ref(false)
 const panel = ref<HTMLElement | null>(null)
 const closeButton = ref<HTMLButtonElement | null>(null)
 let previousFocus: HTMLElement | null = null
+let unbindLocale: (() => void) | null = null
 
-// The guide is static for the lifetime of the page: fetch once, cache the
-// rendered HTML, and never re-fetch on subsequent opens.
-let cachedHtml: string | null = null
-let load: Promise<void> | null = null
+async function fetchAndRenderGuide(targetLocale: SupportedLocale): Promise<string> {
+  const url = targetLocale === 'zh-CN' ? '/tmux-guide.zh-CN.md' : '/tmux-guide.en.md'
+  const [{ marked }, res] = await Promise.all([
+    import('marked'),
+    fetch(url),
+  ])
+  if (!res.ok) throw new Error(`guide: ${res.status} ${res.statusText}`)
+  const md = await res.text()
+  return marked.parse(md, { async: false }) as string
+}
 
-async function ensureGuide(): Promise<void> {
-  load ??= (async () => {
-    try {
-      const [{ marked }, res] = await Promise.all([
-        import('marked'),
-        fetch('/tmux-guide.zh-CN.md'),
-      ])
-      if (!res.ok) throw new Error(`guide: ${res.status} ${res.statusText}`)
-      const md = await res.text()
-      cachedHtml = marked.parse(md, { async: false }) as string
-    } catch (err) {
-      load = null // a failed load may be retried on the next open
-      throw err
+async function loadGuideForLocale(targetLocale: SupportedLocale): Promise<void> {
+  if (cachedHtml[targetLocale]) {
+    html.value = cachedHtml[targetLocale]
+    loading.value = false
+    return
+  }
+
+  const reqId = ++currentRequestId
+  loading.value = true
+  html.value = null
+
+  try {
+    if (!loads[targetLocale]) {
+      loads[targetLocale] = fetchAndRenderGuide(targetLocale).then(
+        (rendered) => {
+          cachedHtml[targetLocale] = rendered
+          delete loads[targetLocale]
+          return rendered
+        },
+        (err) => {
+          delete loads[targetLocale]
+          throw err
+        },
+      )
     }
-  })()
-  await load
+    const rendered = await loads[targetLocale]
+    if (reqId === currentRequestId && props.open && currentLocale.value === targetLocale) {
+      html.value = rendered
+    }
+  } catch (err) {
+    if (reqId === currentRequestId && props.open && currentLocale.value === targetLocale) {
+      notify('error', err instanceof Error ? err.message : String(err))
+    }
+  } finally {
+    if (reqId === currentRequestId && props.open && currentLocale.value === targetLocale) {
+      loading.value = false
+    }
+  }
 }
 
 watch(
-  () => props.open,
-  async (open) => {
+  [() => props.open, currentLocale],
+  async ([open, loc], [prevOpen]) => {
     if (!open) {
-      previousFocus?.focus()
-      previousFocus = null
+      if (prevOpen) {
+        previousFocus?.focus()
+        previousFocus = null
+      }
       return
     }
-    previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    await nextTick()
-    closeButton.value?.focus()
-    if (cachedHtml !== null) {
-      html.value = cachedHtml
-      return
+    if (!prevOpen) {
+      previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+      await nextTick()
+      closeButton.value?.focus()
     }
-    loading.value = true
-    try {
-      await ensureGuide()
-      html.value = cachedHtml
-    } catch (err) {
-      notify('error', err instanceof Error ? err.message : String(err))
-    } finally {
-      loading.value = false
-    }
+    await loadGuideForLocale(loc)
   },
   { immediate: true },
 )
@@ -85,8 +143,24 @@ function trapFocus(ev: KeyboardEvent): void {
   }
 }
 
-onMounted(() => window.addEventListener('keydown', onKey))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
+onMounted(() => {
+  window.addEventListener('keydown', onKey)
+  unbindLocale = onLocaleChange((loc) => {
+    currentLocale.value = loc
+  })
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKey)
+  unbindLocale?.()
+})
+
+defineExpose({
+  html,
+  loading,
+  currentLocale,
+  resetGuideCacheForTest,
+})
 </script>
 
 <template>
@@ -100,13 +174,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       @keydown="trapFocus"
     >
       <header class="help__header">
-        <h2 id="help-title" class="help__title">tmux 使用指南</h2>
-        <button ref="closeButton" type="button" class="help__close" aria-label="Close help" @click="emit('close')">
+        <h2 id="help-title" class="help__title">{{ guideTitle }}</h2>
+        <button ref="closeButton" type="button" class="help__close" :aria-label="closeLabel" @click="emit('close')">
           <span aria-hidden="true">✕</span>
         </button>
       </header>
       <div class="help__body" :aria-busy="loading">
-        <p v-if="loading" class="help__loading" role="status">Loading…</p>
+        <p v-if="loading" class="help__loading" role="status">{{ loadingText }}</p>
         <!-- The content is repo-controlled markdown fetched from the hub
              itself (no user input in the pipeline), so it is rendered as
              HTML directly. -->
@@ -133,114 +207,143 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   height: min(85vh, 900px);
   background: var(--th-surface);
   border: 1px solid var(--th-border);
-  border-radius: 10px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
   overflow: hidden;
 }
 .help__header {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.6rem 0.9rem;
+  justify-content: space-between;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--th-border);
 }
 .help__title {
   margin: 0;
+  font-size: 14px;
   font-weight: 600;
-  font-size: 0.95rem;
+  color: var(--th-text);
 }
 .help__close {
-  margin-left: auto;
-  background: none;
-  border: none;
-  color: var(--th-text-mid);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--th-muted);
   cursor: pointer;
-  font-size: 0.9rem;
+  font-size: 14px;
+  line-height: 1;
 }
 .help__close:hover {
-  color: var(--th-text-hi);
+  color: var(--th-text);
+  border-color: var(--th-border);
 }
 .help__body {
   flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 0.5rem 1.25rem 1.5rem;
+  overflow-y: auto;
+  padding: 16px 24px;
+  color: var(--th-text);
+  font-size: 13px;
+  line-height: 1.6;
 }
 .help__loading {
-  color: var(--th-text-lo);
-}
-/* v-html content is not reachable by scoped selectors; :deep() pierces it. */
-.help__markdown {
-  color: var(--th-text-hi);
-  font-size: 0.88rem;
-  line-height: 1.65;
+  margin: 24px 0;
+  text-align: center;
+  color: var(--th-muted);
 }
 .help__markdown :deep(h1) {
-  font-size: 1.25rem;
-  margin: 1rem 0 0.6rem;
+  margin: 0 0 16px;
+  font-size: 20px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--th-border);
+  padding-bottom: 8px;
 }
 .help__markdown :deep(h2) {
-  font-size: 1.05rem;
-  margin: 1.4rem 0 0.5rem;
-  border-bottom: 1px solid var(--th-border);
-  padding-bottom: 0.25rem;
+  margin: 24px 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--th-accent, #68d391);
 }
 .help__markdown :deep(h3) {
-  font-size: 0.95rem;
-  margin: 1rem 0 0.4rem;
+  margin: 16px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
 }
-.help__markdown :deep(p),
-.help__markdown :deep(ul),
-.help__markdown :deep(ol),
-.help__markdown :deep(blockquote) {
-  margin: 0.5rem 0;
+.help__markdown :deep(p) {
+  margin: 8px 0;
 }
 .help__markdown :deep(blockquote) {
-  border-left: 3px solid var(--th-border);
-  margin: 0.6rem 0;
-  padding: 0.1rem 0 0.1rem 0.8rem;
-  color: var(--th-text-mid);
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--th-accent, #68d391);
+  background: var(--th-panel);
+  color: var(--th-muted);
+}
+.help__markdown :deep(blockquote p) {
+  margin: 2px 0;
 }
 .help__markdown :deep(table) {
+  width: 100%;
   border-collapse: collapse;
-  margin: 0.7rem 0;
-  max-width: 100%;
-  display: block;
-  overflow-x: auto;
+  margin: 12px 0;
+  font-size: 12px;
 }
 .help__markdown :deep(th),
 .help__markdown :deep(td) {
-  border: 1px solid var(--th-border);
-  padding: 0.3rem 0.6rem;
+  padding: 6px 10px;
   text-align: left;
-  vertical-align: top;
+  border: 1px solid var(--th-border);
 }
 .help__markdown :deep(th) {
-  background: var(--th-raised);
+  background: var(--th-panel);
+  font-weight: 600;
+}
+.help__markdown :deep(tr:nth-child(even) td) {
+  background: rgba(255, 255, 255, 0.02);
 }
 .help__markdown :deep(code) {
-  font-family: var(--app-code-font);
-  font-size: 0.82rem;
-  background: var(--th-raised);
-  border-radius: 4px;
-  padding: 0.08rem 0.3rem;
+  padding: 1px 4px;
+  background: var(--th-panel);
+  border: 1px solid var(--th-border);
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
 }
 .help__markdown :deep(pre) {
-  background: var(--th-raised);
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: var(--th-panel);
   border: 1px solid var(--th-border);
-  border-radius: 6px;
-  padding: 0.6rem 0.8rem;
+  border-radius: 4px;
   overflow-x: auto;
 }
 .help__markdown :deep(pre code) {
-  background: none;
   padding: 0;
+  background: transparent;
+  border: none;
 }
-.help__markdown :deep(a) {
-  color: var(--th-accent);
+.help__markdown :deep(ul),
+.help__markdown :deep(ol) {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+.help__markdown :deep(li) {
+  margin: 3px 0;
 }
 .help__markdown :deep(hr) {
   border: none;
   border-top: 1px solid var(--th-border);
-  margin: 1.2rem 0;
+  margin: 20px 0;
+}
+.help__markdown :deep(a) {
+  color: var(--th-accent, #68d391);
+  text-decoration: none;
+}
+.help__markdown :deep(a:hover) {
+  text-decoration: underline;
 }
 </style>

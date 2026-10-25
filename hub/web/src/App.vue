@@ -23,6 +23,7 @@ import {
   type ConnState,
 } from './terminal'
 import { getConfig, resolveFontSize } from './config'
+import { getPreference, setLocale, onLocaleChange, t, type LanguagePreference } from './i18n/index'
 import SessionList from './components/SessionList.vue'
 import TerminalView from './components/TerminalView.vue'
 import ToastStack from './components/ToastStack.vue'
@@ -42,6 +43,28 @@ const token = ref(getToken() ?? '')
 const tokenInput = ref('')
 const authError = ref('')
 const authBusy = ref(false)
+
+function localizedConnState(s: ConnState | 'connecting' | 'disconnected'): string {
+  switch (s) {
+    case 'connecting':
+      return t('terminal.stateConnecting')
+    case 'connected':
+      return t('terminal.stateConnected')
+    case 'reconnecting':
+      return t('terminal.stateReconnecting')
+    case 'disconnected':
+      return t('terminal.stateDisconnected')
+    case 'ended':
+      return t('terminal.stateEnded')
+    default:
+      return s
+  }
+}
+
+const currentPreference = ref<LanguagePreference>(getPreference())
+function onLanguageChange(): void {
+  setLocale(currentPreference.value)
+}
 
 const RECENT_HOST_KEY = 'vtc:recent-host'
 const availableHosts = ref<HostItem[]>([])
@@ -343,7 +366,7 @@ function toggleFileManager(): void {
   }
   if (
     filesDirty.value &&
-    !window.confirm('The file manager has unsaved changes. Close it anyway?')
+    !window.confirm(t('files.closeManagerUnsavedPrompt'))
   ) {
     return
   }
@@ -371,7 +394,7 @@ function insertPathIntoTerminal(text: string, sourceHostId = currentHostId.value
 // the KeepAlive cache, so the session stays alive and can still show activity.
 function closePanel(): void {
   if (filesDirty.value) {
-    if (!window.confirm('The file manager has unsaved changes. Close the panel anyway?')) return
+    if (!window.confirm(t('files.closeManagerUnsavedPrompt'))) return
   }
   if (document.fullscreenElement) {
     document.exitFullscreen().catch(() => {
@@ -572,7 +595,7 @@ function handleAuthFailure() {
   selected.value = null
   sessions.value = []
   cleanupSessionState()
-  authError.value = 'Authentication failed. Re-enter the token.'
+  authError.value = t('auth.authFailed')
 }
 
 // The main view opens only after the server has accepted the credential:
@@ -581,9 +604,9 @@ function handleAuthFailure() {
 // that cannot be sent in an HTTP header (full-width IME characters look
 // identical in the password box) is rejected without a round trip.
 async function submitToken() {
-  const t = tokenInput.value.trim()
-  if (!t || authBusy.value) return
-  if (!isHeaderSafeToken(t)) {
+  const tok = tokenInput.value.trim()
+  if (!tok || authBusy.value) return
+  if (!isHeaderSafeToken(tok)) {
     authError.value =
       'The token contains characters that cannot be sent in an HTTP header — ' +
       'check for full-width characters (e.g. from an IME), which look identical but are not.'
@@ -592,15 +615,15 @@ async function submitToken() {
   authBusy.value = true
   authError.value = ''
   try {
-    setToken(t)
-    token.value = t
+    setToken(tok)
+    token.value = tok
     tokenInput.value = ''
     await loadAvailableHosts(true)
   } catch (err) {
     clearToken()
     token.value = ''
     if (err instanceof AuthError) {
-      authError.value = 'Authentication failed. Check the token and try again.'
+      authError.value = t('auth.authFailed')
     } else {
       authError.value = err instanceof Error ? err.message : String(err)
     }
@@ -918,10 +941,15 @@ function onOnline() {
 }
 
 function onOffline() {
-  notify('warning', 'Network connection offline')
+  notify('warning', t('terminal.networkOffline'))
 }
 
+let unlistenLocale: (() => void) | null = null
+
 onMounted(async () => {
+  unlistenLocale = onLocaleChange((_locale, pref) => {
+    currentPreference.value = pref
+  })
   if (hasToken.value) {
     await loadAvailableHosts(true)
   }
@@ -930,6 +958,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  unlistenLocale?.()
   stopPolling()
   window.removeEventListener('online', onOnline)
   window.removeEventListener('offline', onOffline)
@@ -941,64 +970,92 @@ onBeforeUnmount(() => {
   <div class="app">
     <div v-if="!hasToken" class="app__auth">
       <div class="auth-card">
-        <h1 class="auth-card__title">Visual Tmux Client</h1>
-        <p class="auth-card__hint">Enter the access token to connect.</p>
-        <label class="sr-only" for="access-token">Access token</label>
+        <h1 class="auth-card__title">{{ t('auth.title') }}</h1>
+        <p class="auth-card__hint">{{ t('auth.subtitle') }}</p>
+        <label class="sr-only" for="access-token">{{ t('auth.tokenPlaceholder') }}</label>
         <input
           id="access-token"
           v-model="tokenInput"
           type="password"
           class="auth-card__input"
-          placeholder="token"
+          :placeholder="t('auth.tokenPlaceholder')"
           autocomplete="off"
           :disabled="authBusy"
           @keyup.enter="submitToken"
         />
         <button class="auth-card__btn" type="button" :disabled="authBusy" @click="submitToken">
-          {{ authBusy ? 'Connecting…' : 'Connect' }}
+          {{ authBusy ? t('auth.signingIn') : t('auth.signIn') }}
         </button>
         <p v-if="authError" class="auth-card__error" role="alert" aria-live="assertive">{{ authError }}</p>
+        <div class="auth-card__lang-row">
+          <label class="sr-only" for="login-lang-select">{{ t('common.language') }}</label>
+          <select
+            id="login-lang-select"
+            v-model="currentPreference"
+            class="auth-card__lang-select"
+            :aria-label="t('common.language')"
+            @change="onLanguageChange"
+          >
+            <option value="auto">{{ t('common.autoLanguage') }}</option>
+            <option value="en">English</option>
+            <option value="zh-CN">简体中文</option>
+          </select>
+        </div>
       </div>
       <ToastStack />
     </div>
 
     <template v-else>
       <header class="app__bar">
-        <span class="app__title">Visual Tmux Client</span>
+        <span class="app__title">{{ t('auth.title') }}</span>
         <div class="app__host-select-wrapper">
-          <label for="host-select" class="sr-only">Select Host</label>
+          <label for="host-select" class="sr-only">{{ t('hosts.selectHost') }}</label>
           <select
             id="host-select"
             v-model="currentHostId"
             class="app__host-select"
-            aria-label="Target Host"
+            :aria-label="t('hosts.hosts')"
             @change="onHostChange"
           >
-            <option v-if="currentHostId === null" :value="null" disabled>Select Host…</option>
+            <option v-if="currentHostId === null" :value="null" disabled>{{ t('hosts.selectHost') }}</option>
             <option v-for="h in availableHosts" :key="h.id" :value="h.id">
               {{ h.name || h.id }}{{ h.address ? ` (${h.address})` : '' }}
             </option>
           </select>
         </div>
+        <div class="app__lang-select-wrapper">
+          <label for="header-lang-select" class="sr-only">{{ t('common.language') }}</label>
+          <select
+            id="header-lang-select"
+            v-model="currentPreference"
+            class="app__lang-select"
+            :aria-label="t('common.language')"
+            @change="onLanguageChange"
+          >
+            <option value="auto">{{ t('common.autoLanguage') }}</option>
+            <option value="en">English</option>
+            <option value="zh-CN">简体中文</option>
+          </select>
+        </div>
         <div class="app__bar-actions">
-          <button class="app__bar-btn" type="button" aria-label="Manage remote hosts" @click="hostManagerOpen = true">Hosts</button>
-          <button class="app__logout" type="button" aria-label="Disconnect and clear credentials" @click="logout">Disconnect</button>
+          <button class="app__bar-btn" type="button" :aria-label="t('hosts.manage')" @click="hostManagerOpen = true">{{ t('hosts.hosts') }}</button>
+          <button class="app__logout" type="button" :aria-label="t('auth.signOut')" @click="logout">{{ t('auth.signOut') }}</button>
         </div>
       </header>
 
       <div v-if="hostDiscoveryError && !hasInitializedWorkspace" class="app__discovery-state app__discovery-state--error" role="alert">
         <p class="app__discovery-msg">{{ hostDiscoveryError }}</p>
-        <button class="app__discovery-btn" type="button" @click="loadAvailableHosts(true)">Retry</button>
+        <button class="app__discovery-btn" type="button" @click="loadAvailableHosts(true)">{{ t('common.retry') }}</button>
       </div>
 
       <div v-else-if="!hostDiscoveryLoading && availableHosts.length === 0 && !activeHostRemoved && !hasInitializedWorkspace" class="app__discovery-state app__discovery-state--empty">
-        <p class="app__discovery-msg">No hosts registered. Add a host to get started.</p>
-        <button class="app__discovery-btn" type="button" @click="openHostManagerAdd">+ Add Host</button>
+        <p class="app__discovery-msg">{{ t('hosts.noHosts') }}</p>
+        <button class="app__discovery-btn" type="button" @click="openHostManagerAdd">{{ t('hosts.addHost') }}</button>
       </div>
 
       <div v-else-if="!currentHostId && !activeHostRemoved && !hasInitializedWorkspace" class="app__discovery-state app__discovery-state--prompt">
-        <h2 class="app__discovery-title">Select a Host</h2>
-        <p class="app__discovery-msg">Choose a host to manage tmux sessions:</p>
+        <h2 class="app__discovery-title">{{ t('hosts.selectHost') }}</h2>
+        <p class="app__discovery-msg">{{ t('hosts.chooseHost') }}</p>
         <div class="app__prompt-hosts">
           <button
             v-for="h in availableHosts"
@@ -1016,18 +1073,18 @@ onBeforeUnmount(() => {
       <div v-else class="app__body">
         <div v-if="hostDiscoveryError" class="app__discovery-state app__discovery-state--error app__discovery-banner" role="alert">
           <p class="app__discovery-msg">{{ hostDiscoveryError }}</p>
-          <button class="app__discovery-btn" type="button" @click="loadAvailableHosts(false)">Retry</button>
+          <button class="app__discovery-btn" type="button" @click="loadAvailableHosts(false)">{{ t('common.retry') }}</button>
         </div>
         <div v-if="activeHostRemoved" class="app__removed-banner" role="alert">
-          {{ availableHosts.length === 0 ? 'Active host was removed. Input and operations are stopped. Add a host to continue.' : 'Active host was removed. Input and operations are stopped. Select another host to continue.' }}
+          {{ availableHosts.length === 0 ? t('hosts.activeHostRemovedAdd') : t('hosts.activeHostRemovedSelect') }}
         </div>
         <aside class="app__sidebar" :class="{ 'app__sidebar--collapsed': sidebarCollapsed }">
           <template v-if="!sidebarCollapsed">
             <button
               class="app__sidebar-toggle"
               type="button"
-              title="collapse sidebar"
-              aria-label="Collapse session sidebar"
+              :title="t('sessions.collapseSidebar')"
+              :aria-label="t('sessions.collapseSidebar')"
               :aria-expanded="!sidebarCollapsed"
               @click="toggleSidebar"
             ><span aria-hidden="true">«</span></button>
@@ -1050,23 +1107,23 @@ onBeforeUnmount(() => {
                 @repair="openHostManagerFor(currentHostId)"
               />
             </div>
-            <button class="app__help-btn" type="button" title="tmux 使用指南" @click="helpOpen = true">
-              ? Help
+            <button class="app__help-btn" type="button" :title="t('help.guideTitle')" :aria-label="t('help.openHelp')" @click="helpOpen = true">
+              ? {{ t('help.helpBtn') }}
             </button>
           </template>
           <div v-else class="app__rail">
             <button
               class="app__rail-btn"
               type="button"
-              title="expand sidebar"
-              aria-label="Expand session sidebar"
+              :title="t('sessions.expandSidebar')"
+              :aria-label="t('sessions.expandSidebar')"
               :aria-expanded="!sidebarCollapsed"
               @click="toggleSidebar"
             ><span aria-hidden="true">»</span></button>
-            <button class="app__rail-btn" type="button" title="new session" aria-label="Create new session" :disabled="creating" @click="onCreate">
+            <button class="app__rail-btn" type="button" :title="t('sessions.newSession')" :aria-label="t('sessions.newSession')" :disabled="creating" @click="onCreate">
               <span aria-hidden="true">+</span>
             </button>
-            <button class="app__rail-btn" type="button" title="help" aria-label="Open tmux help" @click="helpOpen = true">
+            <button class="app__rail-btn" type="button" :title="t('help.openHelp')" :aria-label="t('help.openHelp')" @click="helpOpen = true">
               <span aria-hidden="true">?</span>
             </button>
           </div>
@@ -1077,7 +1134,7 @@ onBeforeUnmount(() => {
             <span
               class="app__term-dot"
               :class="{ 'app__term-dot--live': selectedActive }"
-              :title="selectedActive ? 'producing output' : 'idle'"
+              :title="selectedActive ? t('terminal.producingOutput') : t('terminal.idle')"
               aria-hidden="true"
             ></span>
             <span class="app__term-host" :title="`Host: ${currentHostName} (${currentHostId})`">{{ currentHostName }}</span>
@@ -1087,50 +1144,50 @@ onBeforeUnmount(() => {
               :class="`app__term-state--${connStates[panelKey(selected)] ?? 'connecting'}`"
               role="status"
               aria-live="polite"
-            >{{ connStates[panelKey(selected)] ?? 'connecting' }}</span>
+            >{{ localizedConnState(connStates[panelKey(selected)] ?? 'connecting') }}</span>
             <span class="app__term-spacer"></span>
             <button
               class="app__term-btn"
               type="button"
-              title="decrease font size"
-              aria-label="Decrease terminal font size"
+              :title="t('terminal.decreaseFontSize')"
+              :aria-label="t('terminal.decreaseFontSize')"
               :disabled="fontSize <= termConfig.min_font_size"
               @click="setFontSize(fontSize - 1)"
             >A−</button>
-            <span class="app__term-fontsize" aria-live="polite" aria-label="Current font size">{{ fontSize }} px</span>
+            <span class="app__term-fontsize" aria-live="polite" :aria-label="t('terminal.currentFontSize')">{{ fontSize }} px</span>
             <button
               class="app__term-btn"
               type="button"
-              title="increase font size"
-              aria-label="Increase terminal font size"
+              :title="t('terminal.increaseFontSize')"
+              :aria-label="t('terminal.increaseFontSize')"
               :disabled="fontSize >= termConfig.max_font_size"
               @click="setFontSize(fontSize + 1)"
             >A+</button>
             <button
               class="app__term-btn"
               type="button"
-              title="toggle fullscreen"
-              aria-label="Toggle terminal fullscreen"
+              :title="t('terminal.toggleFullscreen')"
+              :aria-label="t('terminal.toggleFullscreen')"
               @click="toggleFullscreen"
             ><span aria-hidden="true">⛶</span></button>
             <button
               v-if="filesAvailable"
               class="app__term-btn"
               type="button"
-              title="browse files in this session"
-              aria-label="Open the file manager"
+              :title="t('files.browseFiles')"
+              :aria-label="t('files.openFiles')"
               :aria-pressed="fileManagerOpen"
               @click="toggleFileManager"
-            >Files</button>
+            >{{ t('files.title') }}</button>
             <button
               class="app__term-btn"
               type="button"
-              title="close panel (the session keeps running)"
-              aria-label="Close terminal panel; session keeps running"
+              :title="t('terminal.closePanelTitle')"
+              :aria-label="t('terminal.closePanelAria')"
               @click="closePanel"
             ><span aria-hidden="true">✕</span></button>
           </header>
-          <div v-if="!selected" class="app__placeholder">Select a session.</div>
+          <div v-if="!selected" class="app__placeholder">{{ t('sessions.selectSessionPlaceholder') }}</div>
           <KeepAlive>
             <TerminalView
               v-if="selected && selectedPanelId !== null"
@@ -1216,6 +1273,23 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 .app__host-select:focus {
+  border-color: var(--th-focus);
+  outline: none;
+}
+.app__lang-select-wrapper {
+  display: flex;
+  align-items: center;
+}
+.app__lang-select {
+  background: var(--th-raised);
+  color: var(--th-text-hi);
+  border: 1px solid var(--th-border);
+  border-radius: 4px;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.app__lang-select:focus {
   border-color: var(--th-focus);
   outline: none;
 }
@@ -1511,6 +1585,24 @@ onBeforeUnmount(() => {
   margin: 0;
   color: var(--th-danger);
   font-size: 0.8rem;
+}
+.auth-card__lang-row {
+  margin-top: 0.5rem;
+  display: flex;
+  justify-content: flex-end;
+}
+.auth-card__lang-select {
+  background: var(--app-bg, #0a0a0a);
+  color: var(--th-text-mid, #a3a3a3);
+  border: 1px solid var(--th-border);
+  border-radius: 4px;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.auth-card__lang-select:focus {
+  border-color: var(--th-focus);
+  outline: none;
 }
 .app__discovery-state {
   flex: 1;

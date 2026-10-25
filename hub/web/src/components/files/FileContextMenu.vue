@@ -2,6 +2,7 @@
 // Right-click menu for a tree entry. It renders nothing itself when closed; the
 // overlay owns when it is open.
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { t } from '../../i18n/index'
 
 const props = defineProps<{ x: number; y: number; name: string; isDir: boolean }>()
 const emit = defineEmits<{
@@ -146,19 +147,19 @@ onBeforeUnmount(() => {
   >
     <div class="menu__title" :title="name">{{ name }}</div>
     <button class="menu__item" type="button" role="menuitem" @click="emit('new-file')">
-      New file
+      {{ t('files.newFile') }}
     </button>
     <button class="menu__item" type="button" role="menuitem" @click="emit('new-dir')">
-      New directory
+      {{ t('files.newFolder') }}
     </button>
     <button class="menu__item" type="button" role="menuitem" @click="emit('rename')">
-      Rename
+      {{ t('files.rename') }}
     </button>
     <button class="menu__item" type="button" role="menuitem" @click="emit('copy-path')">
-      Copy path
+      {{ t('files.copyPath') }}
     </button>
     <button class="menu__item" type="button" role="menuitem" @click="emit('insert-path')">
-      Insert path into terminal
+      {{ t('files.insertPathToTerminal') }}
     </button>
     <button
       class="menu__item"
@@ -167,7 +168,7 @@ onBeforeUnmount(() => {
       :disabled="isDir"
       @click="emit('download')"
     >
-      Download
+      {{ t('files.download') }}
     </button>
     <button
       class="menu__item menu__item--danger"
@@ -175,7 +176,7 @@ onBeforeUnmount(() => {
       role="menuitem"
       @click="emit('delete')"
     >
-      Delete
+      {{ t('files.delete') }}
     </button>
   </div>
 </template>

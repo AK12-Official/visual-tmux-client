@@ -20,6 +20,7 @@ import {
   type ProbeResult,
 } from '../api'
 import { notify } from '../toasts'
+import { t } from '../i18n/index'
 
 const props = defineProps<{
   open: boolean
@@ -98,14 +99,15 @@ function getCapPillClass(cap: CapabilityStatus | boolean | undefined): string {
 }
 
 function getCapLabel(cap: CapabilityStatus | boolean | undefined, kind: 'SSH' | 'tmux' | 'SFTP'): string {
-  if (isCapNotApplicable(cap)) return 'N/A'
   if (kind === 'SSH') {
-    return isCapAvailable(cap) ? 'Connected' : 'Offline'
+    if (isCapNotApplicable(cap)) return t('hosts.sshNA').replace('SSH: ', '')
+    return isCapAvailable(cap) ? t('hosts.sshConnected').replace('SSH: ', '') : t('hosts.sshOffline').replace('SSH: ', '')
   }
   if (kind === 'tmux') {
-    return isCapAvailable(cap) ? 'Available' : 'Missing'
+    return isCapAvailable(cap) ? t('hosts.tmuxAvailable').replace('tmux: ', '') : t('hosts.tmuxMissing').replace('tmux: ', '')
   }
-  return isCapAvailable(cap) ? 'Available' : 'Unavailable'
+  if (isCapNotApplicable(cap)) return t('hosts.sftpNA').replace('SFTP: ', '')
+  return isCapAvailable(cap) ? t('hosts.sftpAvailable').replace('SFTP: ', '') : t('hosts.sftpUnavailable').replace('SFTP: ', '')
 }
 
 function shouldShowAtomicOverwrite(caps: HostCapabilities): boolean {
@@ -312,42 +314,42 @@ function validateForm(): boolean {
   const trimmedId = formId.value.trim()
   if (view.value === 'add') {
     if (!trimmedId) {
-      errors.id = 'Host ID is required'
+      errors.id = t('hosts.idRequired')
     } else if (!/^[a-z0-9][a-z0-9_-]*$/.test(trimmedId)) {
-      errors.id = 'Host ID must start with a lowercase letter or digit and contain only lowercase letters, digits, dashes or underscores'
+      errors.id = t('hosts.invalidId')
     } else if (formConnectionType.value === 'ssh' && trimmedId === 'local') {
-      errors.id = 'Host ID "local" is reserved for the built-in host'
+      errors.id = t('hosts.reservedIdLocal')
     }
   }
 
   const trimmedName = formName.value.trim()
   if (!trimmedName) {
-    errors.name = 'Host name is required'
+    errors.name = t('hosts.nameRequired')
   }
 
   if (formConnectionType.value === 'ssh') {
     const trimmedAddress = formAddress.value.trim()
     if (!trimmedAddress) {
-      errors.address = 'Host address is required'
+      errors.address = t('hosts.addressRequired')
     }
 
     const port = Number(formPort.value)
     if (!port || port < 1 || port > 65535) {
-      errors.port = 'Port must be between 1 and 65535'
+      errors.port = t('hosts.portRange')
     }
 
     const trimmedUsername = formUsername.value.trim()
     if (!trimmedUsername) {
-      errors.username = 'Username is required'
+      errors.username = t('hosts.usernameRequired')
     }
 
     // Authentication validation
     if (view.value === 'add') {
       if (formCredentialType.value === 'password' && !formPassword.value) {
-        errors.password = 'Password is required for new host'
+        errors.password = t('hosts.passwordRequired')
       }
       if (formCredentialType.value === 'private_key' && !formPrivateKey.value.trim()) {
-        errors.privateKey = 'Private key is required for new host'
+        errors.privateKey = t('hosts.privateKeyRequired')
       }
     }
   }
@@ -487,15 +489,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     >
       <header class="host-modal__header">
         <h2 id="host-modal-title" class="host-modal__title">
-          <span v-if="view === 'list'">Host Management</span>
-          <span v-else-if="view === 'add'">Add Host</span>
-          <span v-else>Edit Host: {{ formName || formId }}</span>
+          <span v-if="view === 'list'">{{ t('hosts.title') }}</span>
+          <span v-else-if="view === 'add'">{{ t('hosts.createHost') }}</span>
+          <span v-else>{{ t('hosts.editHost') }}: {{ formName || formId }}</span>
         </h2>
         <button
           ref="closeButton"
           class="host-modal__close"
           type="button"
-          aria-label="Close host manager"
+          :aria-label="t('hosts.closeManager')"
           @click="emit('close')"
         >
           ✕
@@ -507,10 +509,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         <div v-if="view === 'list'" class="host-list-view">
           <div class="host-list-view__actions">
             <button class="host-btn host-btn--primary host-modal__add-btn" type="button" @click="startAdd">
-              + Add Host
+              {{ t('hosts.addHost') }}
             </button>
             <button class="host-btn host-btn--subtle" type="button" :disabled="loading" @click="fetchHosts">
-              {{ loading ? 'Refreshing…' : 'Refresh' }}
+              {{ loading ? t('common.loading') : t('common.refresh') }}
             </button>
           </div>
 
@@ -519,11 +521,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           </div>
 
           <div v-if="loading && hosts.length === 0" class="host-empty">
-            Loading hosts…
+            {{ t('common.loading') }}
           </div>
 
           <div v-else-if="hosts.length === 0" class="host-empty">
-            No hosts configured.
+            {{ t('hosts.noHosts') }}
           </div>
 
           <ul v-else class="host-cards" role="list">
@@ -545,7 +547,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                   </span>
                 </div>
                 <div class="host-card__meta">
-                  <span v-if="isLocal(item)">Local system execution (no SSH)</span>
+                  <span v-if="isLocal(item)">{{ t('hosts.localHostDescription') }}</span>
                   <span v-else>
                     {{ item.username }}@{{ item.address }}:{{ item.port }} (rev {{ item.revision }})
                   </span>
@@ -554,7 +556,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                 <!-- Capability test feedback -->
                 <div v-if="activeCapabilities[item.id]" class="host-card__caps">
                   <span v-if="activeCapabilities[item.id] === 'testing'" class="host-card__testing">
-                    Testing connection…
+                    {{ t('hosts.testing') }}
                   </span>
                   <div v-else-if="typeof activeCapabilities[item.id] === 'object'" class="host-caps-result">
                     <span
@@ -580,7 +582,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                       class="host-cap-pill"
                       :class="(activeCapabilities[item.id] as HostCapabilities).posixRename ? 'host-cap-pill--ok' : 'host-cap-pill--fail'"
                     >
-                      Atomic Overwrite: {{ (activeCapabilities[item.id] as HostCapabilities).posixRename ? 'Supported' : 'Unsupported' }}
+                      Atomic Overwrite: {{ (activeCapabilities[item.id] as HostCapabilities).posixRename ? (t('hosts.atomicOverwriteSupported').replace('Atomic Overwrite: ', '')) : (t('hosts.atomicOverwriteUnsupported').replace('Atomic Overwrite: ', '')) }}
                     </span>
                     <span v-if="(activeCapabilities[item.id] as HostCapabilities).error" class="host-caps-error">
                       {{ (activeCapabilities[item.id] as HostCapabilities).error }}
@@ -597,7 +599,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                   :disabled="activeCapabilities[item.id] === 'testing'"
                   @click="onTestCapabilities(item)"
                 >
-                  Test
+                  {{ t('hosts.testConnection') }}
                 </button>
                 <button
                   class="host-btn host-btn--subtle"
@@ -605,7 +607,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                   :aria-label="`Edit ${item.name}`"
                   @click="startEdit(item)"
                 >
-                  Edit
+                  {{ t('common.edit') }}
                 </button>
                 <button
                   v-if="hostSettings && hostSettings.defaultHostId !== item.id"
@@ -615,7 +617,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                   :disabled="settingDefault === item.id"
                   @click="onSetDefault(item)"
                 >
-                  Set Default
+                  {{ t('hosts.setDefault') }}
                 </button>
                 <button
                   class="host-btn host-btn--danger"
@@ -623,16 +625,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                   :aria-label="`Remove ${item.name}`"
                   @click="promptDelete(item)"
                 >
-                  Delete
+                  {{ t('hosts.deleteHost') }}
                 </button>
                 <button
                   class="host-btn host-btn--primary"
                   type="button"
                   :aria-label="`Select ${item.name}`"
-                  title="Select this host for current workspace"
+                  :title="t('hosts.chooseHost')"
                   @click="emit('select-host', item.id); emit('close')"
                 >
-                  Select
+                  {{ t('common.select') }}
                 </button>
               </div>
             </li>
@@ -648,7 +650,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           <div class="host-form__grid">
             <!-- Connection Type -->
             <div class="host-field host-field--full">
-              <label class="host-label">Connection Type</label>
+              <label class="host-label">{{ t('hosts.connectionType') }}</label>
               <div v-if="view === 'add'" class="host-radio-group">
                 <label class="host-radio-label">
                   <input
@@ -657,7 +659,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                     value="ssh"
                     name="connectionType"
                   />
-                  SSH (Remote Host)
+                  {{ t('hosts.sshRemoteHost') }}
                 </label>
                 <label class="host-radio-label">
                   <input
@@ -666,12 +668,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                     value="local"
                     name="connectionType"
                   />
-                  Local (Host Execution)
+                  {{ t('hosts.localExecution') }}
                 </label>
               </div>
               <div v-else class="host-readonly-text">
                 <span class="host-badge" :class="formConnectionType === 'local' ? 'host-badge--local' : 'host-badge--remote'">
-                  {{ formConnectionType === 'local' ? 'Local execution' : 'SSH remote host' }}
+                  {{ formConnectionType === 'local' ? t('hosts.localExecution') : t('hosts.sshRemoteHost') }}
                 </span>
               </div>
             </div>
@@ -679,7 +681,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             <!-- Host ID -->
             <div class="host-field">
               <label for="host-field-id" class="host-label">
-                Host Identifier <span v-if="view === 'add'" class="host-req">*</span>
+                {{ t('hosts.id') }} <span v-if="view === 'add'" class="host-req">*</span>
               </label>
               <input
                 id="host-field-id"
@@ -687,17 +689,17 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                 type="text"
                 class="host-input"
                 :class="{ 'host-input--error': formFieldErrors.id }"
-                placeholder="e.g. dev-server"
+                :placeholder="t('hosts.idPlaceholder')"
                 :disabled="view === 'edit'"
               />
               <span v-if="formFieldErrors.id" class="host-field-error" role="alert">{{ formFieldErrors.id }}</span>
-              <span v-else class="host-field-hint">Unique lowercase alphanumeric name with hyphens or underscores.</span>
+              <span v-else class="host-field-hint">{{ t('hosts.idHint') }}</span>
             </div>
 
             <!-- Host Display Name -->
             <div class="host-field">
               <label for="host-field-name" class="host-label">
-                Display Name <span class="host-req">*</span>
+                {{ t('hosts.name') }} <span class="host-req">*</span>
               </label>
               <input
                 id="host-field-name"
@@ -705,7 +707,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                 type="text"
                 class="host-input"
                 :class="{ 'host-input--error': formFieldErrors.name }"
-                placeholder="e.g. Production Cluster"
+                :placeholder="t('hosts.namePlaceholder')"
               />
               <span v-if="formFieldErrors.name" class="host-field-error" role="alert">{{ formFieldErrors.name }}</span>
             </div>
@@ -715,7 +717,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
               <!-- Address -->
               <div class="host-field">
                 <label for="host-field-address" class="host-label">
-                  SSH Address <span class="host-req">*</span>
+                  {{ t('hosts.sshHost') }} <span class="host-req">*</span>
                 </label>
                 <input
                   id="host-field-address"
@@ -723,7 +725,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                   type="text"
                   class="host-input"
                   :class="{ 'host-input--error': formFieldErrors.address }"
-                  placeholder="e.g. 192.168.1.100 or ssh.example.com"
+                  :placeholder="t('hosts.sshHostPlaceholder')"
                 />
                 <span v-if="formFieldErrors.address" class="host-field-error" role="alert">{{ formFieldErrors.address }}</span>
               </div>
@@ -731,7 +733,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
               <!-- Port -->
               <div class="host-field host-field--small">
                 <label for="host-field-port" class="host-label">
-                  Port <span class="host-req">*</span>
+                  {{ t('hosts.sshPort') }} <span class="host-req">*</span>
                 </label>
                 <input
                   id="host-field-port"
@@ -748,7 +750,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
               <!-- Username -->
               <div class="host-field">
                 <label for="host-field-username" class="host-label">
-                  SSH Username <span class="host-req">*</span>
+                  {{ t('hosts.sshUser') }} <span class="host-req">*</span>
                 </label>
                 <input
                   id="host-field-username"
@@ -756,7 +758,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                   type="text"
                   class="host-input"
                   :class="{ 'host-input--error': formFieldErrors.username }"
-                  placeholder="e.g. root or ubuntu"
+                  :placeholder="t('hosts.sshUserPlaceholder')"
                 />
                 <span v-if="formFieldErrors.username" class="host-field-error" role="alert">{{ formFieldErrors.username }}</span>
               </div>
@@ -767,7 +769,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           <template v-if="formConnectionType === 'ssh'">
             <!-- Fingerprint Probing & Trust Section -->
             <div class="host-section">
-              <h3 class="host-section__title">Server Key & Trust</h3>
+              <h3 class="host-section__title">{{ t('hosts.serverKeyAndTrust') }}</h3>
               <div class="host-section__actions">
                 <button
                   class="host-btn host-btn--subtle host-probe__probe-btn"
@@ -775,7 +777,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                   :disabled="probing || confirmingTrust || formSubmitting || !formAddress"
                   @click="onProbe"
                 >
-                  {{ probing ? 'Probing Server…' : 'Probe Server Fingerprint' }}
+                  {{ probing ? t('hosts.probingServer') : t('hosts.probeServer') }}
                 </button>
               </div>
 
@@ -785,11 +787,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
               <div v-if="probedResult" class="host-probe-box">
                 <div class="host-probe-row">
-                  <span class="host-probe-label">Key Type:</span>
+                  <span class="host-probe-label">{{ t('hosts.keyType') }}:</span>
                   <span class="host-probe-val">{{ probedResult.keyType }}</span>
                 </div>
                 <div class="host-probe-row">
-                  <span class="host-probe-label">Fingerprint:</span>
+                  <span class="host-probe-label">{{ t('hosts.fingerprint') }}:</span>
                   <code class="host-probe-fingerprint">{{ probedResult.fingerprint }}</code>
                 </div>
                 <div class="host-probe-confirm">
@@ -800,10 +802,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                     :disabled="confirmingTrust || formSubmitting"
                     @click="onConfirmTrust"
                   >
-                    {{ confirmingTrust ? 'Confirming Fingerprint…' : 'Trust & Pin Fingerprint' }}
+                    {{ confirmingTrust ? t('hosts.confirmingFingerprint') : t('hosts.trustConfirm') }}
                   </button>
                   <span v-else class="host-probe-trusted-indicator">
-                    Fingerprint trusted
+                    {{ t('hosts.fingerprintTrusted') }}
                   </span>
                 </div>
               </div>
@@ -811,7 +813,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
             <!-- Authentication Credentials -->
             <div class="host-section">
-              <h3 class="host-section__title">Authentication</h3>
+              <h3 class="host-section__title">{{ t('hosts.authentication') }}</h3>
               <div class="host-radio-group">
                 <label class="host-radio-label">
                   <input
@@ -820,7 +822,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                     value="password"
                     name="credentialType"
                   />
-                  Password
+                  {{ t('hosts.password') }}
                 </label>
                 <label class="host-radio-label">
                   <input
@@ -829,16 +831,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                     value="private_key"
                     name="credentialType"
                   />
-                  Private Key
+                  {{ t('hosts.sshKey') }}
                 </label>
               </div>
 
               <!-- Password Fields -->
               <div v-if="formCredentialType === 'password'" class="host-field">
                 <label for="host-field-password" class="host-label">
-                  Password
+                  {{ t('hosts.password') }}
                   <span v-if="view === 'add'" class="host-req">*</span>
-                  <span v-else class="host-subtle">(leave blank to keep existing password)</span>
+                  <span v-else class="host-subtle">{{ t('hosts.passwordKeep') }}</span>
                 </label>
                 <input
                   id="host-field-password"
@@ -846,7 +848,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                   type="password"
                   class="host-input"
                   :class="{ 'host-input--error': formFieldErrors.password }"
-                  :placeholder="view === 'add' ? 'SSH account password' : '•••••••• (unchanged)'"
+                  :placeholder="view === 'add' ? t('hosts.passwordPlaceholderAdd') : t('hosts.passwordPlaceholderEdit')"
                   autocomplete="new-password"
                 />
                 <span v-if="formFieldErrors.password" class="host-field-error" role="alert">{{ formFieldErrors.password }}</span>
@@ -856,9 +858,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
               <div v-else class="host-key-group">
                 <div class="host-field">
                   <label for="host-field-privkey" class="host-label">
-                    Private Key (OpenSSH format)
+                    {{ t('hosts.sshKey') }}
                     <span v-if="view === 'add'" class="host-req">*</span>
-                    <span v-else class="host-subtle">(leave blank to keep existing key)</span>
+                    <span v-else class="host-subtle">{{ t('hosts.sshKeyKeep') }}</span>
                   </label>
                   <textarea
                     id="host-field-privkey"
@@ -866,7 +868,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                     class="host-textarea"
                     :class="{ 'host-input--error': formFieldErrors.privateKey }"
                     rows="4"
-                    :placeholder="view === 'add' ? '-----BEGIN OPENSSH PRIVATE KEY-----\n...' : '(unchanged)'"
+                    :placeholder="view === 'add' ? t('hosts.privateKeyPlaceholderAdd') : t('hosts.privateKeyPlaceholderEdit')"
                     spellcheck="false"
                   ></textarea>
                   <span v-if="formFieldErrors.privateKey" class="host-field-error" role="alert">{{ formFieldErrors.privateKey }}</span>
@@ -874,14 +876,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
                 <div class="host-field">
                   <label for="host-field-passphrase" class="host-label">
-                    Passphrase <span class="host-subtle">(optional, if key is encrypted)</span>
+                    {{ t('hosts.passphrase') }} <span class="host-subtle">{{ t('hosts.passphraseHint') }}</span>
                   </label>
                   <input
                     id="host-field-passphrase"
                     v-model="formPassphrase"
                     type="password"
                     class="host-input"
-                    placeholder="Passphrase for encrypted key"
+                    :placeholder="t('hosts.passphrasePlaceholder')"
                     autocomplete="new-password"
                   />
                 </div>
@@ -891,10 +893,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
           <div class="host-form__actions">
             <button class="host-btn host-btn--subtle" type="button" :disabled="formSubmitting || confirmingTrust" @click="cancelForm">
-              Cancel
+              {{ t('common.cancel') }}
             </button>
             <button class="host-btn host-btn--primary" type="submit" :disabled="formSubmitting || confirmingTrust">
-              {{ formSubmitting ? 'Saving…' : (view === 'add' ? 'Create Host' : 'Save Changes') }}
+              {{ formSubmitting ? t('common.saving') : (view === 'add' ? t('hosts.createHost') : t('hosts.saveChanges')) }}
             </button>
           </div>
         </form>
@@ -904,14 +906,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       <div v-if="confirmingDeleteHost" class="host-confirm-overlay" @click.self="confirmingDeleteHost = null">
         <div class="host-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-delete-title">
           <h3 id="confirm-delete-title" class="host-confirm-dialog__title">
-            Remove Host "{{ confirmingDeleteHost.name }}"?
+            {{ t('hosts.deleteConfirm', { name: confirmingDeleteHost.name }) }}
           </h3>
           <p v-if="hasDirtyDrafts" class="host-confirm-dialog__warning" role="alert">
-            <strong>Warning:</strong> You have unsaved editor drafts on this host. Removing the host will discard these drafts.
+            <strong>Warning:</strong> {{ t('hosts.deleteConfirmDirty') }}. Removing the host will discard these drafts.
           </p>
           <p class="host-confirm-dialog__msg">
             Removing this host stops visual-tmux-client from accessing it.
-            <strong>Remote tmux sessions will NOT be killed</strong> and will remain running on the remote server.
+            <strong>{{ t('hosts.deleteWarningRemote') }}</strong> and will remain running on the remote server.
             Any unsaved editor tabs on this host will be lost.
           </p>
           <div class="host-confirm-dialog__actions">
@@ -921,7 +923,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
               :disabled="deleteLoading"
               @click="confirmingDeleteHost = null"
             >
-              Cancel
+              {{ t('common.cancel') }}
             </button>
             <button
               class="host-btn host-btn--danger host-confirm__delete"
@@ -929,7 +931,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
               :disabled="deleteLoading"
               @click="confirmDelete"
             >
-              {{ deleteLoading ? 'Removing…' : 'Confirm Remove' }}
+              {{ deleteLoading ? t('common.deleting') : t('hosts.deleteHost') }}
             </button>
           </div>
         </div>

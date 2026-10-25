@@ -1,4 +1,5 @@
 import { fetchClientConfig } from './config'
+import { t } from './i18n/index'
 
 let mounted = false
 
@@ -18,7 +19,7 @@ function escapeHtml(s: string): string {
 export function renderLoading(rootEl: HTMLElement): void {
   rootEl.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#0a0a0a;color:#737373;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:13px;" role="status" aria-live="polite">
-      Loading configuration...
+      ${escapeHtml(t('common.loadingConfig'))}
     </div>
   `
 }
@@ -26,10 +27,10 @@ export function renderLoading(rootEl: HTMLElement): void {
 export function renderError(rootEl: HTMLElement, message: string, onRetry: () => void): void {
   rootEl.innerHTML = `
     <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;background:#0a0a0a;color:#f87171;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;padding:20px;box-sizing:border-box;text-align:center;" role="alert" aria-live="assertive">
-      <h2 style="margin:0 0 12px 0;font-size:16px;font-weight:600;color:#f87171;">Configuration Error</h2>
+      <h2 style="margin:0 0 12px 0;font-size:16px;font-weight:600;color:#f87171;">${escapeHtml(t('common.configError'))}</h2>
       <p style="margin:0 0 18px 0;max-width:540px;color:#d4d4d4;font-size:13px;line-height:1.5;word-break:break-word;">${escapeHtml(message)}</p>
       <button id="vtc-retry-btn" type="button" style="background:#262626;color:#e5e5e5;border:1px solid #404040;border-radius:4px;padding:6px 16px;font-size:13px;cursor:pointer;font-family:inherit;">
-        Retry
+        ${escapeHtml(t('common.retry'))}
       </button>
     </div>
   `

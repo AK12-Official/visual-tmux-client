@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import { REASONS, reasonFor } from './reasons'
+import { resetLocaleForTest, setLocale } from '../i18n/index'
 
 /**
  * HUB_CODES is read out of the hub's own error mapper rather than listed here.
@@ -71,6 +72,7 @@ test('a code with no entry falls through to itself', () => {
 })
 
 test('the too-large case names the limit instead of the refusal', () => {
+  resetLocaleForTest('en')
   assert.equal(
     reasonFor('file_too_large', 104857600, (bytes) => `${bytes}B`),
     "it is larger than this hub's 104857600B limit for one file",
@@ -78,4 +80,11 @@ test('the too-large case names the limit instead of the refusal', () => {
   // A hub that did not say what its limit is has nothing to name, so the
   // refusal's own words are what is left.
   assert.equal(reasonFor('file_too_large', 0, String), REASONS['file_too_large'])
+
+  setLocale('zh-CN')
+  assert.equal(
+    reasonFor('file_too_large', 104857600, (bytes) => `${bytes}B`),
+    '文件大小超过此 Hub 的单文件限制（104857600B）',
+  )
+  resetLocaleForTest('en')
 })
