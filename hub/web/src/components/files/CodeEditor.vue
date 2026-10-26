@@ -11,24 +11,39 @@
 // away from.
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { EditorView, basicSetup } from 'codemirror'
+import { Compartment, EditorState } from '@codemirror/state'
+import { getLocale, onLocaleChange } from '../../i18n/index'
+import { cmPhrases } from '../../i18n/editorPhrases'
 
 const props = defineProps<{ modelValue: string; active?: boolean }>()
 const emit = defineEmits<{ (e: 'update:modelValue', value: string): void }>()
 
 const host = ref<HTMLElement | null>(null)
 let view: EditorView | null = null
+const phraseCompartment = new Compartment()
+let unregisterLocale: (() => void) | null = null
 
 onMounted(() => {
   if (!host.value) return
+  const currentLoc = getLocale()
   view = new EditorView({
     doc: props.modelValue,
     parent: host.value,
     extensions: [
       basicSetup,
+      phraseCompartment.of(EditorState.phrases.of(cmPhrases[currentLoc] ?? {})),
       EditorView.updateListener.of((update) => {
         if (update.docChanged) emit('update:modelValue', update.state.doc.toString())
       }),
     ],
+  })
+
+  unregisterLocale = onLocaleChange((locale) => {
+    if (view) {
+      view.dispatch({
+        effects: phraseCompartment.reconfigure(EditorState.phrases.of(cmPhrases[locale] ?? {})),
+      })
+    }
   })
 })
 
@@ -58,6 +73,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  unregisterLocale?.()
   view?.destroy()
   view = null
 })

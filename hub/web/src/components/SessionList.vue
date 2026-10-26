@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Session } from '../api'
 import { buildSubtitleMap, rowLabel } from '../sessionSubtitle'
 import { notify } from '../toasts'
@@ -10,6 +10,7 @@ import {
   type OrderMode,
   type OrderState,
 } from '../ordering'
+import { getLocale, onLocaleChange, t, type SupportedLocale } from '../i18n/index'
 
 const props = withDefaults(
   defineProps<{
@@ -206,10 +207,10 @@ function startRename(name: string): void {
 }
 
 function validateSessionName(name: string, oldName: string): string | null {
-  if (!name) return 'Session name cannot be empty'
-  if (name.length > 64) return 'Session name cannot exceed 64 characters'
-  if (/[:./\\：．;；]/.test(name)) return 'Session name contains reserved characters (:, ., /, \\, ;, or full-width lookalikes)'
-  if (props.sessions.some((s) => s.name === name && s.name !== oldName)) return 'Session name already in use'
+  if (!name) return t('sessions.nameEmpty')
+  if (name.length > 64) return t('sessions.nameTooLong')
+  if (/[:./\\：．;；]/.test(name)) return t('sessions.nameReservedChars')
+  if (props.sessions.some((s) => s.name === name && s.name !== oldName)) return t('sessions.nameInUse')
   return null
 }
 
@@ -280,57 +281,115 @@ watch(
 
 const manualMode = computed(() => order.value.mode === 'manual')
 const isRepairable = computed(() => props.hostId !== 'local' && (props.stale || !!props.error))
+
+const currentLocale = ref<SupportedLocale>(getLocale())
+let unlistenLocale: (() => void) | null = null
+
+onMounted(() => {
+  unlistenLocale = onLocaleChange((locale) => {
+    currentLocale.value = locale
+  })
+})
+
+onBeforeUnmount(() => {
+  unlistenLocale?.()
+})
+
+function formatSessionListError(err: string): string {
+  if (err.includes('host_unavailable')) {
+    if (err.includes(':')) {
+      const diag = err.slice(err.indexOf(':') + 1).trim()
+      return t('sessions.hostUnavailableDiag', { diagnostic: diag })
+    }
+    return t('sessions.hostUnavailable')
+  }
+  if (err.includes('host_not_found')) {
+    return t('terminal.hostNotFoundNotice')
+  }
+  if (err.includes('host_revision_conflict')) {
+    return t('errors.host_revision_conflict')
+  }
+  if (err.includes('tmux_unavailable')) {
+    return t('errors.tmux_unavailable')
+  }
+  if (err.includes('ssh authentication failed') || err.includes('untrusted_host_key')) {
+    return t('sessions.hostUnavailableDiag', { diagnostic: err })
+  }
+  return t('sessions.listFailedWithDiagnostic', { diagnostic: err })
+}
+
+const displayError = computed(() => {
+  void currentLocale.value
+  if (!props.error) return ''
+  return formatSessionListError(props.error)
+})
+
+const displayStaleMsg = computed(() => {
+  void currentLocale.value
+  if (props.error) {
+    return formatSessionListError(props.error)
+  }
+  return t('sessions.cachedSessionsOffline')
+})
+
+function getRowLabel(name: string, subtitle?: string | null): string {
+  void currentLocale.value
+  if (subtitle) {
+    return t('sessions.rowLabelWithSubtitle', { name, subtitle })
+  }
+  return t('sessions.rowLabel', { name })
+}
 </script>
 
 <template>
   <div class="session-list">
     <button class="session-list__create-btn" type="button" :disabled="creating" @click="emit('create')">
-      {{ creating ? 'Creating…' : '+ New session' }}
+      {{ creating ? t('sessions.creating') : t('sessions.newSessionBtn') }}
     </button>
 
     <div v-if="!selecting" class="session-list__toolbar">
-      <div class="session-list__modes" role="group" aria-label="Sort mode">
+      <div class="session-list__modes" role="group" :aria-label="t('sessions.sortMode')">
         <button
           class="session-list__mode"
           type="button"
           :class="{ 'session-list__mode--on': !manualMode }"
           :aria-pressed="!manualMode"
           @click="setMode('default')"
-        >Default</button>
+        >{{ t('common.default') }}</button>
         <button
           class="session-list__mode"
           type="button"
           :class="{ 'session-list__mode--on': manualMode }"
           :aria-pressed="manualMode"
           @click="setMode('manual')"
-        >Manual</button>
+        >{{ t('common.manual') }}</button>
       </div>
       <button
         class="session-list__tool"
         type="button"
-        title="batch select"
-        aria-label="Toggle batch selection mode"
+        :title="t('sessions.batchActions')"
+        :aria-label="t('sessions.batchActions')"
         :aria-pressed="selecting"
         @click="toggleSelectMode"
-      >Select</button>
+      >{{ t('common.select') }}</button>
     </div>
 
     <div v-if="error && sessions.length === 0" class="session-list__error" role="alert" aria-live="polite">
-      <span>{{ error }}</span>
-      <button class="session-list__btn" type="button" @click="emit('retry')">Retry</button>
-      <button v-if="isRepairable" class="session-list__btn session-list__btn--repair" type="button" @click="emit('repair')">Edit host</button>
+      <span>{{ displayError }}</span>
+      <button class="session-list__btn" type="button" @click="emit('retry')">{{ t('common.retry') }}</button>
+      <button v-if="isRepairable" class="session-list__btn session-list__btn--repair" type="button" @click="emit('repair')">{{ t('sessions.editHost') }}</button>
     </div>
 
     <div v-else-if="sessions.length === 0" class="session-list__empty" role="status">
-      No sessions. Create one above.
+      {{ t('sessions.noSessionsCreate') }}
     </div>
 
     <template v-else>
       <div v-if="stale || error" class="session-list__stale" role="status" aria-live="polite">
-        <span class="session-list__stale-badge">Stale</span>
-        <span class="session-list__stale-msg">{{ error || 'Cached sessions (offline/stale)' }}</span>
-        <button class="session-list__btn" type="button" @click="emit('retry')">Retry</button>
-        <button v-if="isRepairable" class="session-list__btn session-list__btn--repair" type="button" @click="emit('repair')">Edit host</button>
+        <span class="session-list__stale-badge">{{ t('sessions.staleBadge') }}</span>
+        <span class="session-list__stale-msg">{{ displayStaleMsg }}</span>
+        <button class="session-list__btn" type="button" @click="emit('retry')">{{ t('common.retry') }}</button>
+        <button v-if="isRepairable" class="session-list__btn session-list__btn--repair" type="button" @click="emit('repair')">{{ t('sessions.editHost') }}</button>
       </div>
 
       <ul class="session-list__items" :class="{ 'session-list__items--stale': stale || !!error }">
@@ -346,7 +405,7 @@ const isRepairable = computed(() => props.hostId !== 'local' && (props.stale || 
         }"
         :draggable="manualMode && renaming !== s.name"
         tabindex="0"
-        :aria-label="rowLabel(s.name, subtitles[s.name])"
+        :aria-label="getRowLabel(s.name, subtitles[s.name])"
         :aria-current="s.name === selected && !selecting ? 'true' : undefined"
         @click="selecting ? toggleCheck(s.name) : emit('select', s.name)"
         @keydown.enter.self="selecting ? toggleCheck(s.name) : emit('select', s.name)"
@@ -363,12 +422,12 @@ const isRepairable = computed(() => props.hostId !== 'local' && (props.stale || 
             v-model="renameDraft"
             type="text"
             class="session-list__input"
-            aria-label="Rename session"
+            :aria-label="t('sessions.rename')"
             @keyup.enter="submitRename(s.name)"
             @keyup.esc="renaming = null"
           />
-          <button class="session-list__btn" type="button" @click="submitRename(s.name)">OK</button>
-          <button class="session-list__btn" type="button" aria-label="Cancel rename" @click="renaming = null">Cancel</button>
+          <button class="session-list__btn" type="button" @click="submitRename(s.name)">{{ t('common.ok') }}</button>
+          <button class="session-list__btn" type="button" :aria-label="t('common.cancel')" @click="renaming = null">{{ t('common.cancel') }}</button>
         </div>
 
         <template v-else>
@@ -378,20 +437,20 @@ const isRepairable = computed(() => props.hostId !== 'local' && (props.stale || 
               type="checkbox"
               class="session-list__check"
               :checked="checked.has(s.name)"
-              :aria-label="`Select session ${s.name}`"
+              :aria-label="t('sessions.selectSession', { name: s.name })"
               tabindex="-1"
               @click.stop
               @change="toggleCheck(s.name)"
             />
-            <span v-if="isPinned(s.name)" class="session-list__pin-mark" title="pinned">★</span>
+            <span v-if="isPinned(s.name)" class="session-list__pin-mark" :title="t('sessions.pin')">★</span>
             <span class="session-list__name">{{ s.name }}</span>
             <span class="session-list__actions" @click.stop>
               <button
                 v-if="manualMode"
                 class="session-list__icon-btn"
                 type="button"
-                :title="isPinned(s.name) ? 'unpin' : 'pin to top'"
-                :aria-label="isPinned(s.name) ? `Unpin ${s.name}` : `Pin ${s.name} to top`"
+                :title="isPinned(s.name) ? t('sessions.unpin') : t('sessions.pinToTop', { name: s.name })"
+                :aria-label="isPinned(s.name) ? t('sessions.unpin') : t('sessions.pinToTop', { name: s.name })"
                 :aria-pressed="isPinned(s.name)"
                 @click="togglePin(s.name)"
               ><span aria-hidden="true">{{ isPinned(s.name) ? '★' : '☆' }}</span></button>
@@ -399,8 +458,8 @@ const isRepairable = computed(() => props.hostId !== 'local' && (props.stale || 
                 v-if="manualMode"
                 class="session-list__icon-btn"
                 type="button"
-                title="move up"
-                :aria-label="`Move ${s.name} up`"
+                :title="t('sessions.moveUp', { name: s.name })"
+                :aria-label="t('sessions.moveUp', { name: s.name })"
                 :disabled="!canMove(s.name, -1)"
                 @click="moveBy(s.name, -1)"
               ><span aria-hidden="true">↑</span></button>
@@ -408,23 +467,23 @@ const isRepairable = computed(() => props.hostId !== 'local' && (props.stale || 
                 v-if="manualMode"
                 class="session-list__icon-btn"
                 type="button"
-                title="move down"
-                :aria-label="`Move ${s.name} down`"
+                :title="t('sessions.moveDown', { name: s.name })"
+                :aria-label="t('sessions.moveDown', { name: s.name })"
                 :disabled="!canMove(s.name, 1)"
                 @click="moveBy(s.name, 1)"
               ><span aria-hidden="true">↓</span></button>
               <button
                 class="session-list__icon-btn"
                 type="button"
-                title="rename"
-                :aria-label="`Rename ${s.name}`"
+                :title="t('sessions.rename')"
+                :aria-label="t('sessions.renameSession', { name: s.name })"
                 @click="startRename(s.name)"
               ><span aria-hidden="true">✎</span></button>
               <button
                 class="session-list__icon-btn session-list__icon-btn--danger"
                 type="button"
-                title="kill"
-                :aria-label="`Kill ${s.name}`"
+                :title="t('sessions.kill')"
+                :aria-label="t('sessions.kill')"
                 @click="requestKill(s.name)"
               ><span aria-hidden="true">✕</span></button>
             </span>
@@ -437,28 +496,28 @@ const isRepairable = computed(() => props.hostId !== 'local' && (props.stale || 
     </ul>
     </template>
 
-    <div v-if="selecting" class="session-list__batch" role="region" aria-label="Batch actions">
+    <div v-if="selecting" class="session-list__batch" role="region" :aria-label="t('sessions.batchActions')">
       <template v-if="!confirmingBulk">
-        <span class="session-list__batch-count">{{ checked.size }} selected</span>
+        <span class="session-list__batch-count">{{ t('sessions.selectedCount', { count: checked.size }) }}</span>
         <button
           class="session-list__btn session-list__btn--danger"
           type="button"
           :disabled="checked.size === 0"
           @click="confirmingBulk = true"
-        >Kill</button>
-        <button class="session-list__btn" type="button" @click="toggleSelectMode">Cancel</button>
+        >{{ t('sessions.kill') }}</button>
+        <button class="session-list__btn" type="button" @click="toggleSelectMode">{{ t('common.cancel') }}</button>
       </template>
       <template v-else>
-        <span>Kill {{ checked.size }} session{{ checked.size === 1 ? '' : 's' }} on {{ hostName || hostId }}?</span>
-        <button class="session-list__btn session-list__btn--danger" type="button" @click="confirmBulkKill">Kill</button>
-        <button class="session-list__btn" type="button" @click="confirmingBulk = false">Cancel</button>
+        <span>{{ t('sessions.bulkKillConfirmHost', { count: checked.size, host: hostName || hostId }) }}</span>
+        <button class="session-list__btn session-list__btn--danger" type="button" @click="confirmBulkKill">{{ t('sessions.kill') }}</button>
+        <button class="session-list__btn" type="button" @click="confirmingBulk = false">{{ t('common.cancel') }}</button>
       </template>
     </div>
 
-    <div v-else-if="confirmingKill" class="session-list__confirm" role="alertdialog" aria-label="Confirm session termination">
-      <span>Kill session "{{ confirmingKill }}" on {{ hostName || hostId }}?</span>
-      <button class="session-list__btn session-list__btn--danger" type="button" @click="confirmKill">Kill</button>
-      <button class="session-list__btn" type="button" @click="confirmingKill = null">Cancel</button>
+    <div v-else-if="confirmingKill" class="session-list__confirm" role="alertdialog" :aria-label="t('sessions.confirmTermination')">
+      <span>{{ t('sessions.killSessionConfirm', { name: confirmingKill, host: hostName || hostId }) }}</span>
+      <button class="session-list__btn session-list__btn--danger" type="button" @click="confirmKill">{{ t('sessions.kill') }}</button>
+      <button class="session-list__btn" type="button" @click="confirmingKill = null">{{ t('common.cancel') }}</button>
     </div>
   </div>
 </template>

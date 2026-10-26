@@ -9,6 +9,7 @@ import HostManagerModal from './HostManagerModal.vue'
 import { setToken } from '../api'
 import { setConfig, resetConfigForTest, type ClientConfig } from '../config'
 import { resetToastsForTest } from '../toasts'
+import { setLocale, resetLocaleForTest } from '../i18n/index'
 
 const testConfig: ClientConfig = {
   version: 1,
@@ -44,6 +45,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetToastsForTest()
+  resetLocaleForTest('en')
 })
 
 function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
@@ -258,6 +260,56 @@ test('HostManagerModal: field validation errors on add', async () => {
   await wrapper.find('form.host-form').trigger('submit')
   await nextTick()
   assert.ok(wrapper.text().includes('Private key is required for new host'))
+
+  wrapper.unmount()
+})
+
+test('HostManagerModal: displayed form field errors dynamically update on live language switch', async () => {
+  resetLocaleForTest('en')
+  setToken('test-token')
+  setupFetchMock(async (req) => {
+    if (req.url === '/api/hosts') {
+      return json({ hosts: mockHosts })
+    }
+    return json({}, 200)
+  })
+
+  const wrapper = mount(HostManagerModal, {
+    props: { open: true },
+    attachTo: document.body,
+  })
+  await nextTick()
+  await new Promise((r) => setTimeout(r, 20))
+  await nextTick()
+
+  // Switch to add view
+  const addBtn = wrapper.find('.host-modal__add-btn')
+  assert.ok(addBtn.exists())
+  await addBtn.trigger('click')
+  await nextTick()
+
+  // Submit empty form in English mode
+  await wrapper.find('form.host-form').trigger('submit')
+  await nextTick()
+
+  assert.ok(wrapper.text().includes('Host ID is required'))
+  assert.ok(wrapper.text().includes('Host name is required'))
+  assert.ok(wrapper.text().includes('Host address is required'))
+
+  // Switch to Chinese without resubmitting form
+  setLocale('zh-CN')
+  await nextTick()
+
+  assert.ok(wrapper.text().includes('主机标识为必填项'))
+  assert.ok(wrapper.text().includes('主机名称为必填项'))
+  assert.ok(wrapper.text().includes('SSH 地址为必填项'))
+  assert.ok(!wrapper.text().includes('Host ID is required'))
+
+  // Switch back to English
+  setLocale('en')
+  await nextTick()
+  assert.ok(wrapper.text().includes('Host ID is required'))
+  assert.ok(!wrapper.text().includes('主机标识为必填项'))
 
   wrapper.unmount()
 })
@@ -963,4 +1015,196 @@ test('HostManagerModal: structured capability status renders truthfully rather t
   assert.ok(wrapper.text().includes('SFTP: Unavailable'), 'SFTP on offline host must render Unavailable')
 
   wrapper.unmount()
+})
+
+test('I18N-R2-02: general form submit errors map to localized descriptions and update dynamically on language switch', async () => {
+  resetLocaleForTest('zh-CN')
+  setToken('test-token')
+  let returnStatus = 409
+  let returnError = 'duplicate_local_host'
+
+  setupFetchMock(async (req) => {
+    if (req.url === '/api/hosts' && req.method === 'GET') {
+      return json({ hosts: mockHosts })
+    }
+    if (req.url === '/api/hosts' && req.method === 'POST') {
+      return json({ error: returnError }, returnStatus)
+    }
+    return json({}, 200)
+  })
+
+  const wrapper = mount(HostManagerModal, {
+    props: { open: true },
+    attachTo: document.body,
+  })
+  await nextTick()
+  await new Promise((r) => setTimeout(r, 20))
+  await nextTick()
+
+  try {
+    // 1. Switch to add view and select local execution
+    await wrapper.find('.host-modal__add-btn').trigger('click')
+    await nextTick()
+
+    const localRadio = wrapper.find('input[type="radio"][value="local"]')
+    assert.ok(localRadio.exists(), 'local connection type radio must exist')
+    await localRadio.setValue()
+    await nextTick()
+
+    // Fill valid form
+    await wrapper.find('#host-field-id').setValue('local')
+    await wrapper.find('#host-field-name').setValue('My Local')
+    await nextTick()
+
+    // Submit form -> triggers duplicate_local_host
+    await wrapper.find('form.host-form').trigger('submit')
+    await nextTick()
+    await new Promise((r) => setTimeout(r, 20))
+    await nextTick()
+
+    // Assert: localized Chinese message renders and does not show bare error code
+    const alertEl = wrapper.find('.host-alert--danger')
+    assert.ok(alertEl.exists(), 'danger alert must exist')
+    assert.equal(
+      alertEl.text(),
+      '本地主机已存在，不能重复添加。',
+      'must show localized Chinese message for duplicate_local_host',
+    )
+    assert.ok(!alertEl.text().includes('duplicate_local_host'))
+
+    // Form inputs must remain preserved
+    assert.equal((wrapper.find('#host-field-id').element as HTMLInputElement).value, 'local')
+    assert.equal((wrapper.find('#host-field-name').element as HTMLInputElement).value, 'My Local')
+
+    // Switch to English without resubmitting
+    setLocale('en')
+    await nextTick()
+    assert.equal(
+      alertEl.text(),
+      'A local host already exists and cannot be duplicated.',
+      'must update to English upon locale switch',
+    )
+
+    // Switch back to Chinese
+    setLocale('zh-CN')
+    await nextTick()
+    assert.equal(
+      alertEl.text(),
+      '本地主机已存在，不能重复添加。',
+    )
+
+    // 2. Test unknown diagnostic error
+    returnStatus = 500
+    returnError = 'sqlite_busy'
+    await wrapper.find('form.host-form').trigger('submit')
+    await nextTick()
+    await new Promise((r) => setTimeout(r, 20))
+    await nextTick()
+
+    assert.equal(
+      wrapper.find('.host-alert--danger').text(),
+      '保存主机失败：sqlite_busy',
+      'unknown diagnostic must be rendered with localized context in Chinese',
+    )
+
+    // Switch to English
+    setLocale('en')
+    await nextTick()
+    assert.equal(
+      wrapper.find('.host-alert--danger').text(),
+      'Failed to save host: sqlite_busy',
+      'unknown diagnostic must be rendered with localized context in English',
+    )
+  } finally {
+    resetLocaleForTest('en')
+    wrapper.unmount()
+  }
+})
+
+test('I18N-R2-03: host capability pills render localized labels without duplicate prefixes, and button aria-labels are localized', async () => {
+  resetLocaleForTest('zh-CN')
+  setToken('test-token')
+
+  setupFetchMock(async (req) => {
+    if (req.url === '/api/hosts') {
+      return json({ hosts: mockHosts })
+    }
+    if (req.url === '/api/hosts/server-1/capabilities') {
+      return json({
+        hostId: 'server-1',
+        revision: 3,
+        online: true,
+        ssh: { state: 'available', available: true },
+        tmux: { state: 'available', available: true },
+        sftp: { state: 'available', available: true },
+        posixRename: true,
+      })
+    }
+    return json({}, 200)
+  })
+
+  const wrapper = mount(HostManagerModal, {
+    props: { open: true },
+    attachTo: document.body,
+  })
+  await nextTick()
+  await new Promise((r) => setTimeout(r, 20))
+  await nextTick()
+
+  try {
+    // 1. Verify localized aria-labels on host action buttons in Chinese
+    assert.ok(
+      wrapper.find('button[aria-label="测试 Production Server 的连接"]').exists(),
+      'Test connection button must have Chinese aria-label',
+    )
+    assert.ok(
+      wrapper.find('button[aria-label="编辑 Production Server"]').exists(),
+      'Edit button must have Chinese aria-label',
+    )
+    assert.ok(
+      wrapper.find('button[aria-label="将 Production Server 设为默认主机"]').exists(),
+      'Set default button must have Chinese aria-label',
+    )
+    assert.ok(
+      wrapper.find('button[aria-label="移除 Production Server"]').exists(),
+      'Remove button must have Chinese aria-label',
+    )
+
+    // Test capabilities on Production Server
+    const testBtn = wrapper.find('button[aria-label="测试 Production Server 的连接"]')
+    await testBtn.trigger('click')
+    await new Promise((r) => setTimeout(r, 20))
+    await nextTick()
+
+    // Verify capability pills render in Chinese without duplicate prefix
+    assert.ok(wrapper.text().includes('SSH: 已连接'))
+    assert.ok(wrapper.text().includes('tmux: 可用'))
+    assert.ok(wrapper.text().includes('SFTP: 可用'))
+    assert.ok(wrapper.text().includes('原子覆盖: 支持'))
+    assert.ok(
+      !wrapper.text().includes('Atomic Overwrite: 原子覆盖'),
+      'Must NOT produce duplicate English prefix in Chinese mode',
+    )
+
+    // Switch to English
+    setLocale('en')
+    await nextTick()
+
+    assert.ok(wrapper.text().includes('SSH: Connected'))
+    assert.ok(wrapper.text().includes('tmux: Available'))
+    assert.ok(wrapper.text().includes('SFTP: Available'))
+    assert.ok(wrapper.text().includes('Atomic Overwrite: Supported'))
+
+    assert.ok(
+      wrapper.find('button[aria-label="Test connection for Production Server"]').exists(),
+      'Test connection button must have English aria-label',
+    )
+    assert.ok(
+      wrapper.find('button[aria-label="Edit Production Server"]').exists(),
+      'Edit button must have English aria-label',
+    )
+  } finally {
+    resetLocaleForTest('en')
+    wrapper.unmount()
+  }
 })

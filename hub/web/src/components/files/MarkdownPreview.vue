@@ -4,6 +4,7 @@
 // holds, and a Markdown file in this workflow is frequently attacker-influenced.
 import { computed } from 'vue'
 import { renderMarkdown } from '../../files/preview'
+import { t } from '../../i18n/index'
 
 const props = defineProps<{ source: string }>()
 const rendered = computed(() => renderMarkdown(props.source))
@@ -12,8 +13,7 @@ const rendered = computed(() => renderMarkdown(props.source))
 <template>
   <div class="markdown-preview">
     <p v-if="rendered.truncated" class="markdown-preview__notice" role="status">
-      This file is larger than the preview limit, so only the beginning is rendered. Switch to
-      Source to see the rest.
+      {{ t('files.markdownTruncated') }}
     </p>
     <div class="markdown-preview__body" v-html="rendered.html"></div>
   </div>

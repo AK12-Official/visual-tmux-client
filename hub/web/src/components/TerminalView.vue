@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { TerminalSession, type ConnState, type NoticeLevel } from '../terminal'
+import { getLocale, onLocaleChange, t, type SupportedLocale } from '../i18n/index'
 
 const props = defineProps<{
   session: string
@@ -23,6 +24,31 @@ const state = ref<ConnState>('connecting')
 // or the session finishing), or the server's message for a refused attachment.
 const endedDetail = ref<string | null>(null)
 let session: TerminalSession | null = null
+const currentLocale = ref<SupportedLocale>(getLocale())
+let unbindLocale: (() => void) | null = null
+
+const displayEndedDetail = computed(() => {
+  void currentLocale.value
+  if (!endedDetail.value) return null
+  const code = endedDetail.value
+  const exitMatch = code.match(/^(?:exit_code:|Process exited with code )(-?\d+)$/)
+  if (exitMatch) {
+    return t('terminal.processExited', { code: exitMatch[1] })
+  }
+  if (code === 'AUTH_FAILED' || code === 'Authentication failed') {
+    return t('auth.authFailed')
+  }
+  if (code === 'session_not_found' || code.includes('no longer exists')) {
+    return t('terminal.sessionNotFoundNotice', { name: props.session })
+  }
+  if (code === 'host_revision_conflict' || code === 'Host configuration changed.') {
+    return t('errors.host_revision_conflict')
+  }
+  if (code === 'host_not_found' || code === 'Host no longer exists.') {
+    return t('terminal.hostNotFoundNotice')
+  }
+  return code
+})
 
 // The name to report upward. It must come from the live attachment, not from
 // `props.session`: a KeepAlive-cached view never re-renders, so after its
@@ -56,7 +82,8 @@ function attach(): void {
       props.hostId ?? 'local',
     )
   } catch (err) {
-    emit('notice', `Terminal init failed: ${err instanceof Error ? err.message : String(err)}`)
+    const error = err instanceof Error ? err.message : String(err)
+    emit('notice', t('terminal.initFailed', { error }))
   }
 }
 
@@ -69,7 +96,12 @@ function reconnect(): void {
   attach()
 }
 
-onMounted(attach)
+onMounted(() => {
+  unbindLocale = onLocaleChange((loc) => {
+    currentLocale.value = loc
+  })
+  attach()
+})
 
 onActivated(() => {
   session?.refit()
@@ -102,27 +134,34 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  unbindLocale?.()
   session?.dispose()
   session = null
+})
+
+defineExpose({
+  state,
+  endedDetail,
+  reconnect,
 })
 </script>
 
 <template>
   <div class="terminal-view">
     <div ref="el" class="terminal-view__surface"></div>
-    <div v-if="state === 'ended'" class="terminal-view__overlay" role="region" aria-label="Terminal status">
+    <div v-if="state === 'ended'" class="terminal-view__overlay" role="region" :aria-label="t('terminal.status')">
       <div class="terminal-view__ended" role="alert">
         <template v-if="alive">
           <p class="terminal-view__ended-title">
-            {{ endedDetail ? 'Terminal disconnected' : `Detached from “${props.session}”` }}
+            {{ displayEndedDetail ? t('terminal.connectionLost') : t('terminal.terminalDetached', { name: props.session }) }}
           </p>
-          <p v-if="endedDetail" class="terminal-view__ended-detail">{{ endedDetail }}</p>
-          <p v-else class="terminal-view__ended-detail">The session is still running.</p>
-          <button class="terminal-view__reconnect" type="button" @click="reconnect">Reconnect</button>
+          <p v-if="displayEndedDetail" class="terminal-view__ended-detail">{{ displayEndedDetail }}</p>
+          <p v-else class="terminal-view__ended-detail">{{ t('terminal.sessionStillRunning') }}</p>
+          <button class="terminal-view__reconnect" type="button" @click="reconnect">{{ t('terminal.reconnect') }}</button>
         </template>
         <template v-else>
-          <p class="terminal-view__ended-title">Session “{{ props.session }}” has ended.</p>
-          <p v-if="endedDetail" class="terminal-view__ended-detail">{{ endedDetail }}</p>
+          <p class="terminal-view__ended-title">{{ t('terminal.sessionEnded', { name: props.session }) }}</p>
+          <p v-if="displayEndedDetail" class="terminal-view__ended-detail">{{ displayEndedDetail }}</p>
         </template>
       </div>
     </div>

@@ -1,9 +1,15 @@
 // API client for the visual-tmux-client JSON control plane. Owns the shared bearer
-// token (persisted in localStorage) and surfaces authentication failures as
+// token (persisted in localStorage with in-memory fallback) and surfaces authentication failures as
 // a dedicated AuthError so the UI can distinguish "token rejected" from
 // "network error".
+import { safeStorageGet, safeStorageSet, safeStorageRemove } from './storage'
 
 const TOKEN_KEY = 'visual-tmux-client-token'
+// memoryToken tracks in-session token mutation overrides:
+// - undefined: uninitialized in memory (delegates to persistent storage)
+// - string: explicit token set in this session (overrides storage, e.g. when setItem fails)
+// - null: explicit logout/cleared in this session (overrides storage, e.g. when removeItem fails)
+let memoryToken: string | null | undefined = undefined
 
 /** PaneSummary describes the most representative pane of a session. */
 export interface PaneSummary {
@@ -31,23 +37,30 @@ export class AuthError extends Error {
 }
 
 export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY)
+  if (memoryToken !== undefined) {
+    return memoryToken
+  }
+  return safeStorageGet(TOKEN_KEY)
 }
 
 export function setToken(token: string): void {
-  try {
-    localStorage.setItem(TOKEN_KEY, token)
-  } catch {
-    /* ignore storage quota */
+  memoryToken = token
+  const saved = safeStorageSet(TOKEN_KEY, token)
+  if (saved && safeStorageGet(TOKEN_KEY) === token) {
+    memoryToken = undefined
   }
 }
 
 export function clearToken(): void {
-  try {
-    localStorage.removeItem(TOKEN_KEY)
-  } catch {
-    /* ignore storage quota */
+  memoryToken = null
+  const removed = safeStorageRemove(TOKEN_KEY)
+  if (removed && safeStorageGet(TOKEN_KEY) === null) {
+    memoryToken = undefined
   }
+}
+
+export function resetTokenForTest(): void {
+  memoryToken = undefined
 }
 
 // The token travels in an Authorization header, and browsers only accept

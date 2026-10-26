@@ -6,6 +6,7 @@ import { computed, ref } from 'vue'
 
 import type { Entry } from '../../files/api'
 import { cachedChildren, isTruncated, visibleRows, type TreeState } from '../../files/tree'
+import { t } from '../../i18n/index'
 
 const props = defineProps<{
   path: string
@@ -130,10 +131,10 @@ defineExpose({ neighbourOf, focusFirstRow, focusPath })
 
 <template>
   <div ref="root" class="tree">
-    <p v-if="rows.length === 0 && loaded" class="tree__empty">This directory is empty.</p>
+    <p v-if="rows.length === 0 && loaded" class="tree__empty">{{ t('files.emptyDirectory') }}</p>
     <template v-else>
       <p v-if="truncated" class="tree__note">
-        More entries than the listing limit — open a subdirectory to see the rest.
+        {{ t('files.listingLimitNote') }}
       </p>
       <div
         v-for="row in rows"
@@ -147,7 +148,7 @@ defineExpose({ neighbourOf, focusFirstRow, focusPath })
           class="tree__caret"
           type="button"
           :aria-expanded="row.expanded"
-          :aria-label="row.expanded ? `Collapse ${row.entry.name}` : `Expand ${row.entry.name}`"
+          :aria-label="row.expanded ? t('files.collapseFolder', { name: row.entry.name }) : t('files.expandFolder', { name: row.entry.name })"
           @click="emit('toggle', row.path)"
         >{{ row.expanded ? '▾' : '▸' }}</button>
         <span v-else class="tree__caret tree__caret--none" aria-hidden="true"></span>

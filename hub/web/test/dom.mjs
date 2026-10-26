@@ -35,6 +35,8 @@ const fromWindow = {
   KeyboardEvent: dom.window.KeyboardEvent,
   MouseEvent: dom.window.MouseEvent,
   CustomEvent: dom.window.CustomEvent,
+  MutationObserver: dom.window.MutationObserver,
+  Window: dom.window.constructor,
   // @vue/test-utils resolves an element's visibility through this, so a test can
   // ask whether a `v-show`ed element is on screen.
   getComputedStyle: dom.window.getComputedStyle.bind(dom.window),

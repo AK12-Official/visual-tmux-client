@@ -52,6 +52,44 @@ test('token storage operations', () => {
   assert.equal(getToken(), null)
 })
 
+test('I18N-R5-01: setToken overrides old token when setItem throws and clearToken clears even when removeItem throws', () => {
+  const store = new Map<string, string>()
+  store.set('visual-tmux-client-token', 'old-persisted-token')
+
+  let failSet = false
+  let failRemove = false
+
+  globalThis.localStorage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, val: string) => {
+      if (failSet) throw new DOMException('QuotaExceeded', 'QuotaExceededError')
+      store.set(key, val)
+    },
+    removeItem: (key: string) => {
+      if (failRemove) throw new DOMException('Forbidden', 'SecurityError')
+      store.delete(key)
+    },
+    clear: () => store.clear(),
+  } as any
+
+  // 1. Initial state reads pre-existing storage token
+  clearToken()
+  store.set('visual-tmux-client-token', 'old-persisted-token')
+  assert.equal(getToken(), 'old-persisted-token')
+
+  // 2. setItem fails with QuotaExceededError
+  failSet = true
+  setToken('new-active-token')
+  // Must return new-active-token, not the old-persisted-token
+  assert.equal(getToken(), 'new-active-token')
+
+  // 3. removeItem fails with SecurityError
+  failRemove = true
+  clearToken()
+  // Must return null, not old-persisted-token
+  assert.equal(getToken(), null)
+})
+
 test('errorText extracts error messages properly', async () => {
   const jsonErr = new Response(JSON.stringify({ error: 'session_name_in_use' }), {
     status: 409,

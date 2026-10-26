@@ -23,6 +23,7 @@ import { createPending } from '../../files/pending'
 import { reasonFor as reasonForCode } from '../../files/reasons'
 import { createPathChanges } from '../../files/pathChanges'
 import { getConfig } from '../../config'
+import { getLocale, onLocaleChange, t, type SupportedLocale } from '../../i18n/index'
 import type { Classification } from '../../files/classification'
 import { choosePreview, editable, namesAnImage, presentation, wantsText } from '../../files/preview'
 import { testHostCapabilities, type HostCapabilities, type HostItem } from '../../api'
@@ -91,10 +92,31 @@ const tabsRef = ref<InstanceType<typeof EditorTabs> | null>(null)
 const listingRef = ref<HTMLElement | null>(null)
 const current = ref('')
 const loading = ref(true)
+interface DirectoryErrorState {
+  path: string
+  code: string
+}
+
 // failure takes over the panel, so it is only ever set when there is nothing
 // else to show. navError is reported alongside the listing and leaves it alone.
-const failure = ref('')
-const navError = ref('')
+const failure = ref<DirectoryErrorState | null>(null)
+const navError = ref<DirectoryErrorState | null>(null)
+const currentLocale = ref<SupportedLocale>(getLocale())
+let unlistenLocale: (() => void) | null = null
+
+const displayFailure = computed(() => {
+  void currentLocale.value
+  if (!failure.value) return ''
+  const reason = reasonFor(failure.value.code)
+  return t('files.openFailed', { name: failure.value.path, reason })
+})
+
+const displayNavError = computed(() => {
+  void currentLocale.value
+  if (!navError.value) return ''
+  const reason = reasonFor(navError.value.code)
+  return t('files.openFailed', { name: navError.value.path, reason })
+})
 const tabs = ref<OpenFile[]>([])
 const activePath = ref<string | null>(null)
 const activeTabId = ref<number | null>(null)
@@ -186,8 +208,8 @@ const editorVisible = computed(
 const notShown = computed(() => {
   const file = active.value
   if (file === null) return ''
-  if (file.binary === null && !namesAnImage(file.name)) return 'its contents have not been read'
-  return 'it is binary or too large to preview'
+  if (file.binary === null && !namesAnImage(file.name)) return t('files.notShownUnread')
+  return t('files.notShownBinaryOrLarge')
 })
 
 const dirtyHosts = computed(() => {
@@ -270,8 +292,8 @@ watch(
         closeMenu()
         resetTreeState(tree, host.value, curConnRev)
         current.value = ''
-        failure.value = ''
-        navError.value = ''
+        failure.value = null
+        navError.value = null
         loading.value = true
         void startDirectory()
       } else if (curConnRev !== undefined) {
@@ -357,15 +379,15 @@ const canSaveActive = computed(() => {
 
 const saveButtonTitle = computed(() => {
   if (hostRemoved.value) {
-    return 'Host has been removed. Remote actions are disabled; drafts remain available for local copying.'
+    return t('files.hostRemovedTitle')
   }
   if (revisionStale.value) {
-    return 'Host configuration has changed (revision conflict). Reconcile before saving.'
+    return t('files.revisionConflictTitle')
   }
   if (replacementUnsupported.value) {
-    return 'Overwrite is unavailable on this host: remote server does not support atomic replacement (browse and download remain usable)'
+    return `${t('files.overwriteUnavailable')}: ${t('files.overwriteUnavailableTitle')}`
   }
-  return 'save (the hub refuses if the file changed since it was read)'
+  return t('files.save')
 })
 
 function discardHostDrafts(targetHostId: string) {
@@ -395,15 +417,16 @@ function fileSizeLimit(): number {
   }
 }
 
-function report(err: unknown, action: string) {
-  const code = err instanceof FileApiError ? err.code : String(err)
-  emit('notice', `${action}: ${reasonFor(code)}`, 'error')
-}
-
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
+}
+
+function report(err: unknown, actionKey: string, params: Record<string, unknown> = {}) {
+  const code = err instanceof FileApiError ? err.code : String(err)
+  const reason = reasonFor(code)
+  emit('notice', t(actionKey, { ...params, reason }), 'error')
 }
 
 /** reportRemoved says that a file the hub had already been asked for was deleted
@@ -421,7 +444,7 @@ function formatSize(bytes: number): string {
  * same way, so there is one thing to say about both. Naming the file rather than
  * the path because the name is what the user clicked. */
 function reportRemoved(name: string) {
-  emit('notice', `${name} was deleted before it could be opened.`, 'warning')
+  emit('notice', t('files.fileDeletedBeforeOpen', { name }), 'warning')
 }
 
 /** openWithoutReading opens a tab for a file whose contents are not read: an
@@ -488,7 +511,7 @@ function openWithoutReading(
  * which is what the specification asks for above the bound. */
 function onImageTooLarge(path: string, size: number) {
   tabs.value = tabs.value.map((tab) => (tab.path === path ? { ...tab, size } : tab))
-  emit('notice', `${basename(path)} is ${formatSize(size)}, larger than this view renders.`, 'warning')
+  emit('notice', t('files.fileTooLargeForView', { name: basename(path), size: formatSize(size) }), 'warning')
 }
 
 /** goTo loads a directory and makes it the current one.
@@ -507,19 +530,19 @@ async function goTo(path: string) {
   const targetHost = host.value
   const targetConnRev = currentHostConnRev(targetHost)
   loading.value = true
-  navError.value = ''
+  navError.value = null
   try {
     await loadDirectory(tree, path, true, targetHost, targetConnRev)
     if (attempt !== navigationAt || host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
     current.value = path
-    failure.value = ''
+    failure.value = null
   } catch (err) {
     if (attempt !== navigationAt || host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
     const detail = err instanceof FileApiError ? err.code : String(err)
     if (current.value === '') {
-      failure.value = `${path} could not be opened (${detail}).`
+      failure.value = { path, code: detail }
     } else {
-      navError.value = `${path} could not be opened (${detail}).`
+      navError.value = { path, code: detail }
     }
   } finally {
     if (attempt === navigationAt && host.value === targetHost && currentHostConnRev(targetHost) === targetConnRev) {
@@ -561,7 +584,7 @@ async function startDirectory(): Promise<void> {
   if (seed.substituted) {
     await goTo(seed.path)
     if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
-    emit('notice', `Opened ${seed.path}: the session's directory is outside the file boundary.`, 'warning')
+    emit('notice', t('files.openedOutsideBoundary', { path: seed.path }), 'warning')
     return
   }
 
@@ -573,7 +596,7 @@ async function startDirectory(): Promise<void> {
       current.value = probe
       loading.value = false
       if (probe !== seed.path) {
-        emit('notice', `Opened ${probe}: the session's directory ${seed.path} was not accessible.`, 'warning')
+        emit('notice', t('files.openedDirNotAccessible', { path: probe, sessionPath: seed.path }), 'warning')
       }
       return
     } catch (err) {
@@ -583,8 +606,8 @@ async function startDirectory(): Promise<void> {
       // is, and under an unrestricted boundary there is no configured root to be
       // moved to -- so walking up is what turns a refusal into somewhere to stand.
       if (code !== 'not_found' && code !== 'path_not_allowed') {
-        report(err, `Could not open ${probe}`)
-        failure.value = `${probe} could not be opened (${code || 'error'}).`
+        report(err, 'files.openFailed', { name: probe })
+        failure.value = { path: probe, code: code || 'error' }
         loading.value = false
         return
       }
@@ -610,13 +633,13 @@ async function startDirectory(): Promise<void> {
  */
 async function openFile(entry: Entry, path: string) {
   if (loading.value || current.value === '') {
-    emit('notice', `Could not open ${entry.name}: directory is reloading.`, 'warning')
+    emit('notice', t('files.openDirReloading', { name: entry.name }), 'warning')
     return
   }
   const parentDir = dirname(path)
   const dirEntries = cachedChildren(tree, parentDir)
   if (dirEntries && !dirEntries.some((e) => e.name === entry.name)) {
-    emit('notice', `Could not open ${entry.name}: entry is not present in current directory.`, 'error')
+    emit('notice', t('files.openEntryMissing', { name: entry.name }), 'error')
     return
   }
   const targetHostId = host.value
@@ -628,7 +651,7 @@ async function openFile(entry: Entry, path: string) {
     currentConnRev !== undefined &&
     tree.connectionRevision !== currentConnRev
   ) {
-    emit('notice', `Could not open ${entry.name}: host configuration has changed.`, 'error')
+    emit('notice', t('files.openHostConfigChanged', { name: entry.name }), 'error')
     return
   }
   const opKey = openingKey(targetHostId, path)
@@ -685,7 +708,7 @@ async function openFile(entry: Entry, path: string) {
       currentConnRevAfter !== undefined &&
       targetConnectionRev !== currentConnRevAfter
     ) {
-      emit('notice', `Could not open ${entry.name}: host configuration changed while loading.`, 'warning')
+      emit('notice', t('files.openHostChangedWhileLoading', { name: entry.name }), 'warning')
       return
     }
     // A rename while this read was travelling moved the file. The tab belongs
@@ -736,7 +759,7 @@ async function openFile(entry: Entry, path: string) {
       activeTabId.value = newTab.id
     }
   } catch (err) {
-    report(err, `Could not open ${entry.name}`)
+    report(err, 'files.openFailed', { name: entry.name })
   } finally {
     openingKeys.delete(opKey)
     // The record only exists for reads that are travelling; with none left it
@@ -758,7 +781,7 @@ async function toggleDirectory(path: string) {
     tree.expanded.add(path)
   } catch (err) {
     if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
-    report(err, `Could not expand ${basename(path)}`)
+    report(err, 'files.expandFailed', { name: basename(path) })
   }
 }
 
@@ -882,47 +905,31 @@ async function save(
       // the file that changed? -- would be about a file this tab no longer
       // holds. Answering it would write to whatever is at the new name instead,
       // which the user was never asked about.
-      report(err, `Could not save ${tab.name}, which moved to ${moved.path} while the save travelled`)
+      report(err, 'files.saveMovedFailed', { name: tab.name, movedPath: moved.path })
       return
     }
     if (err instanceof FileApiError && err.code === 'outcome_unknown') {
-      emit(
-        'notice',
-        `Save outcome uncertain for ${tab.name}: the connection dropped during commit. Reconcile by rereading before saving again.`,
-        'warning',
-      )
+      emit('notice', t('files.saveOutcomeUncertain', { name: tab.name }), 'warning')
       return
     }
     if (
       err instanceof FileApiError &&
       (err.code === 'host_unsupported' || err.code === 'unsupported_operation')
     ) {
-      emit(
-        'notice',
-        `Could not save ${tab.name}: overwrite is unavailable because the remote server does not support atomic replacement.`,
-        'error',
-      )
+      emit('notice', t('files.saveFailedAtomicUnsupported', { name: tab.name }), 'error')
       return
     }
     if (err instanceof FileApiError && err.code === 'host_revision_conflict') {
-      emit(
-        'notice',
-        `Could not save ${tab.name}: the host configuration has changed. Please reconcile before saving.`,
-        'error',
-      )
+      emit('notice', t('files.saveFailedHostRevisionConflict', { name: tab.name }), 'error')
       return
     }
     if (err instanceof FileApiError && err.code === 'host_not_found') {
-      emit(
-        'notice',
-        `Could not save ${tab.name}: host not found or removed. Drafts remain available for local copying.`,
-        'error',
-      )
+      emit('notice', t('files.saveFailedHostNotFound', { name: tab.name }), 'error')
       return
     }
     if (err instanceof FileApiError && err.code === 'conflict') {
       const overwrite = window.confirm(
-        `${tab.name} changed on disk since it was opened. Overwrite it with your version?`,
+        t('files.changedOnDiskPrompt', { name: tab.name }),
       )
       // The agreement about other names travels with the retry: the user gave it
       // for this write, and asking for it again on the way to the same write
@@ -938,13 +945,13 @@ async function save(
       const isRemote = (tab.hostId ?? host.value) !== 'local'
       const replace = window.confirm(
         isRemote
-          ? `${tab.name}: remote replacement does not preserve ACLs/xattrs or update other hard-link names (link count cannot be determined). Saving replaces this file, and other names keep the contents they have now. Save anyway?`
-          : `${tab.name} is reachable under other names as well. Saving replaces this file, and other names keep the contents they have now. Save anyway?`,
+          ? t('files.otherNamesRemotePrompt', { name: tab.name })
+          : t('files.otherNamesLocalPrompt', { name: tab.name }),
       )
       if (replace) await save(force, tab.id, true)
       return
     }
-    report(err, `Could not save ${tab.name}`)
+    report(err, 'files.saveFailed', { name: tab.name })
   } finally {
     // The path the write named, not the tab's: a rename during the flight moved
     // the tab, and it is the write that was outstanding.
@@ -984,7 +991,7 @@ async function reconcile(id: number) {
     ) {
       emit(
         'notice',
-        `Could not reconcile ${tab.name}: host configuration changed during reload. Please reconcile again.`,
+        t('files.reconcileFailedHostRevisionConflict', { name: tab.name }),
         'warning',
       )
       return
@@ -993,7 +1000,7 @@ async function reconcile(id: number) {
     let discardEdits = false
     if (currentTab.text !== currentTab.saved && contents.text !== currentTab.text) {
       discardEdits = window.confirm(
-        `${currentTab.name} has unsaved edits that differ from disk. Discard local edits and reload from disk?`,
+        t('files.reconcileDiscardPrompt', { name: currentTab.name }),
       )
     }
 
@@ -1009,14 +1016,14 @@ async function reconcile(id: number) {
     )
 
     if (result.outcome === 'matched') {
-      emit('notice', `${currentTab.name} matches remote file; marked clean.`, 'info')
+      emit('notice', t('files.reconcileClean', { name: currentTab.name }), 'info')
     } else if (result.outcome === 'preserved') {
-      emit('notice', `Preserved local edits for ${currentTab.name}.`, 'warning')
+      emit('notice', t('files.reconcilePreservedEdits', { name: currentTab.name }), 'warning')
     } else {
-      emit('notice', `Reloaded ${currentTab.name} from disk.`, 'info')
+      emit('notice', t('files.reconcileReloaded', { name: currentTab.name }), 'info')
     }
   } catch (err) {
-    report(err, `Could not reconcile ${tab.name}`)
+    report(err, 'files.reconcileFailed', { name: tab.name })
   }
 }
 
@@ -1070,7 +1077,7 @@ function isSameTab(id: number): boolean {
 
 function closeTab(path: string, id?: number) {
   const tab = tabs.value.find((candidate) => id !== undefined ? candidate.id === id : candidate.path === path)
-  if (tab && isDirty(tab) && !window.confirm(`${tab.name} has unsaved changes. Close it anyway?`)) {
+  if (tab && isDirty(tab) && !window.confirm(t('files.closeTabUnsavedPrompt', { name: tab.name }))) {
     return
   }
   tabs.value = tabs.value.filter((candidate) => id !== undefined ? candidate.id !== id : candidate.path !== path)
@@ -1107,7 +1114,7 @@ async function replaceTabFocus() {
 /** requestClose warns before discarding unsaved edits, which are not recoverable
  * once the panel is gone. */
 function requestClose() {
-  if (dirty.value && !window.confirm('Files have unsaved changes. Close the file manager anyway?')) {
+  if (dirty.value && !window.confirm(t('files.closeManagerUnsavedPrompt'))) {
     return
   }
   emit('close')
@@ -1141,7 +1148,7 @@ async function resyncExpanded(root: string) {
     // Reported once: the usual cause takes out a whole subtree at a time, and a
     // notice per directory would bury the one that says what happened.
     if (reported) return
-    report(err, `Could not reload ${basename(path)}`)
+    report(err, 'files.reloadFailed', { name: basename(path) })
     reported = true
   }
 
@@ -1197,7 +1204,7 @@ async function settleMutation(
       tree.expanded.add(parent)
     } catch (err) {
       if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
-      report(err, `Could not reload ${basename(parent)}`)
+      report(err, 'files.reloadFailed', { name: basename(parent) })
     }
   }
   if (host.value !== targetHost || currentHostConnRev(targetHost) !== targetConnRev) return
@@ -1209,7 +1216,7 @@ async function createHere(isDir: boolean) {
   // buttons are disabled in that state; this is the same rule at the point that
   // matters, because joinPath('', name) would name a path at the filesystem root.
   if (current.value === '' || loading.value) {
-    emit('notice', 'Could not create: directory is reloading.', 'warning')
+    emit('notice', t('files.createDirReloading'), 'warning')
     return
   }
   const targetHost = host.value
@@ -1220,7 +1227,7 @@ async function createHere(isDir: boolean) {
     currentConnRev !== undefined &&
     tree.connectionRevision !== currentConnRev
   ) {
-    emit('notice', 'Could not create: host configuration has changed.', 'error')
+    emit('notice', t('files.createHostConfigChanged'), 'error')
     return
   }
   // A create is deliberately not ordered against an outstanding delete, unlike a
@@ -1229,7 +1236,7 @@ async function createHere(isDir: boolean) {
   // lost either way -- though which of the two the screen is left showing is not
   // guaranteed, since the two listings race -- so there is nothing here for the
   // ordering to protect.
-  const name = window.prompt(isDir ? 'New directory name' : 'New file name')
+  const name = window.prompt(isDir ? t('files.newDirectoryPrompt') : t('files.newFilePrompt'))
   if (!name) return
   const nowConnRev = currentHostConnRev(targetHost)
   if (
@@ -1237,7 +1244,7 @@ async function createHere(isDir: boolean) {
     nowConnRev !== undefined &&
     targetConnectionRev !== nowConnRev
   ) {
-    emit('notice', 'Could not create: host configuration changed during prompt.', 'warning')
+    emit('notice', t('files.createHostChangedDuringPrompt'), 'warning')
     return
   }
   const path = joinPath(current.value, name)
@@ -1249,17 +1256,17 @@ async function createHere(isDir: boolean) {
       nowRev !== undefined &&
       nowRev !== targetConnectionRev
     ) {
-      emit('notice', `Created ${name} on previous connection.`, 'info')
+      emit('notice', t('files.createdOnPreviousConnection', { name }), 'info')
     } else if (host.value === targetHost && nowRev === targetConnectionRev) {
       await settleMutation(path, '', targetHost, targetConnectionRev)
       if (!isDir) await openFile({ name, is_dir: false, size: 0, mtime: 0 }, path)
     }
   } catch (err) {
     if (err instanceof FileApiError && err.code === 'host_revision_conflict') {
-      emit('notice', `Could not create ${name}: host configuration has changed.`, 'error')
+      emit('notice', t('files.createFailedHostConfigChanged', { name }), 'error')
       return
     }
-    report(err, `Could not create ${name}`)
+    report(err, 'files.createFailedNamed', { name })
   }
 }
 
@@ -1297,7 +1304,7 @@ function retargetTabs(
   const lost = stale.filter(isDirty)
   if (lost.length > 0) {
     const names = lost.map((tab) => tab.name).join(', ')
-    emit('notice', `Unsaved changes in ${names} were dropped: ${target} replaced that name.`, 'warning')
+    emit('notice', t('files.droppedUnsavedReplaced', { names, target }), 'warning')
   }
   // A tab nobody has read was opened without reading, and its *name* is the
   // reason: an image goes to the preview, which fetches what it needs, and its
@@ -1388,19 +1395,19 @@ async function readRenamedTab(id: number, path: string) {
         : t,
     )
   } catch (err) {
-    report(err, `Could not open ${basename(path)}`)
+    report(err, 'files.openFailed', { name: basename(path) })
   }
 }
 
 function renameTarget(entry: Entry, path: string) {
   if (loading.value || current.value === '') {
-    emit('notice', `Could not rename ${entry.name}: directory is reloading.`, 'warning')
+    emit('notice', t('files.renameDirReloading', { name: entry.name }), 'warning')
     return
   }
   const parentDir = dirname(path)
   const dirEntries = cachedChildren(tree, parentDir)
   if (dirEntries && !dirEntries.some((e) => e.name === entry.name)) {
-    emit('notice', `Could not rename ${entry.name}: entry is not present in current directory.`, 'error')
+    emit('notice', t('files.renameEntryMissing', { name: entry.name }), 'error')
     return
   }
   const targetHost = host.value
@@ -1411,10 +1418,10 @@ function renameTarget(entry: Entry, path: string) {
     currentConnRev !== undefined &&
     tree.connectionRevision !== currentConnRev
   ) {
-    emit('notice', `Could not rename ${entry.name}: host configuration has changed.`, 'error')
+    emit('notice', t('files.renameHostConfigChanged', { name: entry.name }), 'error')
     return
   }
-  const name = window.prompt('Rename to', entry.name)
+  const name = window.prompt(t('files.renamePrompt'), entry.name)
   if (!name || name === entry.name) return
   const nowConnRev = currentHostConnRev(targetHost)
   if (
@@ -1422,7 +1429,7 @@ function renameTarget(entry: Entry, path: string) {
     nowConnRev !== undefined &&
     targetConnectionRev !== nowConnRev
   ) {
-    emit('notice', `Could not rename ${entry.name}: host configuration changed during prompt.`, 'warning')
+    emit('notice', t('files.renameHostChangedDuringPrompt', { name: entry.name }), 'warning')
     return
   }
   const target = joinPath(dirname(path), name)
@@ -1436,7 +1443,7 @@ function renameTarget(entry: Entry, path: string) {
         nowRev !== undefined &&
         nowRev !== targetConnectionRev
       ) {
-        emit('notice', `Renamed ${entry.name} to ${name} on previous connection.`, 'info')
+        emit('notice', t('files.renamedOnPreviousConnection', { oldName: entry.name, newName: name }), 'info')
       } else if (host.value === targetHost && nowRev === targetConnectionRev) {
         return settleMutation(path, target, targetHost, targetConnectionRev)
       }
@@ -1451,31 +1458,23 @@ function renameTarget(entry: Entry, path: string) {
     })
     .catch((err: unknown) => {
       if (err instanceof FileApiError && err.code === 'host_revision_conflict') {
-        emit('notice', `Could not rename ${entry.name}: host configuration has changed.`, 'error')
+        emit('notice', t('files.renameFailedHostConfigChanged', { name: entry.name }), 'error')
         return
       }
-      report(err, `Could not rename ${entry.name}`)
+      report(err, 'files.renameFailedNamed', { name: entry.name })
     })
     .finally(() => renaming.end(path, targetHost))
 }
 
 async function deleteTarget(entry: Entry, path: string) {
   if (loading.value || current.value === '') {
-    emit(
-      'notice',
-      `Could not delete ${entry.name}: directory is reloading.`,
-      'warning',
-    )
+    emit('notice', t('files.deleteDirReloading', { name: entry.name }), 'warning')
     return
   }
   const parentDir = dirname(path)
   const dirEntries = cachedChildren(tree, parentDir)
   if (dirEntries && !dirEntries.some((e) => e.name === entry.name)) {
-    emit(
-      'notice',
-      `Could not delete ${entry.name}: entry is not present in current directory.`,
-      'error',
-    )
+    emit('notice', t('files.deleteEntryMissing', { name: entry.name }), 'error')
     return
   }
   const kind = entry.is_dir ? 'directory' : 'file'
@@ -1490,11 +1489,7 @@ async function deleteTarget(entry: Entry, path: string) {
     currentConnRev !== undefined &&
     tree.connectionRevision !== currentConnRev
   ) {
-    emit(
-      'notice',
-      `Could not delete ${entry.name}: host configuration has changed. Please refresh the directory.`,
-      'error',
-    )
+    emit('notice', t('files.deleteHostConfigChanged', { name: entry.name }), 'error')
     return
   }
   const doomed = tabs.value.filter(
@@ -1502,10 +1497,11 @@ async function deleteTarget(entry: Entry, path: string) {
   )
   const unsaved = doomed.filter(isDirty)
 
-  let question = `Delete the ${kind} ${entry.name}? This cannot be undone.`
+  const promptKey = entry.is_dir ? 'files.deleteDirPrompt' : 'files.deleteFilePrompt'
+  let question = t(promptKey, { name: entry.name })
   if (unsaved.length > 0) {
     const names = unsaved.map((tab) => tab.name).join(', ')
-    question += `\n\nOpen with unsaved changes: ${names}. Those edits will be lost.`
+    question += `\n\n${t('files.deleteUnsavedWarning', { names })}`
   }
   if (!window.confirm(question)) {
     return
@@ -1516,11 +1512,7 @@ async function deleteTarget(entry: Entry, path: string) {
     promptConnRev !== undefined &&
     targetConnectionRev !== promptConnRev
   ) {
-    emit(
-      'notice',
-      `Could not delete ${entry.name}: host configuration changed during confirmation.`,
-      'warning',
-    )
+    emit('notice', t('files.deleteHostChangedDuringPrompt', { name: entry.name }), 'warning')
     return
   }
 
@@ -1565,7 +1557,7 @@ async function deleteTarget(entry: Entry, path: string) {
     ) {
       emit(
         'notice',
-        `Could not delete ${entry.name}: host configuration changed while waiting for saves. Please verify and confirm deletion again.`,
+        t('files.deleteHostChangedWaitingSaves', { name: entry.name }),
         'warning',
       )
       return
@@ -1596,7 +1588,7 @@ async function deleteTarget(entry: Entry, path: string) {
     const unwarned = removed.filter((tab) => isDirty(tab) && !warned.has(tab.id))
     if (unwarned.length > 0) {
       const names = unwarned.map((tab) => tab.name).join(', ')
-      emit('notice', `Unsaved changes in ${names} went with ${entry.name}.`, 'warning')
+      emit('notice', t('files.unsavedWithDeleted', { names, name: entry.name }), 'warning')
     }
 
     tabs.value = tabs.value.filter(
@@ -1613,16 +1605,16 @@ async function deleteTarget(entry: Entry, path: string) {
       currentConnectionRevAfter !== undefined &&
       currentConnectionRevAfter !== targetConnectionRev
     ) {
-      emit('notice', `Deleted ${entry.name} on previous connection.`, 'info')
+      emit('notice', t('files.deletedOnPreviousConnection', { name: entry.name }), 'info')
     } else if (host.value === targetHost && currentConnectionRevAfter === targetConnectionRev) {
       await settleMutation(path, '', targetHost, targetConnectionRev)
     }
   } catch (err) {
     if (err instanceof FileApiError && err.code === 'host_revision_conflict') {
-      emit('notice', `Could not delete ${entry.name}: host configuration has changed.`, 'error')
+      emit('notice', t('files.deleteFailedHostConfigChanged', { name: entry.name }), 'error')
       return
     }
-    report(err, `Could not delete ${entry.name}`)
+    report(err, 'files.deleteFailedNamed', { name: entry.name })
   } finally {
     deleting.end(path, targetHost)
     // The confirmation took the focus and the entry is gone, so the row that
@@ -1654,7 +1646,7 @@ async function download(path: string, name: string) {
     link.click()
     URL.revokeObjectURL(url)
   } catch (err) {
-    report(err, `Could not download ${name}`)
+    report(err, 'files.downloadFailedNamed', { name })
   }
 }
 
@@ -1663,7 +1655,7 @@ async function copyPathToClipboard(path: string) {
   if (!clipboard) {
     emit(
       'notice',
-      'Copy failed: this browser exposes no clipboard here. It needs a secure context, and not every browser provides one.',
+      t('files.copyFailedSecureContext'),
       'warning',
     )
     return
@@ -1671,7 +1663,7 @@ async function copyPathToClipboard(path: string) {
   try {
     await clipboard.writeText(path)
   } catch {
-    emit('notice', 'Copy failed.', 'warning')
+    emit('notice', t('files.copyFailed'), 'warning')
   }
 }
 
@@ -1679,7 +1671,7 @@ async function copyPathToClipboard(path: string) {
 function insertPath(path: string) {
   const text = quoteForShell(path)
   if (text === null) {
-    emit('notice', 'That path cannot be inserted: it contains a control character.', 'warning')
+    emit('notice', t('files.pathHasControlChar'), 'warning')
     return
   }
   emit('insert-path', text, host.value)
@@ -1790,8 +1782,8 @@ watch(
     const nextConnRev = currentHostConnRev(nextHost)
     resetTreeState(tree, nextHost, nextConnRev)
     current.value = ''
-    failure.value = ''
-    navError.value = ''
+    failure.value = null
+    navError.value = null
     loading.value = true
     void startDirectory()
   },
@@ -1799,9 +1791,15 @@ watch(
 
 onMounted(() => {
   document.addEventListener('keydown', onKeydown)
+  unlistenLocale = onLocaleChange((locale) => {
+    currentLocale.value = locale
+  })
   void startDirectory()
 })
-onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onKeydown)
+  unlistenLocale?.()
+})
 
 defineExpose({
   hasUnsavedChanges: () => dirty.value,
@@ -1822,26 +1820,27 @@ defineExpose({
       <button
         class="fm__btn"
         type="button"
-        title="go to the parent directory"
+        :title="t('files.goToParent')"
+        :aria-label="t('files.goToParent')"
         :disabled="current === '/' || current === ''"
         @click="goTo(dirname(current))"
       >↑</button>
-      <span class="fm__host" :title="`Host: ${hostName || hostId || 'local'}`">{{ hostName || hostId || 'local' }}</span>
+      <span class="fm__host" :title="t('files.hostTitle', { name: hostName || hostId || 'local' })">{{ hostName || hostId || 'local' }}</span>
       <span class="fm__path" :title="current">{{ current || '…' }}</span>
-      <button class="fm__btn" type="button" title="new file" :disabled="current === ''" @click="createHere(false)">+ file</button>
-      <button class="fm__btn" type="button" title="new directory" :disabled="current === ''" @click="createHere(true)">+ dir</button>
-      <button class="fm__btn" type="button" title="reload this directory" @click="refreshCurrent">↻</button>
-      <button class="fm__btn fm__btn--close" type="button" title="close" @click="requestClose">✕</button>
+      <button class="fm__btn" type="button" :title="t('files.newFile')" :disabled="current === ''" @click="createHere(false)">{{ t('files.newFileShort') }}</button>
+      <button class="fm__btn" type="button" :title="t('files.newFolder')" :disabled="current === ''" @click="createHere(true)">{{ t('files.newFolderShort') }}</button>
+      <button class="fm__btn" type="button" :title="t('files.reloadDirectory')" :aria-label="t('files.reloadDirectory')" @click="refreshCurrent">↻</button>
+      <button class="fm__btn fm__btn--close" type="button" :title="t('common.close')" :aria-label="t('common.close')" @click="requestClose">✕</button>
     </header>
 
     <div class="fm__body">
-      <aside ref="listingRef" class="fm__tree" tabindex="-1" aria-label="Files">
-        <p v-if="loading" class="fm__state">Loading…</p>
-        <p v-else-if="failure" class="fm__state fm__state--error" role="alert">{{ failure }}</p>
+      <aside ref="listingRef" class="fm__tree" tabindex="-1" :aria-label="t('files.title')">
+        <p v-if="loading" class="fm__state">{{ t('common.loading') }}</p>
+        <p v-else-if="displayFailure" class="fm__state fm__state--error" role="alert">{{ displayFailure }}</p>
         <template v-else>
-          <p v-if="navError" class="fm__nav-error" role="alert">
-            <span>{{ navError }}</span>
-            <button class="fm__nav-dismiss" type="button" aria-label="Dismiss" @click="navError = ''">
+          <p v-if="displayNavError" class="fm__nav-error" role="alert">
+            <span>{{ displayNavError }}</span>
+            <button class="fm__nav-dismiss" type="button" :aria-label="t('common.dismiss')" @click="navError = null">
               ×
             </button>
           </p>
@@ -1868,7 +1867,7 @@ defineExpose({
           @close="(path, id) => closeTab(path, id)"
         />
 
-        <div v-if="!active" class="fm__state">Select a file to open it.</div>
+        <div v-if="!active" class="fm__state">{{ t('files.selectFilePrompt') }}</div>
 
         <template v-else>
           <div class="fm__actions">
@@ -1878,32 +1877,32 @@ defineExpose({
               :disabled="!canSaveActive"
               :title="saveButtonTitle"
               @click="save(false)"
-            >Save</button>
+            >{{ t('common.save') }}</button>
             <button
               v-if="active && !active.binary"
               class="fm__btn"
               type="button"
-              title="re-read file from disk to reconcile"
+              :title="t('files.reconcileTitle')"
               @click="reconcile(active.id)"
-            >Reconcile</button>
+            >{{ t('files.reconcile') }}</button>
             <button
               v-if="preview === 'markdown'"
               class="fm__btn"
               type="button"
               @click="markdownView.set(active.path, activeIsMarkdownSource ? 'preview' : 'source')"
-            >{{ activeIsMarkdownSource ? 'Preview' : 'Source' }}</button>
+            >{{ activeIsMarkdownSource ? t('files.previewMarkdown') : t('files.sourceMarkdown') }}</button>
             <span class="fm__spacer"></span>
-            <span v-if="isDirty(active)" class="fm__dirty" role="status">unsaved changes</span>
+            <span v-if="isDirty(active)" class="fm__dirty" role="status">{{ t('files.dirtyIndicator') }}</span>
           </div>
 
           <div v-if="hostRemoved" class="fm__removed-banner" role="status">
-            This host has been removed. Remote actions are disabled; drafts remain available for local copying.
+            {{ t('files.hostRemovedBanner') }}
           </div>
           <div v-else-if="revisionStale" class="fm__stale-banner" role="status">
-            Host configuration has changed since this file was opened (revision conflict). Reconcile or reload before saving to the updated host.
+            {{ t('files.revisionConflictBanner') }}
           </div>
           <div v-else-if="replacementUnsupported" class="fm__unsupported-banner" role="status">
-            Overwrite is unavailable on this host: remote server does not support atomic replacement (browse and download remain usable).
+            {{ t('files.overwriteUnavailable') }}: {{ t('files.overwriteUnavailableTitle') }}
           </div>
 
           <!--
@@ -1933,10 +1932,10 @@ defineExpose({
                 :source="active.text"
               />
               <div v-else-if="!editorVisible" class="fm__info">
-                <p class="fm__state">{{ active.name }} is not shown here: {{ notShown }}.</p>
+                <p class="fm__state">{{ t('files.notShownMessage', { name: active.name, reason: notShown }) }}</p>
                 <p class="fm__meta">{{ formatSize(active.size) }} · {{ active.path }}</p>
                 <button class="fm__btn" type="button" @click="download(active.path, active.name)">
-                  Download
+                  {{ t('files.download') }}
                 </button>
               </div>
             </template>

@@ -8,6 +8,7 @@ import {
   fetchClientConfig,
   type ClientConfig,
 } from './config'
+import { t } from './i18n/index'
 
 const validPayload: ClientConfig = {
   version: 1,
@@ -225,7 +226,7 @@ test('bootstrapApp handles failure, retry, and single mount guarantee', async ()
   const firstRes = await bootstrapApp(mockEl, flakyFetch, mockMount)
   assert.equal(firstRes, false)
   assert.equal(mountCount, 0)
-  assert.ok(mockEl.innerHTML.includes('Configuration Error'))
+  assert.ok(mockEl.innerHTML.includes(t('common.configError')))
   assert.ok(typeof mockBtn.onclick === 'function')
 
   // Retry clicked: should succeed and mount

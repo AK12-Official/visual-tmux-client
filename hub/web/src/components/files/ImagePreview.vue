@@ -6,6 +6,7 @@ import { onBeforeUnmount, ref, watch } from 'vue'
 import { readFileBytes } from '../../files/api'
 import { basename } from '../../files/pathUtils'
 import { MAX_IMAGE_PREVIEW_BYTES } from '../../files/preview'
+import { t } from '../../i18n/index'
 
 const props = defineProps<{ path: string }>()
 const emit = defineEmits<{
@@ -95,7 +96,7 @@ watch(
       shownAt.value = attempt
     } catch (err) {
       if (attempt !== loadAt) return
-      emit('notice', `Could not preview ${path}: ${String(err)}`, 'error')
+      emit('notice', t('files.previewFailed', { path, error: String(err) }), 'error')
     }
   },
   { immediate: true },
@@ -117,14 +118,13 @@ onBeforeUnmount(() => {
     -->
     <div v-if="undecodable" class="image-preview__failed">
       <p class="image-preview__state">
-        {{ basename(path) }} is named like an image, but its contents are not one
-        this browser can decode.
+        {{ t('files.imageDecodeFailed', { name: basename(path) }) }}
       </p>
       <button
         class="image-preview__download"
         type="button"
         @click="emit('download')"
-      >Download</button>
+      >{{ t('files.download') }}</button>
     </div>
     <img
       v-else-if="url"

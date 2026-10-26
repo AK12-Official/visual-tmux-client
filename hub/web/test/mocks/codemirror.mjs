@@ -24,7 +24,13 @@ export class EditorView {
     this.listeners = (options.extensions ?? []).filter(
       (extension) => typeof extension === 'function',
     )
-    this.state = { doc: { toString: () => this.doc } }
+    this.phrases = {}
+    this.selection = options.selection ?? { main: { from: 0, to: 0 } }
+    this.state = {
+      doc: { toString: () => this.doc },
+      phrase: (p) => this.phrases[p] ?? p,
+      selection: this.selection,
+    }
     instances.push(this)
   }
 
@@ -55,6 +61,18 @@ export class EditorView {
    * that needs composition belongs against the real library.
    */
   dispatch(update) {
+    if (update?.effects) {
+      const effects = Array.isArray(update.effects) ? update.effects : [update.effects]
+      for (const eff of effects) {
+        if (eff?.value?.phrases) {
+          this.phrases = eff.value.phrases
+        }
+      }
+    }
+    if (update?.selection) {
+      this.selection = update.selection
+      this.state.selection = update.selection
+    }
     const changes = Array.isArray(update?.changes) ? update.changes : [update?.changes]
     const applied = changes.filter(Boolean)
     const ordered = [...applied].sort((a, b) => a.from - b.from || a.to - b.to)
@@ -102,7 +120,20 @@ export class EditorView {
 
 EditorView.updateListener = { of: (listener) => listener }
 
+export class Compartment {
+  of(extension) {
+    return { compartment: this, extension }
+  }
+  reconfigure(extension) {
+    return { compartment: this, reconfigure: true, value: extension }
+  }
+}
+
 export class EditorState {
+  static phrases = {
+    of: (phrases) => ({ phrases }),
+  }
+
   static create(config) {
     return { config }
   }
