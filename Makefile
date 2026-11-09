@@ -29,6 +29,7 @@ fmt:
 	cd hub && golangci-lint fmt --config ../.golangci.yml
 
 test: web
+	node --test scripts/ci-version.test.mjs
 	npm --prefix hub/web test
 	cd hub && go test ./...
 	cd hub && go vet ./...

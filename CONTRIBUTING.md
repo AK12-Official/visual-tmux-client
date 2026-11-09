@@ -94,3 +94,16 @@ Rules are defined in root `.golangci.yml`:
 - Update the README or OpenSpec specifications when public behavior changes.
 
 By contributing, you agree that your contribution is licensed under the MIT License.
+
+## Release process
+
+Release through the CI workflow in `.github/workflows/ci.yml`:
+
+1. Update `Makefile`, `scripts/package.sh`, `hub/web/package.json`, and both root version entries in `hub/web/package-lock.json` in a PR. Use a stable `X.Y.Z` version.
+2. Wait for the full CI pipeline, including four-platform packaging and checksum verification, to pass. Merge the PR into `main` and wait for that main commit's CI to pass.
+3. Create and push `vX.Y.Z` on that commit. CI verifies that the tag matches every source version default and that the commit belongs to main, then reruns all checks on the tagged commit.
+4. The `publish` job consumes only the `release-bundle` produced by its own successful run. It uploads a draft with all four archives and checksums before making it public. Only that job has `contents: write`.
+
+Never manually publish or upload local builds to bypass a failed check. A local green run or an unrelated successful workflow does not authorize a release. Do not move a published tag or overwrite published assets. If draft upload fails, inspect and remove the incomplete draft before rerunning; if the release is already public, fix forward with a new version.
+
+The workflow dependency regression tests run with `go test ./...`; the version validation tests run with `node --test scripts/ci-version.test.mjs`.

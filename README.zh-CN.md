@@ -303,7 +303,9 @@ make clean      # 清理生成的构建产物和临时目录
 TARGETS="darwin/arm64 darwin/amd64 linux/arm64 linux/amd64" make package
 ```
 
-推送 `v*` 标签后，GitHub Actions 会自动触发发布工作流，构建以上四个平台并发布 GitHub Release。
+CI 在 PR、主线提交和 `v*` 标签上运行同一条流水线：完整检查（前端构建/测试、Go lint/测试/vet）→ 四平台打包 → 归档验证与校验和汇总。PR 和主线的开发包可从 Actions 的 `release-bundle` 附件下载。
+
+正式发布前，先通过 PR 更新版本号，等待检查通过并合并主线，再在对应主线提交上推送与源码版本一致的 `vX.Y.Z` 标签。标签会重新执行完整流水线；只有所有前置任务成功，才会将本次构建的附件上传为草稿并公开 GitHub Release。失败、取消或跳过任一前置任务都会阻断发布。已发布的版本不可通过重跑覆盖，应修复后发布新版本。
 
 ## 架构说明
 

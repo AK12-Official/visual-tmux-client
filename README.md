@@ -305,7 +305,9 @@ To create multiple archives locally, pass space-separated Go targets:
 TARGETS="darwin/arm64 darwin/amd64 linux/arm64 linux/amd64" make package
 ```
 
-Pushing a `v*` tag runs the GitHub Actions release workflow, builds those four targets, creates checksums, and publishes a GitHub Release.
+PRs, main commits, and `v*` tags use the same CI pipeline: full validation (frontend build/tests and Go lint/tests/vet), four-platform packaging, then archive verification and checksums. Development packages are available in the Actions `release-bundle` artifact.
+
+To release, update the version through a PR, wait for checks to pass and merge to main, then push a matching `vX.Y.Z` tag on that main commit. The tag reruns the full pipeline. Only after all prerequisites succeed does CI upload that run's artifacts as a draft and publish the GitHub Release. A failed, cancelled, or skipped prerequisite blocks publication. Reruns cannot overwrite an existing release; publish a new version after fixing a released build.
 
 ## Architecture
 
