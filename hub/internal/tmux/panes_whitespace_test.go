@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // shQuote wraps a value so a shell echoes it byte for byte.
@@ -70,10 +71,29 @@ func TestPaneWorkingDirectoryKeepsATrailingSpaceAgainstARealServer(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, stderr, code, err := c.Exec(ctx, "new-session", "-d", "-s", "spaced", "-c", dir); err != nil || code != 0 {
+	// new-session returns before the pane child necessarily reaches chdir.
+	// Wait for a marker written by that child, then assert the path exactly.
+	ready := filepath.Join(t.TempDir(), "ready")
+	command := "pwd -P > " + shQuote(ready) + "; exec sleep 60"
+	_, stderr, code, err := c.Exec(ctx, "new-session", "-d", "-s", "spaced", "-c", dir, command)
+	if err != nil || code != 0 {
 		t.Fatalf("new-session failed: %v (%s)", err, stderr)
 	}
 
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		data, err := os.ReadFile(ready)
+		if err == nil && string(data) == resolved+"\n" {
+			break
+		}
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pane did not reach its starting directory: marker=%q, err=%v", data, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	got, err := c.PaneWorkingDirectory(ctx, "spaced")
 	if err != nil {
 		t.Fatalf("PaneWorkingDirectory: %v", err)

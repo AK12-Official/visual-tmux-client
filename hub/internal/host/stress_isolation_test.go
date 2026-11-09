@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -172,13 +173,19 @@ func TestSimultaneousTransferSlowTerminalAndOfflineHost(t *testing.T) {
 		t.Fatalf("open terminal proc2: %v", err)
 	}
 
-	// Write prompt command and verify immediate echo
-	uniqueToken := fmt.Sprintf("TOKEN_%d", time.Now().UnixNano())
-	if _, err := fmt.Fprintf(proc2, "echo %s\r\n", uniqueToken); err != nil {
+	// The complete token must only appear in the executed command's output,
+	// not in the PTY's echo of input typed before tmux switches to raw mode.
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	uniqueToken := "TOKEN_" + suffix
+	if _, err := fmt.Fprintf(proc2, "printf '%%s%%s\\n' 'TOKEN_' '%s'\r", suffix); err != nil {
 		t.Fatalf("write to proc2: %v", err)
 	}
 
-	readRespCh := make(chan bool, 1)
+	type terminalResponse struct {
+		output string
+		err    error
+	}
+	readRespCh := make(chan terminalResponse, 1)
 	go func() {
 		buf := make([]byte, 2048)
 		accumulated := ""
@@ -188,21 +195,23 @@ func TestSimultaneousTransferSlowTerminalAndOfflineHost(t *testing.T) {
 			if n > 0 {
 				accumulated += string(buf[:n])
 				if strings.Contains(accumulated, uniqueToken) {
-					readRespCh <- true
+					readRespCh <- terminalResponse{output: accumulated}
 					return
 				}
 			}
 			if err != nil {
-				break
+				readRespCh <- terminalResponse{output: accumulated, err: err}
+				return
 			}
 		}
-		readRespCh <- false
+		readRespCh <- terminalResponse{output: accumulated, err: io.ErrNoProgress}
 	}()
 
 	select {
-	case found := <-readRespCh:
-		if !found {
-			t.Fatalf("expected responsive echo of %s on online-2", uniqueToken)
+	case response := <-readRespCh:
+		if response.err != nil {
+			t.Fatalf("expected responsive echo of %s on online-2: %v; output=%q",
+				uniqueToken, response.err, response.output)
 		}
 	case <-time.After(6 * time.Second):
 		t.Fatal("timeout waiting for responsive terminal echo on online-2")

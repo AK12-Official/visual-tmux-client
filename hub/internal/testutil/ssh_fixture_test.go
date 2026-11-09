@@ -227,3 +227,37 @@ func TestDisposableSSHFixturePrivateKeyAndPTY(t *testing.T) {
 
 	_ = ptySess.Close() //nolint:errcheck // test cleanup
 }
+
+// The SSH client chooses the terminal; a CI runner's TERM must not leak into it.
+func TestDisposableSSHFixturePTYUsesRequestedTerminalAndSize(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not available")
+	}
+	t.Setenv("TERM", "vtc-invalid-host-terminal")
+	server := testutil.NewDisposableSSHServer(t, testutil.DisposableSSHConfig{})
+	client, err := ssh.Dial("tcp", net.JoinHostPort(server.Addr, fmt.Sprint(server.Port)), &ssh.ClientConfig{
+		User: server.User, Auth: []ssh.AuthMethod{ssh.Password(server.Password)},
+		HostKeyCallback: ssh.FixedHostKey(server.HostPubKey), Timeout: 3 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }() //nolint:errcheck // test cleanup
+	for range 20 {
+		sess, err := client.NewSession()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sess.RequestPty("xterm-256color", 37, 91, ssh.TerminalModes{}); err != nil {
+			t.Fatal(err)
+		}
+		output, err := sess.CombinedOutput("printf '%s\\n' \"$TERM\"; stty size")
+		_ = sess.Close() //nolint:errcheck // test cleanup
+		if err != nil {
+			t.Fatalf("PTY command: %v; output: %q", err, output)
+		}
+		if got := strings.Fields(string(output)); strings.Join(got, " ") != "xterm-256color 37 91" {
+			t.Fatalf("expected requested terminal and initial size, got %q", output)
+		}
+	}
+}
