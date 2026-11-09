@@ -38,7 +38,6 @@ RECXJ0e+PkPnYftJYlni7+jWTtpvGWxCCXfsh/EY5+VRR/e1B6xnd5Mlpx
 	dirPermPrivate         = 0o700
 	filePermExec           = 0o755
 	extraEnvCapacity       = 4
-	ptyReqMinPayload       = 8
 	windowChangeMinPayload = 8
 	subsystemHeaderLen     = 4
 	execHeaderLen          = 4
@@ -311,16 +310,19 @@ func (s *DisposableSSHServer) serve(config *ssh.ServerConfig) {
 	}
 }
 
-func handlePTYReq(req *ssh.Request, ptyCols, ptyRows *uint32) {
-	if len(req.Payload) >= ptyReqMinPayload {
-		termLen := binary.BigEndian.Uint32(req.Payload[:subsystemHeaderLen])
-		offset := subsystemHeaderLen + termLen
-		if uint32(len(req.Payload)) >= offset+ptyReqMinPayload {
-			*ptyCols = binary.BigEndian.Uint32(req.Payload[offset : offset+subsystemHeaderLen])
-			*ptyRows = binary.BigEndian.Uint32(req.Payload[offset+subsystemHeaderLen : offset+ptyReqMinPayload])
-		}
+func handlePTYReq(req *ssh.Request, term *string, cols, rows *uint32) bool {
+	var payload struct {
+		Term                      string
+		Cols, Rows, Width, Height uint32
+		Modes                     string
 	}
+	if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+		_ = req.Reply(false, nil) //nolint:errcheck // reject malformed PTY request
+		return false
+	}
+	*term, *cols, *rows = payload.Term, payload.Cols, payload.Rows
 	_ = req.Reply(true, nil) //nolint:errcheck // best effort reply
+	return true
 }
 
 func handleWindowChange(req *ssh.Request, ptmxLock *sync.Mutex, ptmx *os.File, ptyCols, ptyRows *uint32) {
@@ -364,6 +366,7 @@ func handleSubsystem(req *ssh.Request, channel ssh.Channel, rootDir string) bool
 func (s *DisposableSSHServer) handleSession(channel ssh.Channel, requests <-chan *ssh.Request) {
 	var (
 		ptyReq   bool
+		ptyTerm  string
 		ptyCols  uint32
 		ptyRows  uint32
 		ptmx     *os.File
@@ -373,8 +376,7 @@ func (s *DisposableSSHServer) handleSession(channel ssh.Channel, requests <-chan
 	for req := range requests {
 		switch req.Type {
 		case "pty-req":
-			ptyReq = true
-			handlePTYReq(req, &ptyCols, &ptyRows)
+			ptyReq = handlePTYReq(req, &ptyTerm, &ptyCols, &ptyRows)
 		case "window-change":
 			handleWindowChange(req, &ptmxLock, ptmx, &ptyCols, &ptyRows)
 		case "subsystem":
@@ -388,11 +390,11 @@ func (s *DisposableSSHServer) handleSession(channel ssh.Channel, requests <-chan
 			}
 			cmdText := string(req.Payload[execHeaderLen:])
 			_ = req.Reply(true, nil) //nolint:errcheck // best effort reply
-			s.runCommand(channel, cmdText, ptyReq, ptyCols, ptyRows, &ptmx, &ptmxLock)
+			s.runCommand(channel, cmdText, ptyReq, ptyTerm, ptyCols, ptyRows, &ptmx, &ptmxLock)
 			return
 		case "shell":
 			_ = req.Reply(true, nil) //nolint:errcheck // best effort reply
-			s.runCommand(channel, "sh", ptyReq, ptyCols, ptyRows, &ptmx, &ptmxLock)
+			s.runCommand(channel, "sh", ptyReq, ptyTerm, ptyCols, ptyRows, &ptmx, &ptmxLock)
 			return
 		default:
 			if req.WantReply {
@@ -406,6 +408,7 @@ func (s *DisposableSSHServer) runCommand(
 	channel ssh.Channel,
 	cmdText string,
 	ptyReq bool,
+	ptyTerm string,
 	ptyCols, ptyRows uint32,
 	ptmxRef **os.File,
 	ptmxLock *sync.Mutex,
@@ -415,28 +418,31 @@ func (s *DisposableSSHServer) runCommand(
 	cmd.Env = s.TmuxEnv
 
 	if ptyReq {
-		ptmx, err := pty.Start(cmd)
+		// SSH's PTY request defines TERM and the initial size. Set both before
+		// starting tmux; resizing after Start races its terminal initialization.
+		cmd.Env = append(append([]string(nil), s.TmuxEnv...), "TERM="+ptyTerm)
+		ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(ptyRows), Cols: uint16(ptyCols)})
 		if err != nil {
 			closeChannelWithStatus(channel, 1)
 			return
 		}
 		ptmxLock.Lock()
 		*ptmxRef = ptmx
-		if ptyRows > 0 && ptyCols > 0 {
-			_ = pty.Setsize( //nolint:errcheck // best effort resize
-				ptmx, &pty.Winsize{Rows: uint16(ptyRows), Cols: uint16(ptyCols)},
-			)
-		}
 		ptmxLock.Unlock()
 
 		go func() {
 			_, _ = io.Copy(ptmx, channel) //nolint:errcheck // copy pty
 		}()
+		outputDone := make(chan struct{})
 		go func() {
+			defer close(outputDone)
 			_, _ = io.Copy(channel, ptmx) //nolint:errcheck // copy pty
 		}()
 
 		err = cmd.Wait()
+		// Process exit does not mean the copy goroutine has forwarded the last
+		// PTY bytes. Closing the SSH channel first can turn valid output into EOF.
+		<-outputDone
 		exitCode := uint32(0)
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
