@@ -100,10 +100,20 @@ By contributing, you agree that your contribution is licensed under the MIT Lice
 Release through the CI workflow in `.github/workflows/ci.yml`:
 
 1. Update `Makefile`, `scripts/package.sh`, `hub/web/package.json`, and both root version entries in `hub/web/package-lock.json` in a PR. Use a stable `X.Y.Z` version.
-2. Wait for the full CI pipeline, including four-platform packaging and checksum verification, to pass. Merge the PR into `main` and wait for that main commit's CI to pass.
+2. Wait for the stable `test` summary check and the full CI pipeline, including four-platform packaging and checksum verification, to pass. Merge the PR into `main` and wait for that main commit's CI to pass.
 3. Create and push `vX.Y.Z` on that commit. CI verifies that the tag matches every source version default and that the commit belongs to main, then reruns all checks on the tagged commit.
 4. The `publish` job consumes only the `release-bundle` produced by its own successful run. It uploads a draft with all four archives and checksums before making it public. Only that job has `contents: write`.
 
 Never manually publish or upload local builds to bypass a failed check. A local green run or an unrelated successful workflow does not authorize a release. Do not move a published tag or overwrite published assets. If draft upload fails, inspect and remove the incomplete draft before rerunning; if the release is already public, fix forward with a new version.
 
-The workflow dependency regression tests run with `go test ./...`; the version validation tests run with `node --test scripts/ci-version.test.mjs`.
+The workflow dependency regression tests run with `go test ./...`; the version validation tests run with `node --test 'scripts/ci-*.test.mjs'`.
+
+## Selective CI
+
+The workflow always starts; it does not use event-level `paths-ignore`. The pinned `dorny/paths-filter` action compares the cumulative PR diff via GitHub's API and the entire main push against its previous SHA. Only root `*.md`, `docs/**`, and `openspec/**` are excluded from application checks. Mixed, unknown, deleted, and runtime help paths take the full path whenever a non-documentation path is present. Release tags bypass filtering and always run full validation and packaging.
+
+Use **`test` as the required status check** in branch protection. It runs with `always()` and explicitly verifies prerequisite results: classification/lightweight checks must succeed; application validation, packaging, and assembly must all succeed for full runs and must be deliberately skipped for confirmed documentation-only runs. A failed or cancelled prerequisite cannot turn into a successful summary merely because dependent jobs were skipped. Conditional jobs alone are unsuitable as the only required check. Existing branch protection rules are not modified by this change.
+
+Only superseded runs of the same PR share a cancelling concurrency group. Main and tag runs use unique run IDs; publication retains its separate, non-cancelling per-tag lock.
+
+References: [GitHub required-check guidance](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks), [paths-filter documentation](https://github.com/dorny/paths-filter/tree/v4.0.2), and [Sentry's selective backend CI](https://github.com/getsentry/sentry/blob/master/.github/workflows/backend.yml).
