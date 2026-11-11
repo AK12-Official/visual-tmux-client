@@ -8,8 +8,8 @@ This is an execution record for `add-desktop-application`, not a claim of releas
 | --- | --- | --- | --- | --- |
 | Ubuntu 24.04 amd64, Wayland | Pending | Pending | Pending | Not validated |
 | Ubuntu 24.04 amd64, X11 | Passed: tagged spike compiled | Automatic auth/workspace/reload passed via HTTP action; remaining GUI checks pending | Pending | Compatibility gate not passed |
-| macOS arm64, documented minimum 12+ | Passed on macos-15 CI | Pending | Pending | Build verified; runtime not validated |
-| macOS amd64, documented minimum 12+ | Passed on macos-15-intel CI | Pending | Pending | Build verified; runtime not validated |
+| macOS arm64, documented minimum 12+ | Passed on macos-15 CI | Auth/workspace/reloads/navigation restriction/clean window close passed; remaining GUI checks pending | Pending | Compatibility gate not passed |
+| macOS amd64, documented minimum 12+ | Passed on macos-15-intel CI | Auth/workspace/reloads/navigation restriction/clean window close passed; remaining GUI checks pending | Pending | Compatibility gate not passed |
 
 Build evidence on Linux does not establish macOS support. X11 evidence does not establish Wayland behavior. Minimum-version support requires compatible SDK/deployment settings and actual runtime evidence, not just compilation on a newer system.
 
@@ -74,9 +74,9 @@ Only the evidence explicitly recorded below is complete; a mount observation is 
 | Check | Ubuntu Wayland | Ubuntu X11 | macOS arm64 | macOS amd64 |
 | --- | --- | --- | --- | --- |
 | Native desktop-tagged build | Same Linux build, display-independent | Passed | Passed, native CI | Passed, native CI |
-| Existing embedded Vue UI loads from dynamic loopback URL | Pending | Passed, authenticated synthetic workspace | Pending | Pending |
-| Reload and initialization occur exactly once | Pending | Authenticated reload passed; frontend initialization/write tests passed | Pending | Pending |
-| HTTP native action boundary | Pending | Owned-origin action passed in WebView; foreign/missing origin and credentials refused by HTTP tests | Pending | Pending |
+| Existing embedded Vue UI loads from dynamic loopback URL | Pending | Passed, authenticated synthetic workspace | Passed, native CI | Passed, native CI |
+| Reload and initialization occur exactly once | Pending | Session-token and fresh-code reloads passed | Both reload modes passed | Both reload modes passed |
+| HTTP native action boundary | Pending | Owned-origin action passed; foreign/missing origins and credentials refused by tests | Owned-origin action passed | Owned-origin action passed |
 | Save chooser, cancellation and byte-equal destination | Pending | Pending | Pending | Pending |
 | CGO-disabled original headless build remains independent | Same Linux build, display-independent | Passed | Passed, native CI and original CI | Passed, native CI and original CI |
 
@@ -102,8 +102,17 @@ Additional implementation evidence in the current working revision:
 - Fresh-code reload needs a new document, not only a fragment change. A public document counter forces full navigation while the one-use code remains in the fragment. The X11 probe passed session-token reload and native-issued fresh-code reload, then closed through the normal window-close hook.
 - Desktop-composed HTTP/WS integration tests verify secret-free bare/public responses, protected host/session routes, one-use launch exchange, foreign WebSocket-origin rejection and terminal session-ticket binding. Existing WS tests additionally retain host/revision/replay binding coverage.
 - Activated external links are routed through a validated HTTP/HTTPS action. GTK WebKit navigation policy also rejects off-origin navigations and responses. The real X11 probe deliberately attempted an external navigation, observed it being blocked, then successfully reloaded the owned workspace. The equivalent WKWebView delegate proxy is implemented but awaits macOS CI.
-- A native packaging script produces Ubuntu DEBs with a launcher/icon and declared GTK4/WebKitGTK runtime dependencies, and development-only macOS app ZIPs. A local DEB was built. The first clean Ubuntu container installed it successfully but failed inside native GUI startup; container renderer/runtime diagnosis remains in progress, so package launch acceptance is not claimed.
-- CI now includes actual synthetic WebView authentication/reload/quit probes on Linux Xvfb and both macOS runners, plus separate development packages. These new checks await execution for this revision.
+- A native packaging script produces Ubuntu DEBs with a launcher/icon and declared GTK4/WebKitGTK runtime dependencies, and development-only macOS app ZIPs. A local DEB was built. The clean Ubuntu container installed it successfully. GUI launch fails because the Docker host denies the user namespaces required by WebKit/bubblewrap, including with container seccomp/AppArmor restrictions removed. WebKit sandboxing was not disabled; clean-container launch acceptance remains pending.
+- CI now includes actual synthetic WebView authentication/reload/quit probes on Linux Xvfb and both macOS runners, plus separate development packages. At commit `68863a4bc68f31ef5ad6d39af0b1d914ac9b1805`, both macOS jobs passed actual navigation restriction, both reload modes and flushed window close in [run 43052971921](https://github.com/AK12-Official/visual-tmux-client/actions/runs/43052971921). Linux timed out downloading from the Azure Ubuntu mirror; the workflow now switches that mirror to the official HTTPS archive. New dialog and signal/focus checks await their next CI execution.
+
+Further lifecycle evidence:
+
+- The native X11 test starts a real window using synthetic services, waits for the authenticated workspace, sends SIGTERM only to its owned child process, and verifies both listener closure and registry re-acquisition. It passed. The fixture runs from `TestMain` on the original native main thread; running the UI inside a Go test worker goroutine was invalid and was corrected.
+- A second native test starts a normal desktop profile with a private config and an explicitly nonexistent tmux path, hides its window, launches the same profile again and observes the first window becoming visible/focused. It passed without starting real tmux. A composed headless-owner test also proves the desktop conflict leaves the original authenticated endpoint and configuration unchanged.
+- `TestPreferencesSurviveConfirmedQuitAndDifferentPort` persists locale/font/sidebar/recent-host/local+remote ordering and pins, confirms lifecycle shutdown, reserves the previous port, starts a new controller and verifies every value plus absence of either bearer in the durable JSON.
+- The new desktop package installs `testutil.ParentGuard`. `TestQuitRelaunchPreservesAttachedLocalAndRemoteTmux` uses a private `testutil.SocketDir`, explicit short sockets, scrubbed child environments and the existing `NewDisposableSSHServer`. It creates and attaches local and real SSH-backed tmux sessions, shuts down and relaunches the controller, then lists and reattaches both sessions. The agent's ancestry was checked as bash → codex with no tmux environment before these tests.
+- Repetition exposed a shared store bug: closing the owner descriptor could leave `flock` held through a concurrent fork's temporary duplicate. A deterministic duplicate-descriptor test failed before the fix. Store close now explicitly unlocks before closing; that test and 20 consecutive real local/SSH shutdown/relaunch cycles passed without delays or retries. Existing ownership checks and isolation helpers were retained.
+- The X11 probe also passed actual confirmation cancellation/acceptance and a native prompt returning a Unicode fixture string. This is a programmatic native-control test, not an IME claim. WKWebView confirm/prompt/alert delegate adapters are implemented because the pinned Wails Cocoa delegate does not supply them; their probe awaits the next macOS run.
 
 Latest local commands/results:
 
@@ -126,7 +135,7 @@ Latest local commands/results:
 
 The installed linter's Go export-data reader could not consume the host Go 1.27.3 cache. Checks were rerun successfully with Go 1.26.10; this did not require weakening lint rules or changing the headless runtime contract. Native GUI probes use fake sessions only. Full Go regressions use the repository's existing disposable tmux test fixtures; green tests are not a claim of universal isolation.
 
-Overall tracked progress is 16/35. The compatibility probe remains disposable; a separate normal desktop entry is now implemented. Single-instance focus verification, complete downloads/clipboard/fullscreen runtime acceptance, package installation and untested platforms remain open. The HTTP architecture change itself is approved and resolved; the remaining gate is execution evidence and unfinished integration, not another request to approve that architecture.
+Overall tracked progress is 22/35. The compatibility probe remains disposable; a separate normal desktop entry is now implemented. Single-instance focus verification, complete downloads/clipboard/fullscreen runtime acceptance, package installation and untested platforms remain open. The HTTP architecture change itself is approved and resolved; the remaining gate is execution evidence and unfinished integration, not another request to approve that architecture.
 
 ### Remote compatibility workflow
 

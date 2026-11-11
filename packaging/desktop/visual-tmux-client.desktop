@@ -6,4 +6,4 @@ Exec=visual-tmux-desktop
 Icon=visual-tmux-client
 Terminal=false
 Categories=Development;TerminalEmulator;
-StartupWMClass=visual-tmux-client
+StartupWMClass=io.github.ak12official.visualtmuxclient

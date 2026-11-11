@@ -9,8 +9,8 @@
 - [x] 2.1 Add desktop configuration loading with OS-user implicit discovery, explicit file selection, configuration-relative paths and desktop-managed address/token/origin; verify precedence, malformed config, working-directory independence and secret-redacted diagnostics with table-driven tests while existing config tests remain green.
 - [x] 2.2 Add desktop tmux executable resolution using explicit config, PATH and documented macOS fallback locations without a shell; verify resolution order and actionable missing-local-tmux behavior using injected lookups, with remote host access unaffected.
 - [x] 2.3 Add the testable desktop controller around `app.New/Start/Addr/Shutdown`, optional desktop-only handler registration and a readiness check; verify startup order and cleanup on state, listener, readiness and window-construction failures using fake services/native adapters.
-- [ ] 2.4 Wire the native main-thread window to the controller, observe backend failures and add actionable startup/runtime error surfaces; verify the window loads the actual dynamic port and backend failure releases the listener and registry lock.
-- [ ] 2.5 Add single-instance focus behavior for the same desktop profile and retain existing registry ownership enforcement; verify a repeated desktop launch focuses its window and a headless state owner produces a conflict without modifying or stopping that owner.
+- [x] 2.4 Wire the native main-thread window to the controller, observe backend failures and add actionable startup/runtime error surfaces; verify the window loads the actual dynamic port and backend failure releases the listener and registry lock.
+- [x] 2.5 Add single-instance focus behavior for the same desktop profile and retain existing registry ownership enforcement; verify a repeated desktop launch focuses its window and a headless state owner produces a conflict without modifying or stopping that owner.
 - [x] 2.6 Keep desktop imports behind explicit native build boundaries and implement help/version without GUI or state initialization; verify ordinary `go test ./...`, CGO-disabled headless builds and informational desktop flags require no display or state store.
 
 ## 3. Implement launch authentication and frontend initialization
@@ -26,7 +26,7 @@
 - [x] 4.2 Add desktop-only authenticated snapshot read/update APIs with version/conflict handling; verify only current authenticated callers can read/write allowed preferences and rejected updates leave the prior durable snapshot intact.
 - [x] 4.3 Install a seeded synchronous preference adapter before i18n/application module evaluation and queue serialized durable updates; verify first-render locale, configured font clamping, sidebar/recent host restoration, host-scoped ordering/pins and unchanged browser localStorage behavior.
 - [x] 4.4 Add visible persistence errors and bounded pending-write flush for normal quit; verify rapid consecutive updates preserve the latest value, flush failure is reported and an unwritable store leaves terminals and editor drafts usable.
-- [ ] 4.5 Exercise a complete preference-change, normal-quit and restart sequence with a different listener port; record that all specified preferences restore and no credentials appear in `desktop-preferences.json`.
+- [x] 4.5 Exercise a complete preference-change, normal-quit and restart sequence with a different listener port; record that all specified preferences restore and no credentials appear in `desktop-preferences.json`.
 
 ## 5. Adapt native interactions without changing transport
 
@@ -38,10 +38,10 @@
 
 ## 6. Complete quit and failure lifecycle
 
-- [ ] 6.1 Add one idempotent controller state machine for close, Quit/Cmd+Q, signal, startup failure and backend failure; verify overlapping events perform cleanup once with bounded contexts and do not depend on native `Run()` returning.
+- [x] 6.1 Add one idempotent controller state machine for close, Quit/Cmd+Q, signal, startup failure and backend failure; verify overlapping events perform cleanup once with bounded contexts and do not depend on native `Run()` returning.
 - [ ] 6.2 Connect user-initiated quit to editor dirty-state confirmation and preference flush; verify cancel preserves drafts/attachments, confirmed discard proceeds and the only window closing exits the application on both platforms.
-- [ ] 6.3 Verify partial-start failure, normal quit and signal cleanup release HTTP/file/SSH/registry resources using injected failures and isolated integration fixtures; ensure diagnostics do not contain launch or bearer credentials.
-- [ ] 6.4 Verify quit/relaunch preserves local and remote tmux sessions using existing disposable-server/SSH fixtures; any new tmux-starting package must install `testutil.ParentGuard`, use `testutil.SocketDir`, scrub child TMUX/TMUX_PANE, create private TMUX_TMPDIR, name an explicit socket and clean up through the same helper. Run outside tmux and record survival/reattachment results without ad hoc tmux commands or unrelated server cleanup.
+- [x] 6.3 Verify partial-start failure, normal quit and signal cleanup release HTTP/file/SSH/registry resources using injected failures and isolated integration fixtures; ensure diagnostics do not contain launch or bearer credentials.
+- [x] 6.4 Verify quit/relaunch preserves local and remote tmux sessions using existing disposable-server/SSH fixtures; any new tmux-starting package must install `testutil.ParentGuard`, use `testutil.SocketDir`, scrub child TMUX/TMUX_PANE, create private TMUX_TMPDIR, name an explicit socket and clean up through the same helper. Run outside tmux and record survival/reattachment results without ad hoc tmux commands or unrelated server cleanup.
 
 ## 7. Build packages and document operation
 

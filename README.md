@@ -74,6 +74,24 @@ Or pass a custom YAML configuration file:
 
 Run `./visual-tmux-client --help` to see all flags and environment variables.
 
+## Experimental desktop application
+
+The desktop entry hosts the same embedded Vue interface and Go HTTP/WebSocket backend in a native window. It signs in automatically. Development builds target Ubuntu 24.04 amd64 and macOS arm64/amd64; the full desktop acceptance matrix is still in progress, including Wayland and interactive input/file workflows. See [build and operation instructions](docs/desktop.md) and [actual verification results](docs/desktop-verification.md) before treating a target as supported.
+
+Build the frontend, then build the native entry with Go 1.26.10 and CGO enabled:
+
+```sh
+npm --prefix hub/web ci
+npm --prefix hub/web run build
+cd hub
+go build -tags desktop -o ../visual-tmux-desktop ./cmd/visual-tmux-desktop
+../visual-tmux-desktop
+```
+
+Linux builds need `pkg-config`, `libgtk-4-dev` and `libwebkitgtk-6.0-dev`; macOS builds need Xcode Command Line Tools and the deployment-target flags in the desktop guide. Installed desktop packages need neither Go nor Node. Local sessions still require tmux.
+
+Use `--config <file>` for an explicit configuration. Otherwise desktop mode discovers `visual-tmux-client/visual-tmux-client.yaml` under the OS user configuration directory. It owns the loopback address, fresh token and same-origin policy; `--addr` is unavailable. A headless process owning the same host state must be closed before desktop startup. Desktop UI preferences persist separately from the changing port; credentials and editor drafts are excluded. Closing the window or choosing Quit confirms unsaved edits and waits for preference writes. Returning to the existing server command remains available after closing the desktop.
+
 ## Configuration
 
 Visual Tmux Client supports external YAML configuration, environment variables, and CLI flags.

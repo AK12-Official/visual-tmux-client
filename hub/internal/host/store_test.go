@@ -8,8 +8,40 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
+
+func TestStoreCloseReleasesOwnershipWithDuplicatedDescriptor(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	store, err := OpenStore(ctx, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	// A fork temporarily duplicates open file descriptions before exec closes
+	// CLOEXEC descriptors. Model that interval without starting another process.
+	duplicate, err := syscall.Dup(int(store.lock.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Close(duplicate) //nolint:errcheck // test-only duplicated descriptor
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := OpenStore(ctx, directory)
+	if err != nil {
+		t.Fatalf("closed store retained ownership through a duplicated descriptor: %v", err)
+	}
+	if err := replacement.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestStoreTransactionsAndRestart(t *testing.T) {
 	ctx := context.Background()

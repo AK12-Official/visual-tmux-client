@@ -26,7 +26,8 @@ case "$(uname -s)/$(uname -m)" in
       "$root/usr/share/icons/hicolor/scalable/apps" "$root/usr/share/doc/visual-tmux-desktop"
     cp "$binary" "$root/usr/bin/visual-tmux-desktop"
     chmod 755 "$root/usr/bin/visual-tmux-desktop"
-    cp "$project_dir/packaging/desktop/visual-tmux-client.desktop" "$root/usr/share/applications/"
+    cp "$project_dir/packaging/desktop/visual-tmux-client.desktop" \
+      "$root/usr/share/applications/io.github.ak12official.visualtmuxclient.desktop"
     cp "$project_dir/packaging/desktop/visual-tmux-client.svg" "$root/usr/share/icons/hicolor/scalable/apps/"
     cp "$project_dir/LICENSE" "$root/usr/share/doc/visual-tmux-desktop/copyright"
     cp "$project_dir/docs/desktop-verification.md" "$root/usr/share/doc/visual-tmux-desktop/VERIFICATION.md"

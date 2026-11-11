@@ -48,9 +48,9 @@ type desktopWindow struct {
 	temporaryDir    string
 	probe           bool
 	passed          atomic.Bool
-	quitApproved    atomic.Bool
 	frontendReady   atomic.Bool
 	navigationReady atomic.Bool
+	dialogsPassed   atomic.Bool
 	stop            sync.Once
 	stopErr         error
 }
@@ -138,6 +138,7 @@ func (s *desktopWindow) run() error {
 	js := ""
 	if s.probe {
 		s.controller.Bridge.Register("probe", http.HandlerFunc(s.probeMounted))
+		s.attachDialogProbe()
 		js = probeJS
 	}
 	window := s.native.Window.NewWithOptions(application.WebviewWindowOptions{
@@ -154,7 +155,7 @@ func (s *desktopWindow) run() error {
 	if err := s.native.Run(); err != nil {
 		return err
 	}
-	if s.probe && (!s.passed.Load() || !s.quitApproved.Load()) {
+	if s.probe && (!s.passed.Load() || !s.lifecycle.Confirmed()) {
 		return errors.New("native authentication/reload/flushed-quit probe did not pass")
 	}
 	return nil
@@ -170,6 +171,10 @@ func (s *desktopWindow) probeMounted(w http.ResponseWriter, r *http.Request) {
 	}
 	switch result.Stage {
 	case probeFinalStage:
+		if !s.dialogsPassed.Load() {
+			http.Error(w, "native dialogs did not pass", http.StatusServiceUnavailable)
+			return
+		}
 		s.passed.Store(true)
 		fmt.Fprintln(os.Stderr, "spike: PASS authenticated HTTP action and both reload modes; closing window")
 		time.AfterFunc(probeCloseDelay, func() { s.window.Load().Close() })
@@ -192,6 +197,7 @@ func (s *desktopWindow) probeMounted(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *desktopWindow) watch() {
+	go s.controller.WatchBackend(s.native.Context(), s.backendFailed)
 	var timeout <-chan time.Time
 	if s.probe {
 		timer := time.NewTimer(probeTimeout)
@@ -199,19 +205,6 @@ func (s *desktopWindow) watch() {
 		timeout = timer.C
 	}
 	select {
-	case err := <-s.controller.Errors:
-		if state := s.lifecycle.State(); state == desktop.Stopping || state == desktop.Stopped {
-			return
-		}
-		s.frontendReady.Store(false)
-		if cleanupErr := s.close(); cleanupErr != nil {
-			fmt.Fprintln(os.Stderr, "desktop backend cleanup:", cleanupErr)
-		}
-		fmt.Fprintln(os.Stderr, "desktop backend stopped:", err)
-		dialog := s.native.Dialog.Error().SetTitle("Backend stopped / 后端已停止").
-			SetMessage("Restart the application. / 请重启应用。 Configuration and state ownership may need attention.")
-		dialog.AddButton("Quit / 退出").SetAsDefault().OnClick(s.lifecycle.Stop)
-		dialog.Show()
 	case <-timeout:
 		fmt.Fprintln(os.Stderr, "spike: FAIL native load/reload probe timed out")
 		s.lifecycle.Stop()
@@ -234,10 +227,39 @@ const probeJS = `(() => {
    body: JSON.stringify({stage})
   });
   if (!response.ok) return;
-  if (stage === 0) { sessionStorage.setItem('vtc-spike-stage','1'); location.reload(); }
+  if (stage === 0) {
+   const action = async (name, body) => {
+    const response = await fetch('/api/desktop/'+name, {
+     method:'POST', headers:{'Content-Type':'application/json',
+      Authorization:'Bearer '+sessionStorage.getItem('vtc:desktop-token')}, body:JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error('Native dialog probe failed');
+   };
+   for (const approved of [false,true]) {
+    await action('probe-dialog',{approved,text:''});
+    if (window.confirm('Native confirmation probe / 原生确认测试') !== approved) throw new Error('Confirmation mismatch');
+   }
+   const text = '中文-输入-✓';
+   await action('probe-dialog',{approved:true,text});
+   if (window.prompt('Native input probe / 原生输入测试','original') !== text) throw new Error('Prompt mismatch');
+   await action('probe-dialog-result',{ok:true});
+   sessionStorage.setItem('vtc-spike-stage','1'); location.reload();
+  }
   else if (stage === 1) {
    const result = await response.json();
    sessionStorage.setItem('vtc-spike-stage','2'); location.replace(result.launchURL);
   } else sessionStorage.removeItem('vtc-spike-stage');
  },100);
 })()`
+
+func (s *desktopWindow) backendFailed(err error) {
+	s.frontendReady.Store(false)
+	if cleanupErr := s.close(); cleanupErr != nil {
+		fmt.Fprintln(os.Stderr, "desktop backend cleanup:", cleanupErr)
+	}
+	fmt.Fprintln(os.Stderr, "desktop backend stopped:", err)
+	dialog := s.native.Dialog.Error().SetTitle("Backend stopped / 后端已停止").
+		SetMessage("Restart the application. / 请重启应用。 Configuration and state ownership may need attention.")
+	dialog.AddButton("Quit / 退出").SetAsDefault().OnClick(s.lifecycle.Stop)
+	dialog.Show()
+}

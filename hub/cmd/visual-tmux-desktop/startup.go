@@ -39,6 +39,7 @@ func newDesktop(configPath string) (*desktopWindow, error) {
 	if cfg.Hosts.StateDir == "" {
 		cfg.Hosts.StateDir = filepath.Join(userConfig, "visual-tmux-client")
 	}
+	fmt.Fprintln(os.Stderr, "desktop manages server.addr, auth.token and websocket.origin")
 	profile := cfg.Hosts.StateDir
 	if resolved, err := filepath.EvalSymlinks(profile); err == nil {
 		profile = resolved
@@ -56,6 +57,7 @@ func (s *desktopWindow) createNative(profile string) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	options := application.Options{
 		Name:                        "Visual Tmux Client",
+		Linux:                       application.LinuxOptions{ApplicationID: "io.github.ak12official.visualtmuxclient"},
 		Logger:                      logger,
 		Mac:                         application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: true},
 		DisableDefaultSignalHandler: true,
@@ -74,7 +76,7 @@ func (s *desktopWindow) createNative(profile string) {
 		PostShutdown: func() {
 			// Darwin can terminate without Run returning. A forced probe timeout
 			// must still fail CI instead of producing a successful process exit.
-			if s.probe && (!s.passed.Load() || !s.quitApproved.Load()) {
+			if s.probe && (!s.passed.Load() || !s.lifecycle.Confirmed()) {
 				os.Exit(1)
 			}
 		},

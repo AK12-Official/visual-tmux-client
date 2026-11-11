@@ -36,6 +36,7 @@ type Controller struct {
 	budget      time.Duration
 	stop        sync.Once
 	stopErr     error
+	stopping    chan struct{}
 }
 
 func Start(
@@ -83,7 +84,7 @@ func start(
 		return nil, fmt.Errorf("desktop backend initialization: %w", err)
 	}
 	workerCtx, cancel := context.WithCancel(ctx)
-	controller := &Controller{Bridge: bridge, backend: instance, cancel: cancel,
+	controller := &Controller{Bridge: bridge, backend: instance, cancel: cancel, stopping: make(chan struct{}),
 		budget: owned.Shutdown.AttachmentTimeout.Duration() + owned.Shutdown.HTTPTimeout.Duration()}
 	channel, err := instance.Start(workerCtx)
 	if err != nil {
@@ -128,12 +129,36 @@ func checkReady(ctx context.Context, origin string) error {
 // fresh timeout context because native/application worker contexts may be done.
 func (c *Controller) Shutdown() error {
 	c.stop.Do(func() {
+		close(c.stopping)
 		c.cancel()
 		ctx, cancel := context.WithTimeout(context.Background(), c.budget)
 		defer cancel()
 		c.stopErr = c.backend.Shutdown(ctx)
 	})
 	return c.stopErr
+}
+
+func (c *Controller) Stopping() <-chan struct{} { return c.stopping }
+
+func (c *Controller) Addr() string { return c.backend.Addr() }
+
+// WatchBackend releases listener, file/SSH services and registry ownership
+// before reporting a runtime failure. Expected shutdown never reports failure.
+func (c *Controller) WatchBackend(ctx context.Context, report func(error)) {
+	select {
+	case err := <-c.Errors:
+		select {
+		case <-c.stopping:
+			return
+		default:
+		}
+		if err == nil {
+			err = errors.New("desktop backend stopped unexpectedly; restart the application")
+		}
+		report(errors.Join(err, c.Shutdown()))
+	case <-c.stopping:
+	case <-ctx.Done():
+	}
 }
 
 // RunWindow releases acquired state/listener resources even if window creation

@@ -72,6 +72,24 @@ VISUAL_TMUX_CLIENT_TOKEN="$(openssl rand -base64 32)" ./visual-tmux-client
 
 运行 `./visual-tmux-client --help` 可查看全部参数和环境变量。
 
+## 实验性桌面应用
+
+桌面入口通过原生窗口承载现有 Vue 前端，并在进程内运行原有 Go HTTP/WebSocket 后端，自动完成登录。开发版本面向 Ubuntu 24.04 amd64 和 macOS arm64/amd64；完整桌面验收仍在进行，Wayland、交互输入和文件操作等不能视为已全部支持。请先查看[构建与运行说明](docs/desktop.md)及[实际验证记录](docs/desktop-verification.md)。
+
+先构建前端，再使用 Go 1.26.10、启用 CGO 构建桌面入口：
+
+```sh
+npm --prefix hub/web ci
+npm --prefix hub/web run build
+cd hub
+go build -tags desktop -o ../visual-tmux-desktop ./cmd/visual-tmux-desktop
+../visual-tmux-desktop
+```
+
+Linux 构建需要 `pkg-config`、`libgtk-4-dev`、`libwebkitgtk-6.0-dev`；macOS 需要 Xcode Command Line Tools 和桌面指南中的部署目标参数。安装后的桌面包不需要 Go 或 Node，本地会话仍需要 tmux。
+
+可用 `--config <文件>` 显式指定配置；否则从系统用户配置目录下发现 `visual-tmux-client/visual-tmux-client.yaml`。桌面模式管理 loopback 地址、随机 Token 和同源策略，不提供 `--addr`。若已有 headless 进程占用同一主机状态目录，需要先关闭它。界面偏好独立于动态端口保存，不持久化凭据或编辑草稿。关闭窗口或选择 Quit 会先确认未保存编辑，再等待偏好写入；关闭桌面后仍可改用原有服务器命令。
+
 ## 配置说明
 
 Visual Tmux Client 支持外部 YAML 配置文件、环境变量和命令行参数。

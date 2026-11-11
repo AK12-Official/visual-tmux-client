@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 )
 
 func (s *desktopWindow) attachLifecycle(window *application.WebviewWindow) {
-	requests := make(chan uint64, 1)
+	requests := make(chan struct{}, 1)
 	s.lifecycle = desktop.NewLifecycle(s.close, func(err error) {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "desktop shutdown:", err)
@@ -24,11 +25,11 @@ func (s *desktopWindow) attachLifecycle(window *application.WebviewWindow) {
 		s.native.Quit()
 	}, func(id uint64) {
 		if !s.frontendReady.Load() {
-			s.lifecycle.Respond(id, true)
+			s.confirmUnavailableWorkspace(window, id)
 			return
 		}
 		select {
-		case requests <- id:
+		case requests <- struct{}{}:
 		default:
 		}
 	})
@@ -63,7 +64,6 @@ func (s *desktopWindow) attachLifecycle(window *application.WebviewWindow) {
 			return
 		}
 		if s.probe && body.Approved {
-			s.quitApproved.Store(true)
 			fmt.Fprintln(os.Stderr, "spike: frontend approved quit after preference flush")
 		}
 		desktop.WriteJSON(w, map[string]bool{"ok": true})
@@ -106,11 +106,15 @@ func (s *desktopWindow) attachMenu(window *application.WebviewWindow) {
 	appMenu.Add("Quit / 退出").SetAccelerator("CmdOrCtrl+Q").OnClick(func(*application.Context) {
 		s.lifecycle.RequestQuit()
 	})
-	// No default Edit menu: Ctrl+C with no selection must reach the terminal.
+	// Cocoa's Edit roles supply Cmd+C/Cmd+V to the WebView. Linux gets no
+	// Ctrl+C menu accelerator, so terminal interrupts keep reaching xterm.
+	if runtime.GOOS == "darwin" {
+		menu.AddRole(application.EditMenu)
+	}
 	s.native.Menu.Set(menu)
 }
 
-func (s *desktopWindow) attachQuitPoll(requests <-chan uint64) {
+func (s *desktopWindow) attachQuitPoll(requests <-chan struct{}) {
 	s.controller.Bridge.Register("quit-poll", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct{}
 		if desktop.DecodeJSON(r, &body) != nil {
@@ -121,14 +125,27 @@ func (s *desktopWindow) attachQuitPoll(requests <-chan uint64) {
 		defer timer.Stop()
 		var id uint64
 		select {
-		case id = <-requests:
+		case <-requests:
+			id = s.lifecycle.PendingRequest()
 		case <-timer.C:
 		case <-r.Context().Done():
 			return
 		case <-s.lifecycle.Stopping():
+		case <-s.controller.Stopping():
 		}
 		desktop.WriteJSON(w, map[string]uint64{"id": id})
 	}))
+}
+
+func (s *desktopWindow) confirmUnavailableWorkspace(window *application.WebviewWindow, id uint64) {
+	dialog := s.native.Dialog.Question().AttachToWindow(window).
+		SetTitle("Close application? / 关闭应用？").
+		SetMessage("Workspace confirmation is unavailable. Unsaved data may be lost. / 工作区暂不可用，未保存的数据可能丢失。")
+	dialog.AddButton("Cancel / 取消").SetAsCancel().SetAsDefault().OnClick(func() {
+		s.lifecycle.Respond(id, false)
+	})
+	dialog.AddButton("Close / 关闭").OnClick(func() { s.lifecycle.Respond(id, true) })
+	dialog.Show()
 }
 
 func (s *desktopWindow) freshLaunchURL() (string, error) {

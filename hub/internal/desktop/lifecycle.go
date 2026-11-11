@@ -9,16 +9,17 @@ import (
 // A rejected or stale response never discards the running document. Cleanup and
 // native exit happen once, independently of the native Run method returning.
 type Lifecycle struct {
-	mu       sync.Mutex
-	state    string
-	request  uint64
-	timer    *time.Timer
-	cleanup  func() error
-	exit     func(error)
-	confirm  func(uint64)
-	once     sync.Once
-	done     chan struct{}
-	stopping chan struct{}
+	mu        sync.Mutex
+	state     string
+	request   uint64
+	confirmed bool
+	timer     *time.Timer
+	cleanup   func() error
+	exit      func(error)
+	confirm   func(uint64)
+	once      sync.Once
+	done      chan struct{}
+	stopping  chan struct{}
 }
 
 const (
@@ -38,6 +39,21 @@ func (l *Lifecycle) State() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.state
+}
+
+func (l *Lifecycle) PendingRequest() uint64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.state == Confirming {
+		return l.request
+	}
+	return 0
+}
+
+func (l *Lifecycle) Confirmed() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.confirmed
 }
 
 // RequestQuit returns immediately so native UI callbacks cannot deadlock on a
@@ -65,6 +81,7 @@ func (l *Lifecycle) Respond(id uint64, approved bool) bool {
 	l.timer.Stop()
 	l.state = Running
 	if approved {
+		l.confirmed = true
 		l.state = Stopping
 	}
 	l.mu.Unlock()

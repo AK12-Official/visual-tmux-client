@@ -51,8 +51,20 @@ jobs:
       - name: Install Linux native development dependencies
         if: runner.os == 'Linux'
         run: |
+          # The image's Azure mirror repeatedly timed out for package downloads.
+          for source in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+            if [ -f "$source" ]; then
+              sudo sed -i \
+                -e 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+                -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' "$source"
+            fi
+          done
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo apt-get install --yes --no-install-recommends pkg-config libgtk-4-dev libwebkitgtk-6.0-dev xvfb xauth dbus-x11
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=30 install --yes --no-install-recommends \
+            pkg-config libgtk-4-dev libwebkitgtk-6.0-dev xvfb xauth dbus-x11 tmux
+      - name: Ensure disposable tmux fixture dependency on macOS
+        if: runner.os == 'macOS'
+        run: command -v tmux >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install tmux
       - name: Record native architecture and toolchain
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
@@ -73,8 +85,12 @@ jobs:
         working-directory: hub
         run: |
           mkdir -p ../desktop-build
-          go build -tags desktop -ldflags '-X main.defaultSpike=true' -o ../desktop-build/visual-tmux-desktop-spike ./cmd/visual-tmux-desktop
-          go build -tags desktop -o ../desktop-build/visual-tmux-desktop ./cmd/visual-tmux-desktop
+          native_linker_flags=''
+          if [ "$RUNNER_OS" = macOS ]; then
+            native_linker_flags='-extldflags=-mmacosx-version-min=12.0'
+          fi
+          go build -tags desktop -ldflags "-X main.defaultSpike=true $native_linker_flags" -o ../desktop-build/visual-tmux-desktop-spike ./cmd/visual-tmux-desktop
+          go build -tags desktop -ldflags "$native_linker_flags" -o ../desktop-build/visual-tmux-desktop ./cmd/visual-tmux-desktop
           CGO_ENABLED=0 go build -o ../desktop-build/visual-tmux-client ./cmd/visual-tmux-client
           ../desktop-build/visual-tmux-client --version
       - name: Exercise real WebView authentication, reload and flushed quit
@@ -124,6 +140,14 @@ jobs:
           A successful build does not establish GUI, minimum-OS, Wayland or input-method acceptance.
           See VERIFICATION.md for pending checks. This workflow does not publish a release.
           NOTE
+      - name: Verify native signal cleanup
+        working-directory: hub
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            GSK_RENDERER=cairo dbus-run-session -- xvfb-run -a go test -tags desktop ./cmd/visual-tmux-desktop
+          else
+            go test -tags desktop -ldflags '-extldflags=-mmacosx-version-min=12.0' ./cmd/visual-tmux-desktop
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-compatibility-${{ runner.os }}-${{ matrix.arch }}
