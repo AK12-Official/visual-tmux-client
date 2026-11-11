@@ -94,6 +94,7 @@ jobs:
         working-directory: hub
         run: go test -race ./internal/config ./internal/desktop ./internal/desktop/spike ./internal/app
       - name: Build native compatibility entry and verify headless independence
+        id: native-build
         working-directory: hub
         run: |
           mkdir -p ../desktop-build
@@ -114,6 +115,7 @@ jobs:
             go test -tags desktop -ldflags '-extldflags=-mmacosx-version-min=12.0' ./cmd/visual-tmux-desktop
           fi
       - name: Exercise real WebView authentication, reload and flushed quit
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
         working-directory: desktop-build
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
@@ -167,6 +169,24 @@ jobs:
           if-no-files-found: error
       - name: Package development desktop application
         run: DESKTOP_BINARY=desktop-build/visual-tmux-desktop sh scripts/package-desktop.sh
+      - name: Exercise packaged macOS launch through Launch Services
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p packaged-launch
+          set -- desktop-packages/*_development-unsigned.zip
+          test "$#" -eq 1
+          ditto -x -k "$1" packaged-launch
+          app="$PWD/packaged-launch/Visual Tmux Client.app"
+          codesign --verify --strict "$app"
+          file "$app/Contents/MacOS/visual-tmux-desktop"
+          # Launch Services is also used by Finder. Probe mode owns temporary
+          # state and cannot use saved hosts or start a real tmux process.
+          PATH=/usr/bin:/bin /usr/bin/open -n -W -a "$app" \
+            --stdout "$PWD/packaged-launch/stdout.log" --stderr "$PWD/packaged-launch/stderr.log" \
+            --args --spike --probe
+          cat packaged-launch/stderr.log
+          rg -F 'spike: PASS authenticated HTTP action and both reload modes' packaged-launch/stderr.log
+          rg -F 'spike: frontend approved quit after preference flush' packaged-launch/stderr.log
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-development-${{ runner.os }}-${{ matrix.arch }}

@@ -86,6 +86,7 @@ func TestNativeSecondLaunchFocusesBeforeOpeningRegistry(t *testing.T) {
 		t.Fatalf("second launch opened/conflicted with registry: %v %s", err, output)
 	}
 	if !scanFixtureMarker(t, scanner, "FOCUS_FIXTURE_VISIBLE") {
+		t.Logf("first native fixture exit: %v", first.Wait())
 		t.Fatal("second launch did not focus first window")
 	}
 	if err := first.Process.Signal(syscall.SIGTERM); err != nil {

@@ -68,6 +68,9 @@ func (s *desktopWindow) createNative(profile string) {
 			return false
 		},
 		OnShutdown: func() {
+			if os.Getenv("VTC_NATIVE_FIXTURE_MODE") == "focus" {
+				fmt.Fprintln(os.Stderr, "focus fixture: native shutdown")
+			}
 			if err := s.close(); err != nil {
 				fmt.Fprintln(os.Stderr, "desktop shutdown:", err)
 			}
@@ -84,6 +87,9 @@ func (s *desktopWindow) createNative(profile string) {
 		options.SingleInstance = &application.SingleInstanceOptions{
 			UniqueID: profile,
 			OnSecondInstanceLaunch: func(application.SecondInstanceData) {
+				if os.Getenv("VTC_NATIVE_FIXTURE_MODE") == "focus" {
+					fmt.Fprintln(os.Stderr, "focus fixture: second launch received")
+				}
 				if window := s.window.Load(); window != nil {
 					window.Show()
 					window.Focus()
