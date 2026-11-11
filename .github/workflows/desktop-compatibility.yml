@@ -2,11 +2,17 @@ name: Desktop compatibility
 
 on:
   workflow_dispatch:
+    inputs:
+      notarize:
+        description: 'Sign and notarize macOS artifacts (main branch only; requires secrets)'
+        type: boolean
+        default: false
   pull_request:
     paths:
       - 'hub/**'
       - '.github/workflows/desktop-compatibility.yml'
       - 'scripts/package-desktop.sh'
+      - 'scripts/notarize-desktop-macos.sh'
       - 'packaging/desktop/**'
 
 permissions:
@@ -36,6 +42,11 @@ jobs:
       GOTOOLCHAIN: go1.26.10
       MACOSX_DEPLOYMENT_TARGET: '12.0'
     steps:
+      - name: Reject signing requests outside main
+        if: github.event_name == 'workflow_dispatch' && inputs.notarize && github.ref != 'refs/heads/main'
+        run: |
+          echo 'Notarization is restricted to a manual run on main.' >&2
+          exit 1
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -94,6 +105,14 @@ jobs:
           go build -tags desktop -ldflags "$native_linker_flags" -o ../desktop-build/visual-tmux-desktop ./cmd/visual-tmux-desktop
           CGO_ENABLED=0 go build -o ../desktop-build/visual-tmux-client ./cmd/visual-tmux-client
           ../desktop-build/visual-tmux-client --version
+      - name: Verify native signal cleanup
+        working-directory: hub
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            GSK_RENDERER=cairo dbus-run-session -- xvfb-run -a go test -tags desktop ./cmd/visual-tmux-desktop
+          else
+            go test -tags desktop -ldflags '-extldflags=-mmacosx-version-min=12.0' ./cmd/visual-tmux-desktop
+          fi
       - name: Exercise real WebView authentication, reload and flushed quit
         working-directory: desktop-build
         run: |
@@ -141,14 +160,6 @@ jobs:
           A successful build does not establish GUI, minimum-OS, Wayland or input-method acceptance.
           See VERIFICATION.md for pending checks. This workflow does not publish a release.
           NOTE
-      - name: Verify native signal cleanup
-        working-directory: hub
-        run: |
-          if [ "$RUNNER_OS" = Linux ]; then
-            GSK_RENDERER=cairo dbus-run-session -- xvfb-run -a go test -tags desktop ./cmd/visual-tmux-desktop
-          else
-            go test -tags desktop -ldflags '-extldflags=-mmacosx-version-min=12.0' ./cmd/visual-tmux-desktop
-          fi
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-compatibility-${{ runner.os }}-${{ matrix.arch }}
@@ -160,4 +171,24 @@ jobs:
         with:
           name: desktop-development-${{ runner.os }}-${{ matrix.arch }}
           path: desktop-packages/
+          if-no-files-found: error
+      - name: Optional Developer ID signing and notarization
+        if: runner.os == 'macOS' && github.event_name == 'workflow_dispatch' && inputs.notarize && github.ref == 'refs/heads/main'
+        timeout-minutes: 25
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_API_KEY_P8_BASE64: ${{ secrets.MACOS_NOTARY_API_KEY_P8_BASE64 }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          set -- desktop-packages/*_development-unsigned.zip
+          test "$#" -eq 1
+          sh scripts/notarize-desktop-macos.sh "$1"
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'macOS' && github.event_name == 'workflow_dispatch' && inputs.notarize && github.ref == 'refs/heads/main'
+        with:
+          name: desktop-notarized-${{ matrix.arch }}
+          path: desktop-notarized/
           if-no-files-found: error

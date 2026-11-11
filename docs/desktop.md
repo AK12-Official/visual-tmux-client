@@ -73,6 +73,8 @@ DESKTOP_BINARY=./visual-tmux-desktop sh scripts/package-desktop.sh
 
 The script produces an Ubuntu amd64 DEB with GTK4/WebKitGTK runtime dependencies, launcher and icon, or an architecture-specific macOS `.app` ZIP. The macOS development archive is labeled `development-unsigned`: it uses ad-hoc signing with no Developer ID or notarization. These are development artifacts, not a desktop release. CI publishes them as workflow artifacts and preserves existing headless releases.
 
+Optional signing is available only through an explicitly selected `notarize` input on a manual Desktop compatibility workflow run on `main`. Configure repository secrets `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGNING_IDENTITY` (a Developer ID Application identity), `MACOS_NOTARY_API_KEY_P8_BASE64`, `MACOS_NOTARY_KEY_ID` and `MACOS_NOTARY_ISSUER_ID`. Pull-request and ordinary unsigned builds do not receive these secrets. The signing script uses a temporary private keychain, signs with hardened runtime and timestamp, requires an explicit Accepted notarization result, staples and validates the ticket, and checks Gatekeeper before producing a `developer-id-notarized` archive. Failed checks produce no signed artifact. Actual Developer ID/notarization execution remains pending because no signing credentials were supplied; successful signing would not complete the separate GUI acceptance matrix.
+
 The explicit disposable probe never uses saved hosts or real tmux sessions:
 
 ```sh

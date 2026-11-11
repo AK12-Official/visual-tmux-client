@@ -152,7 +152,7 @@ int vtcScheduleSaveProbe(void *window, int approve, const char *path) {
                 panel.directoryURL = [NSURL fileURLWithPath:destination.stringByDeletingLastPathComponent];
                 panel.nameFieldStringValue = destination.lastPathComponent;
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-                    [panel ok:nil];
+            [panel.defaultButtonCell performClick:nil];
                 });
             } else { [panel cancel:nil]; }
             [timer invalidate];
