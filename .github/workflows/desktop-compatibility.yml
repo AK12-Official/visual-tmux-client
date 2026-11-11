@@ -52,10 +52,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           # The image's Azure mirror repeatedly timed out for package downloads.
-          for source in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+          for source in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources /etc/apt/apt-mirrors.txt; do
             if [ -f "$source" ]; then
               sudo sed -i \
                 -e 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+                -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
                 -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' "$source"
             fi
           done
@@ -97,7 +98,7 @@ jobs:
         working-directory: desktop-build
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            GSK_RENDERER=cairo dbus-run-session -- xvfb-run -a ./visual-tmux-desktop-spike --probe
+            GSK_RENDERER=cairo GDK_DEBUG=no-portals dbus-run-session -- xvfb-run -a ./visual-tmux-desktop-spike --probe
           else
             ./visual-tmux-desktop-spike --probe
           fi

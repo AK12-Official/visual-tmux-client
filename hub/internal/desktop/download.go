@@ -20,9 +20,14 @@ type DownloadRequest struct {
 	ConnectionRevision uint64 `json:"connectionRevision"`
 }
 
-// SaveDestination is supplied by native wiring, never by web content. Returning
-// an existing destination means native overwrite confirmation has succeeded.
-type SaveDestination func(context.Context, string) (string, error)
+// Destination is chosen by native UI, never supplied by page content. Permission
+// to replace an existing path must be carried separately from the path itself.
+type Destination struct {
+	Path               string
+	OverwriteConfirmed bool
+}
+
+type SaveDestination func(context.Context, string) (Destination, error)
 
 func (b *Bridge) AttachDownload(enabled bool, maxBytes int64, choose SaveDestination) {
 	b.Register("download", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -54,10 +59,10 @@ func (b *Bridge) saveDownload(
 	if err != nil {
 		return false, errors.New("destination selection failed")
 	}
-	if destination == "" {
+	if destination.Path == "" {
 		return true, nil
 	}
-	if !filepath.IsAbs(destination) {
+	if !filepath.IsAbs(destination.Path) {
 		return false, errors.New("destination must be absolute")
 	}
 	if err := ctx.Err(); err != nil {
@@ -89,8 +94,8 @@ func (b *Bridge) saveDownload(
 	return false, atomicDownload(ctx, destination, response.Body, maxBytes)
 }
 
-func atomicDownload(ctx context.Context, destination string, reader io.Reader, maxBytes int64) error {
-	f, err := os.CreateTemp(filepath.Dir(destination), ".vtc-download-*")
+func atomicDownload(ctx context.Context, destination Destination, reader io.Reader, maxBytes int64) error {
+	f, err := os.CreateTemp(filepath.Dir(destination.Path), ".vtc-download-*")
 	if err != nil {
 		return errors.New("cannot stage download at destination")
 	}
@@ -119,7 +124,14 @@ func atomicDownload(ctx context.Context, destination string, reader io.Reader, m
 	if err := f.Close(); err != nil {
 		return errors.New("cannot close download")
 	}
-	if err := os.Rename(f.Name(), destination); err != nil {
+	commit := renameWithoutReplacement
+	if destination.OverwriteConfirmed {
+		commit = os.Rename
+	}
+	if err := commit(f.Name(), destination.Path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return errors.New("destination now exists; choose again to confirm replacement")
+		}
 		return errors.New("cannot commit download")
 	}
 	return nil

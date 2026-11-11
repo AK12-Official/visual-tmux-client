@@ -12,6 +12,17 @@ import (
 )
 
 func (s *desktopWindow) attachDialogProbe() {
+	s.controller.Bridge.Register("probe-error", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Message string `json:"message"`
+		}
+		if desktop.DecodeJSON(r, &body) != nil || len(body.Message) > maxProbeErrorBytes {
+			http.Error(w, "invalid probe error", http.StatusBadRequest)
+			return
+		}
+		fmt.Fprintln(os.Stderr, "spike: frontend probe failed:", desktop.RedactDiagnostic(body.Message))
+		desktop.WriteJSON(w, map[string]bool{"ok": true})
+	}))
 	s.controller.Bridge.Register("probe-dialog", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Approved bool   `json:"approved"`
@@ -46,3 +57,4 @@ func (s *desktopWindow) attachDialogProbe() {
 }
 
 const maxProbeTextBytes = 128
+const maxProbeErrorBytes = 1024

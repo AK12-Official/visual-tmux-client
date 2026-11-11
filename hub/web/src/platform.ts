@@ -1,5 +1,6 @@
 import { desktopRequest, isDesktop } from './desktop'
 import { downloadFile } from './files/api'
+import { desktopFullscreen, setDesktopFullscreenTarget, syncDesktopFullscreen } from './desktop-window'
 
 // Session/host/file operations stay on existing APIs. Only the local destination
 // and OS clipboard are platform actions, authorized by the desktop HTTP bridge.
@@ -23,5 +24,17 @@ export async function copyText(text: string): Promise<void> {
   await navigator.clipboard.writeText(text)
 }
 
-export function enterFullscreen(element: HTMLElement): Promise<void> { return element.requestFullscreen() }
-export function leaveFullscreen(): Promise<void> { return document.exitFullscreen() }
+export function isFullscreen(): boolean { return isDesktop() ? desktopFullscreen() : !!document.fullscreenElement }
+
+export async function enterFullscreen(element: HTMLElement): Promise<void> {
+  if (!isDesktop()) return element.requestFullscreen()
+  setDesktopFullscreenTarget(element)
+  await desktopRequest('fullscreen', { enabled: true })
+  syncDesktopFullscreen(true)
+}
+
+export async function leaveFullscreen(): Promise<void> {
+  if (!isDesktop()) return document.exitFullscreen()
+  await desktopRequest('fullscreen', { enabled: false })
+  syncDesktopFullscreen(false)
+}

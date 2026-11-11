@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"html"
-	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -54,7 +53,7 @@ func newDesktop(configPath string) (*desktopWindow, error) {
 }
 
 func (s *desktopWindow) createNative(profile string) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	logger := desktop.NativeLogger(os.Stderr)
 	options := application.Options{
 		Name:                        "Visual Tmux Client",
 		Linux:                       application.LinuxOptions{ApplicationID: "io.github.ak12official.visualtmuxclient"},

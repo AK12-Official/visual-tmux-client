@@ -135,7 +135,7 @@ Latest local commands/results:
 
 The installed linter's Go export-data reader could not consume the host Go 1.27.3 cache. Checks were rerun successfully with Go 1.26.10; this did not require weakening lint rules or changing the headless runtime contract. Native GUI probes use fake sessions only. Full Go regressions use the repository's existing disposable tmux test fixtures; green tests are not a claim of universal isolation.
 
-Overall tracked progress is 22/35. The compatibility probe remains disposable; a separate normal desktop entry is now implemented. Single-instance focus verification, complete downloads/clipboard/fullscreen runtime acceptance, package installation and untested platforms remain open. The HTTP architecture change itself is approved and resolved; the remaining gate is execution evidence and unfinished integration, not another request to approve that architecture.
+Overall tracked progress is 21/35. The compatibility probe remains disposable; a separate normal desktop entry is now implemented. Single-instance focus verification, complete downloads/clipboard/fullscreen runtime acceptance, package installation and untested platforms remain open. The HTTP architecture change itself is approved and resolved; the remaining gate is execution evidence and unfinished integration, not another request to approve that architecture.
 
 ### Remote compatibility workflow
 
@@ -164,3 +164,14 @@ Pending for every matrix target:
 - Installation/desktop-launch from the actual package without Go/Node; declared dependencies and macOS signing status are accurate.
 
 Record actual native test results here as implementation progresses. Leave unavailable platforms pending rather than substituting browser/jsdom or cross-compilation results.
+
+
+### Continued integration verification
+
+- Actual X11 WebView save chooser cancellation creates no file; acceptance streams a binary/Chinese fixture byte-for-byte. The automated run uses `GDK_DEBUG=no-portals` to exercise GTK's in-process chooser; production portal behavior remains pending. Only `--spike --probe` enables this private source fixture.
+- Unconfirmed destinations now use exclusive atomic rename, preserving files created concurrently during transfer. Confirmed overwrite remains explicit; regression tests cover the race and staging cleanup.
+- Both macOS architectures passed native confirmation cancel/accept and Unicode prompt probes in run 43060338192. The subsequent second-launch focus test failed, so task 2.5 was reopened; additional fixture diagnostics and native save automation await a new run.
+- Linux CI still failed package retrieval: the runner used `mirror+file:/etc/apt/apt-mirrors.txt`, which bypassed the earlier sources-only replacement. That mirror list is now included in the HTTPS adjustment.
+- The existing SFTP coarse-mtime fault test now supplies the original content digest and explicitly coarse timestamp. Ten repeated runs pass; timestamp-only metadata cannot detect a prior same-timestamp replacement.
+- Frontend native fullscreen requests now reach the owned OS window, with OS fullscreen events synchronized back to terminal layout. Physical fullscreen/resize/scroll acceptance remains pending.
+- Latest local checks: 33 frontend test files pass, production frontend build passes, full Go suite passes, desktop-tagged lint reports zero issues. No new matrix acceptance is inferred from these checks.

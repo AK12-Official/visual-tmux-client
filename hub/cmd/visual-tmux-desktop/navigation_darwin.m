@@ -9,7 +9,7 @@
 @property(nonatomic, weak) id<WKNavigationDelegate> previous;
 @property(nonatomic, weak) id<WKUIDelegate> previousUI;
 @property(nonatomic) int blocked;
-@property(nonatomic) NSNumber *probeReply;
+@property(nonatomic, strong) NSNumber *probeReply;
 @property(nonatomic, copy) NSString *probeText;
 @end
 
@@ -25,7 +25,8 @@
         [self.previousUI respondsToSelector:selector];
 }
 - (id)forwardingTargetForSelector:(SEL)selector {
-    return [self.previous respondsToSelector:selector] ? self.previous : self.previousUI;
+    if ([self.previous respondsToSelector:selector]) return self.previous;
+    return self.previousUI;
 }
 - (void)webView:(WKWebView *)view decidePolicyForNavigationAction:(WKNavigationAction *)action
         decisionHandler:(void (^)(WKNavigationActionPolicy))handler {
@@ -135,5 +136,28 @@ int vtcScheduleDialogProbe(void *window, int approve, const char *text) {
     if (!guard) return 0;
     guard.probeReply = @(approve != 0);
     guard.probeText = [NSString stringWithUTF8String:text];
+    return 1;
+}
+
+int vtcScheduleSaveProbe(void *window, int approve, const char *path) {
+    NSWindow *parent = (__bridge NSWindow *)window;
+    NSString *destination = [NSString stringWithUTF8String:path];
+    __block int attempts = 0;
+    NSTimer *timer = [NSTimer timerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *timer) {
+        NSWindow *sheet = parent.attachedSheet;
+        if (![sheet isKindOfClass:[NSSavePanel class]]) sheet = NSApp.modalWindow;
+        if ([sheet isKindOfClass:[NSSavePanel class]]) {
+            NSSavePanel *panel = (NSSavePanel *)sheet;
+            if (approve) {
+                panel.directoryURL = [NSURL fileURLWithPath:destination.stringByDeletingLastPathComponent];
+                panel.nameFieldStringValue = destination.lastPathComponent;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+                    [panel ok:nil];
+                });
+            } else { [panel cancel:nil]; }
+            [timer invalidate];
+        } else if (++attempts >= 50) { [timer invalidate]; }
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
     return 1;
 }

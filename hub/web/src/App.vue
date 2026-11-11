@@ -25,7 +25,7 @@ import {
 import { getConfig, resolveFontSize } from './config'
 import { getPreference, setLocale, onLocaleChange, getLocale, t, type LanguagePreference, type SupportedLocale } from './i18n/index'
 import { safeStorageGet, safeStorageSet, safeStorageRemove } from './storage'
-import { enterFullscreen, leaveFullscreen } from './platform'
+import { enterFullscreen, isFullscreen, leaveFullscreen } from './platform'
 import { installDesktopQuit } from './desktop-lifecycle'
 import SessionList from './components/SessionList.vue'
 import TerminalView from './components/TerminalView.vue'
@@ -310,7 +310,7 @@ const mainEl = ref<HTMLElement | null>(null)
 // activation, a permissions policy, or exiting when not fullscreen); an
 // unhandled rejection would trip the global error banner in main.ts.
 function toggleFullscreen(): void {
-  if (document.fullscreenElement) {
+  if (isFullscreen()) {
     leaveFullscreen().catch(() => {
       /* already exited */
     })
@@ -407,7 +407,7 @@ function closePanel(): void {
   if (filesDirty.value) {
     if (!window.confirm(t('files.closeManagerUnsavedPrompt'))) return
   }
-  if (document.fullscreenElement) {
+  if (isFullscreen()) {
     leaveFullscreen().catch(() => {
       /* already exited */
     })
@@ -1550,6 +1550,12 @@ onBeforeUnmount(() => {
 /* In fullscreen the main region covers the screen, so it needs its own
    background instead of showing through to the page. */
 .app__main:fullscreen {
+  background: var(--app-bg);
+}
+.app__main--desktop-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
   background: var(--app-bg);
 }
 /* The file manager covers the terminal area only. `.app__main` is already a

@@ -77,7 +77,7 @@ func TestNativeSecondLaunchFocusesBeforeOpeningRegistry(t *testing.T) {
 		}
 	})
 	scanner := bufio.NewScanner(stdout)
-	if !scanner.Scan() || scanner.Text() != "FOCUS_FIXTURE_HIDDEN" {
+	if !scanFixtureMarker(t, scanner, "FOCUS_FIXTURE_HIDDEN") {
 		t.Fatal("first window was not ready/hidden")
 	}
 	second := start()
@@ -85,7 +85,7 @@ func TestNativeSecondLaunchFocusesBeforeOpeningRegistry(t *testing.T) {
 	if output, err := second.CombinedOutput(); err != nil {
 		t.Fatalf("second launch opened/conflicted with registry: %v %s", err, output)
 	}
-	if !scanner.Scan() || scanner.Text() != "FOCUS_FIXTURE_VISIBLE" {
+	if !scanFixtureMarker(t, scanner, "FOCUS_FIXTURE_VISIBLE") {
 		t.Fatal("second launch did not focus first window")
 	}
 	if err := first.Process.Signal(syscall.SIGTERM); err != nil {
@@ -94,6 +94,21 @@ func TestNativeSecondLaunchFocusesBeforeOpeningRegistry(t *testing.T) {
 	if err := first.Wait(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func scanFixtureMarker(t *testing.T, scanner *bufio.Scanner, marker string) bool {
+	t.Helper()
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == marker {
+			return true
+		}
+		// Framework diagnostic output can precede our marker on Cocoa. Never
+		// include a fragment launch code when reporting fixture diagnostics.
+		t.Logf("native fixture output: %s", strings.SplitN(line, "#launch=", 2)[0])
+	}
+	t.Logf("native fixture output ended: %v", scanner.Err())
+	return false
 }
 
 func runFocusFixture() error {

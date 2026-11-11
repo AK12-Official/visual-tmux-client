@@ -13,6 +13,7 @@ typedef struct {
     int approve;
     char *text;
     int attempts;
+    int configured;
 } VTCDialogProbe;
 
 static GtkWidget *vtcFindScriptDialog(GtkWidget *widget) {
@@ -62,6 +63,60 @@ static int vtcScheduleDialogProbe(void *window, int approve, const char *text) {
     probe->text = g_strdup(text);
     return g_timeout_add_full(G_PRIORITY_DEFAULT, 100, vtcRespondToScriptDialog, probe, vtcFreeDialogProbe) != 0;
 }
+
+// Only the probe drives GTK's real fallback chooser. Its widget automation
+// interface is deprecated; production uses the modern GtkFileDialog API.
+G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+static gboolean vtcRespondToSaveDialog(gpointer data) {
+    VTCDialogProbe *probe = data;
+    GListModel *windows = gtk_window_get_toplevels();
+    for (guint i = 0; i < g_list_model_get_n_items(windows); i++) {
+        GtkWindow *window = g_list_model_get_item(windows, i);
+        if (GTK_WIDGET(window) == probe->root || !GTK_IS_FILE_CHOOSER(window) || !GTK_IS_DIALOG(window) ||
+            !gtk_widget_get_mapped(GTK_WIDGET(window))) {
+            g_object_unref(window);
+            continue;
+        }
+        if (!probe->approve) {
+            if (++probe->configured < 3) {
+                g_object_unref(window);
+                return G_SOURCE_CONTINUE;
+            }
+            g_printerr("spike: GTK chooser automation cancels\n");
+            gtk_dialog_response(GTK_DIALOG(window), GTK_RESPONSE_CANCEL);
+            g_object_unref(window);
+            return G_SOURCE_REMOVE;
+        }
+        if (!probe->configured) {
+            char *directory = g_path_get_dirname(probe->text);
+            char *name = g_path_get_basename(probe->text);
+            GFile *folder = g_file_new_for_path(directory);
+            gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(window), folder, NULL);
+            gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(window), name);
+            g_object_unref(folder);
+            g_free(directory);
+            g_free(name);
+        }
+        if (++probe->configured >= 3) {
+            g_printerr("spike: GTK chooser automation accepts\n");
+            gtk_dialog_response(GTK_DIALOG(window), GTK_RESPONSE_ACCEPT);
+            g_object_unref(window);
+            return G_SOURCE_REMOVE;
+        }
+        g_object_unref(window);
+        return G_SOURCE_CONTINUE;
+    }
+    return ++probe->attempts < 50 ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
+}
+G_GNUC_END_IGNORE_DEPRECATIONS
+
+static int vtcScheduleSaveProbe(void *window, int approve, const char *path) {
+    VTCDialogProbe *probe = g_new0(VTCDialogProbe, 1);
+    probe->root = g_object_ref(GTK_WIDGET(window));
+    probe->approve = approve;
+    probe->text = g_strdup(path);
+    return g_timeout_add_full(G_PRIORITY_DEFAULT, 100, vtcRespondToSaveDialog, probe, vtcFreeDialogProbe) != 0;
+}
 */
 import "C"
 
@@ -76,4 +131,14 @@ func scheduleDialogProbe(window unsafe.Pointer, approved bool, text string) bool
 	value := C.CString(text)
 	defer C.free(unsafe.Pointer(value))
 	return C.vtcScheduleDialogProbe(window, answer, value) != 0
+}
+
+func scheduleSaveProbe(window unsafe.Pointer, approved bool, path string) bool {
+	var answer C.int
+	if approved {
+		answer = 1
+	}
+	value := C.CString(path)
+	defer C.free(unsafe.Pointer(value))
+	return C.vtcScheduleSaveProbe(window, answer, value) != 0
 }

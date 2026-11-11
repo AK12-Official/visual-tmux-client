@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,6 +52,7 @@ type desktopWindow struct {
 	frontendReady   atomic.Bool
 	navigationReady atomic.Bool
 	dialogsPassed   atomic.Bool
+	downloadPassed  atomic.Bool
 	stop            sync.Once
 	stopErr         error
 }
@@ -106,6 +108,11 @@ func newSpike(probe bool) (*desktopWindow, error) {
 	cfg := config.DefaultConfig()
 	cfg.Files.Enabled = false
 	cfg.Hosts.StateDir = directory
+	if probe {
+		if err := prepareSaveFixture(&cfg, directory); err != nil {
+			return nil, errors.Join(err, os.RemoveAll(directory))
+		}
+	}
 	controller, err := desktop.Start(context.Background(), &cfg, config.Provenance{}, web.FS(), app.Options{
 		Backend: spike.Backend{}, ProcessFact: spike.Processes{},
 	})
@@ -139,6 +146,7 @@ func (s *desktopWindow) run() error {
 	if s.probe {
 		s.controller.Bridge.Register("probe", http.HandlerFunc(s.probeMounted))
 		s.attachDialogProbe()
+		s.attachSaveProbe()
 		js = probeJS
 	}
 	window := s.native.Window.NewWithOptions(application.WebviewWindowOptions{
@@ -146,7 +154,11 @@ func (s *desktopWindow) run() error {
 		Width: initialWidth, Height: initialHeight, URL: launchURL, JS: js,
 	})
 	s.window.Store(window)
-	attachDownload(s.controller, s.native, window, s.cfg.Files.Enabled, s.cfg.Files.MaxFileSize)
+	probeDestination := ""
+	if s.probe {
+		probeDestination = s.probeDestination()
+	}
+	attachDownload(s.controller, s.native, window, s.cfg.Files.Enabled, s.cfg.Files.MaxFileSize, probeDestination)
 	s.attachLifecycle(window)
 	if err := s.attachNavigation(window, launchURL); err != nil {
 		return err
@@ -171,7 +183,7 @@ func (s *desktopWindow) probeMounted(w http.ResponseWriter, r *http.Request) {
 	}
 	switch result.Stage {
 	case probeFinalStage:
-		if !s.dialogsPassed.Load() {
+		if !s.dialogsPassed.Load() || !s.downloadPassed.Load() {
 			http.Error(w, "native dialogs did not pass", http.StatusServiceUnavailable)
 			return
 		}
@@ -193,7 +205,9 @@ func (s *desktopWindow) probeMounted(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintln(os.Stderr, "spike: authenticated HTTP action and Vue mount verified; reloading")
 	}
-	desktop.WriteJSON(w, map[string]bool{"ok": true})
+	desktop.WriteJSON(w, map[string]any{
+		"ok": true, "sourcePath": filepath.Join(s.temporaryDir, "source", "fixture.bin"),
+	})
 }
 
 func (s *desktopWindow) watch() {
@@ -215,6 +229,8 @@ func (s *desktopWindow) watch() {
 // This probe runs after actual frontend authentication and workspace rendering.
 // No token is put in JavaScript source, logs or raw native messages.
 const probeJS = `(() => {
+ if (window.__vtcProbeStarted) return;
+ window.__vtcProbeStarted = true;
  const timer = setInterval(async () => {
   const root = document.getElementById('app');
   if (!root?.querySelector('.app__bar') || !root.textContent.includes('desktop-spike')) return;
@@ -228,12 +244,14 @@ const probeJS = `(() => {
   });
   if (!response.ok) return;
   if (stage === 0) {
+   const initial = await response.json();
    const action = async (name, body) => {
     const response = await fetch('/api/desktop/'+name, {
      method:'POST', headers:{'Content-Type':'application/json',
       Authorization:'Bearer '+sessionStorage.getItem('vtc:desktop-token')}, body:JSON.stringify(body)
     });
-    if (!response.ok) throw new Error('Native dialog probe failed');
+    if (!response.ok) throw new Error('Native integration probe failed: '+await response.text());
+    return response.json();
    };
    for (const approved of [false,true]) {
     await action('probe-dialog',{approved,text:''});
@@ -243,6 +261,12 @@ const probeJS = `(() => {
    await action('probe-dialog',{approved:true,text});
    if (window.prompt('Native input probe / 原生输入测试','original') !== text) throw new Error('Prompt mismatch');
    await action('probe-dialog-result',{ok:true});
+   for (const approved of [false,true]) {
+    await action('probe-save',{approved});
+    const result = await action('download',{hostId:'local',connectionRevision:1,path:initial.sourcePath});
+    if (result.cancelled === approved) throw new Error('Save cancellation mismatch');
+    await action('probe-save-result',{approved});
+   }
    sessionStorage.setItem('vtc-spike-stage','1'); location.reload();
   }
   else if (stage === 1) {
@@ -250,6 +274,13 @@ const probeJS = `(() => {
    sessionStorage.setItem('vtc-spike-stage','2'); location.replace(result.launchURL);
   } else sessionStorage.removeItem('vtc-spike-stage');
  },100);
+ window.addEventListener('unhandledrejection', event => {
+  fetch('/api/desktop/probe-error', {
+   method:'POST', headers:{'Content-Type':'application/json',
+    Authorization:'Bearer '+sessionStorage.getItem('vtc:desktop-token')},
+   body:JSON.stringify({message:String(event.reason?.message || event.reason).slice(0,1024)})
+  });
+ });
 })()`
 
 func (s *desktopWindow) backendFailed(err error) {

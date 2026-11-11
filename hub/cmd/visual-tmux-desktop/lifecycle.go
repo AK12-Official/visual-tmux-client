@@ -33,7 +33,8 @@ func (s *desktopWindow) attachLifecycle(window *application.WebviewWindow) {
 		default:
 		}
 	})
-	s.attachQuitPoll(requests)
+	s.attachFullscreen(window, requests)
+	s.attachQuitPoll(requests, window)
 	window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
 		if s.lifecycle.State() == desktop.Stopped {
 			return
@@ -114,7 +115,7 @@ func (s *desktopWindow) attachMenu(window *application.WebviewWindow) {
 	s.native.Menu.Set(menu)
 }
 
-func (s *desktopWindow) attachQuitPoll(requests <-chan struct{}) {
+func (s *desktopWindow) attachQuitPoll(requests <-chan struct{}, window *application.WebviewWindow) {
 	s.controller.Bridge.Register("quit-poll", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct{}
 		if desktop.DecodeJSON(r, &body) != nil {
@@ -133,7 +134,10 @@ func (s *desktopWindow) attachQuitPoll(requests <-chan struct{}) {
 		case <-s.lifecycle.Stopping():
 		case <-s.controller.Stopping():
 		}
-		desktop.WriteJSON(w, map[string]uint64{"id": id})
+		desktop.WriteJSON(w, struct {
+			ID         uint64 `json:"id"`
+			Fullscreen bool   `json:"fullscreen"`
+		}{id, window.IsFullscreen()})
 	}))
 }
 
@@ -154,4 +158,30 @@ func (s *desktopWindow) freshLaunchURL() (string, error) {
 		s.frontendReady.Store(false)
 	}
 	return address, err
+}
+
+func (s *desktopWindow) attachFullscreen(window *application.WebviewWindow, requests chan<- struct{}) {
+	notifyWindow := func(*application.WindowEvent) {
+		select {
+		case requests <- struct{}{}:
+		default:
+		}
+	}
+	window.OnWindowEvent(events.Common.WindowFullscreen, notifyWindow)
+	window.OnWindowEvent(events.Common.WindowUnFullscreen, notifyWindow)
+	s.controller.Bridge.Register("fullscreen", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Enabled bool `json:"enabled"`
+		}
+		if desktop.DecodeJSON(r, &body) != nil {
+			http.Error(w, "invalid fullscreen request", http.StatusBadRequest)
+			return
+		}
+		if body.Enabled {
+			window.Fullscreen()
+		} else {
+			window.UnFullscreen()
+		}
+		desktop.WriteJSON(w, map[string]bool{"ok": true})
+	}))
 }

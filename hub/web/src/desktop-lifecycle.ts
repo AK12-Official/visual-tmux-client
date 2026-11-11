@@ -1,4 +1,5 @@
 import { desktopRequest, desktopWarning, flushDesktopPreferences, isDesktop } from './desktop'
+import { syncDesktopFullscreen } from './desktop-window'
 
 const FLUSH_TIMEOUT_MS = 5000
 
@@ -29,8 +30,9 @@ export function installDesktopQuit(confirm: () => boolean): () => void {
   const poll = async () => {
     while (!disposed) {
       try {
-        const { id } = await desktopRequest<{ id: number }>('quit-poll', {})
+        const { id, fullscreen } = await desktopRequest<{ id: number; fullscreen?: boolean }>('quit-poll', {})
         if (disposed) return
+        if (typeof fullscreen === 'boolean') syncDesktopFullscreen(fullscreen)
         if (!Number.isSafeInteger(id) || id <= 0) continue
         const approved = await prepareDesktopQuit(confirm)
         if (!disposed) await desktopRequest('quit-response', { id, approved })

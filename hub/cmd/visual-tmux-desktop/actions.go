@@ -15,21 +15,26 @@ import (
 
 func attachDownload(
 	controller *desktop.Controller, native *application.App, window *application.WebviewWindow,
-	enabled bool, limit int64,
+	enabled bool, limit int64, probeDestination string,
 ) {
 	controller.Bridge.AttachExternalLinks(native.Browser.OpenURL)
-	controller.Bridge.AttachDownload(enabled, limit, func(ctx context.Context, name string) (string, error) {
+	chooseDestination := func(ctx context.Context, name string) (desktop.Destination, error) {
 		selected, err := native.Dialog.SaveFileWithOptions(&application.SaveFileDialogOptions{
 			Title: "Save file / 保存文件",
 		}).
 			AttachToWindow(window).SetFilename(name).PromptForSingleSelection()
+		if probeDestination != "" {
+			if selected != "" && selected != probeDestination {
+				return desktop.Destination{}, errors.New("probe chooser selected a destination outside its fixture")
+			}
+		}
 		if err != nil || selected == "" {
-			return selected, err
+			return desktop.Destination{Path: selected}, err
 		}
 		if _, err := os.Lstat(selected); errors.Is(err, os.ErrNotExist) {
-			return selected, nil
+			return desktop.Destination{Path: selected}, nil
 		} else if err != nil {
-			return "", err
+			return desktop.Destination{}, err
 		}
 		// Do not depend on the platform chooser's overwrite prompt semantics.
 		approved := make(chan bool, 1)
@@ -41,13 +46,14 @@ func attachDownload(
 		select {
 		case yes := <-approved:
 			if yes {
-				return selected, nil
+				return desktop.Destination{Path: selected, OverwriteConfirmed: true}, nil
 			}
-			return "", nil
+			return desktop.Destination{}, nil
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return desktop.Destination{}, ctx.Err()
 		}
-	})
+	}
+	controller.Bridge.AttachDownload(enabled, limit, chooseDestination)
 	controller.Bridge.Register("clipboard", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Text string `json:"text"`
