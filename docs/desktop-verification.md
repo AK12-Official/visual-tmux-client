@@ -8,8 +8,8 @@ This is an execution record for `add-desktop-application`, not a claim of releas
 | --- | --- | --- | --- | --- |
 | Ubuntu 24.04 amd64, Wayland | Pending | Pending | Pending | Not validated |
 | Ubuntu 24.04 amd64, X11 | Passed: tagged spike compiled | Automatic auth/workspace/reload passed via HTTP action; remaining GUI checks pending | Pending | Compatibility gate not passed |
-| macOS arm64, documented minimum 12+ | Pending; no macOS execution environment available | Pending | Pending | Not validated |
-| macOS amd64, documented minimum 12+ | Pending; no macOS execution environment available | Pending | Pending | Not validated |
+| macOS arm64, documented minimum 12+ | Passed on macos-15 CI | Pending | Pending | Build verified; runtime not validated |
+| macOS amd64, documented minimum 12+ | Passed on macos-15-intel CI | Pending | Pending | Build verified; runtime not validated |
 
 Build evidence on Linux does not establish macOS support. X11 evidence does not establish Wayland behavior. Minimum-version support requires compatible SDK/deployment settings and actual runtime evidence, not just compilation on a newer system.
 
@@ -51,7 +51,7 @@ Commands below were run from the repository root unless a directory is stated. D
 
 ### Historical raw-bridge finding (resolved by approved HTTP design)
 
-Task 1.2 has Linux native build evidence, but its required macOS evidence remains pending and its checkbox remains open. Task 1.3 originally exposed the raw-bridge limitation below. The user approved switching native actions to authenticated HTTP, and the Linux workspace/auth/reload probe now passes; the complete cross-platform/dialog gate remains open.
+Task 1.2 is complete: local Linux native build evidence is supplemented by successful native macOS arm64/amd64 CI builds and independent CGO-disabled headless builds. Task 1.3 originally exposed the raw-bridge limitation below. The user approved switching native actions to authenticated HTTP, and the Linux workspace/auth/reload probe now passes; the complete cross-platform/dialog gate remains open.
 
 The Linux spike reports:
 
@@ -65,7 +65,7 @@ The mount report is diagnostic evidence only; the strict handler does not accept
 
 In Wails v3.0.0, `pkg/application/linux_cgo.go:sendMessageToBackend` obtains the current top-level WebView URI and sets only `OriginInfo.Origin`. `IsMainFrame` and `TopOrigin` are not populated. `pkg/application/linux_child_frame_guard.go` documents this limitation and that non-reserved child-frame messages still reach `RawMessageHandler`. Thus relaxing the frame check would not establish the planned sender-origin guarantee. Reference: https://github.com/wailsapp/wails/blob/v3.0.0/v3/pkg/application/linux_child_frame_guard.go
 
-Approved design adjustment, now implemented: route the narrow native actions through desktop-only authenticated HTTP endpoints with exact bound Origin/Host validation and existing bearer credentials, then call native dialog/clipboard/window APIs on the Go side. Retain Wails as window host and retain terminal WebSocket transport. The raw handler is no longer used. Design/tasks were updated with user approval. macOS build/runtime evidence still requires an actual macOS environment.
+Approved design adjustment, now implemented: route the narrow native actions through desktop-only authenticated HTTP endpoints with exact bound Origin/Host validation and existing bearer credentials, then call native dialog/clipboard/window APIs on the Go side. Retain Wails as window host and retain terminal WebSocket transport. The raw handler is no longer used. Design/tasks were updated with user approval. macOS runtime evidence still requires an interactive macOS environment.
 
 ## Compatibility gate (tasks 1.2 and 1.3)
 
@@ -73,12 +73,12 @@ Only the evidence explicitly recorded below is complete; a mount observation is 
 
 | Check | Ubuntu Wayland | Ubuntu X11 | macOS arm64 | macOS amd64 |
 | --- | --- | --- | --- | --- |
-| Native desktop-tagged build | Not run under Wayland | Passed | Pending | Pending |
+| Native desktop-tagged build | Same Linux build, display-independent | Passed | Passed, native CI | Passed, native CI |
 | Existing embedded Vue UI loads from dynamic loopback URL | Pending | Passed, authenticated synthetic workspace | Pending | Pending |
 | Reload and initialization occur exactly once | Pending | Authenticated reload passed; frontend initialization/write tests passed | Pending | Pending |
 | HTTP native action boundary | Pending | Owned-origin action passed in WebView; foreign/missing origin and credentials refused by HTTP tests | Pending | Pending |
 | Save chooser, cancellation and byte-equal destination | Pending | Pending | Pending | Pending |
-| CGO-disabled original headless build remains independent | Same Linux build, display-independent | Passed | Pending | Pending |
+| CGO-disabled original headless build remains independent | Same Linux build, display-independent | Passed | Passed, native CI and original CI | Passed, native CI and original CI |
 
 The current command requires explicit `--spike`; without it, it refuses to start. It uses a newly created temporary host-state directory, disables file access and injects a read-only synthetic session backend and refusing process factory. It never uses the user's saved hosts, generates no real terminal process and performs no tmux cleanup. The temporary state is removed through bounded shutdown. Automatic login, reload recovery, preference storage/hydration and the testable backend controller are implemented. Native save-dialog/clipboard wiring and streaming download code compile and have transport tests; actual chooser interaction is still pending. Production entry, quit confirmation/flush, single-instance behavior, platform packaging and complete runtime acceptance remain unfinished.
 
@@ -115,15 +115,19 @@ Latest local commands/results:
 
 The installed linter's Go export-data reader could not consume the host Go 1.27.3 cache. Checks were rerun successfully with Go 1.26.10; this did not require weakening lint rules or changing the headless runtime contract. Native GUI probes use fake sessions only. Full Go regressions use the repository's existing disposable tmux test fixtures; green tests are not a claim of universal isolation.
 
-Overall tracked progress is 11/35. The current implementation is deliberately still a disposable compatibility spike. Native user-quit confirmation/flush, normal desktop entry, single-instance focus, complete downloads/clipboard/fullscreen runtime acceptance, production packages and untested platforms remain open. The HTTP architecture change itself is approved and resolved; the remaining gate is execution evidence and unfinished integration, not another request to approve that architecture.
+Overall tracked progress is 12/35. The current implementation is deliberately still a disposable compatibility spike. Native user-quit confirmation/flush, normal desktop entry, single-instance focus, complete downloads/clipboard/fullscreen runtime acceptance, production packages and untested platforms remain open. The HTTP architecture change itself is approved and resolved; the remaining gate is execution evidence and unfinished integration, not another request to approve that architecture.
 
-### Prepared remote compatibility workflow
+### Remote compatibility workflow
 
 `.github/workflows/desktop-compatibility.yml` adds native Ubuntu amd64 and macOS arm64/amd64 builds, transport-independent race tests, a headless build check, and development-only compatibility artifacts. macOS `.app` ZIPs opt into the synthetic spike at build time; they are ad-hoc signed, without Developer ID/notarization, and do not represent a desktop release. The existing release workflow is unchanged.
 
-Runner labels were checked against GitHub's official runner inventory: https://github.com/actions/runner-images#available-images . The workflow definition has been statically validated locally; remote results must be recorded separately before claiming macOS build success. A pull request touching the listed paths or a manual dispatch gathers that evidence. Package build success alone will not pass input-method, minimum-OS, Wayland or native-dialog acceptance.
+Runner labels were checked against GitHub's official runner inventory: https://github.com/actions/runner-images#available-images . The workflow definition has been statically validated locally; actual remote evidence is recorded below. A pull request touching the listed paths or a manual dispatch gathers that evidence. Package build success alone will not pass input-method, minimum-OS, Wayland or native-dialog acceptance.
 
-Remote compatibility execution: pending. This field will be updated with the pull request, workflow run and per-platform results after execution.
+Execution for commit `2ed6f8f6cd71f8d29b18411cbc9bb6251f2cdff2`, submitted in [draft PR #18](https://github.com/AK12-Official/visual-tmux-client/pull/18):
+
+- [Desktop compatibility run 43046243651](https://github.com/AK12-Official/visual-tmux-client/actions/runs/43046243651): macos-15 arm64 and macos-15-intel amd64 jobs passed transport-independent race tests, native tagged builds, CGO-disabled headless builds, development app packaging and artifact upload with Go 1.26.10. Linux CI is still installing native dependencies at the time of this record; the local native Linux build already passed.
+- [Original CI run 43046243255](https://github.com/AK12-Official/visual-tmux-client/actions/runs/43046243255): validation, all four Linux/macOS headless architecture packages, assembly and tests passed; release publishing was correctly skipped for the pull request.
+- macOS compatibility artifacts are development-only synthetic spikes. No GUI session, Finder launch, native dialog, minimum macOS version or installed-package acceptance is established by these build jobs.
 
 ## End-to-end acceptance (tasks 8.2 and 8.3)
 

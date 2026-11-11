@@ -1,7 +1,7 @@
 ## 1. Prove native container compatibility
 
 - [x] 1.1 Add an implementation verification record with the Ubuntu 24.04 amd64 Wayland/X11 and macOS arm64/amd64 matrix, runtime/toolchain versions, commands and pending evidence; verify unexecuted combinations are explicitly pending.
-- [ ] 1.2 Add a minimal desktop-tagged Wails v3 entry using the existing embedded frontend and injected fake services; pin the tested framework/toolchain versions and verify native Linux and macOS builds while the original CGO-disabled headless command still builds without desktop libraries.
+- [x] 1.2 Add a minimal desktop-tagged Wails v3 entry using the existing embedded frontend and injected fake services; pin the tested framework/toolchain versions and verify native Linux and macOS builds while the original CGO-disabled headless command still builds without desktop libraries.
 - [ ] 1.3 Exercise loopback external-URL loading, reload, Bearer-authenticated exact-origin HTTP native-action calls, native save chooser and byte-preserving download in real Linux/macOS WebViews; record evidence and stop for a design revision if the selected host cannot provide these integration points.
 
 ## 2. Establish desktop configuration and backend ownership
