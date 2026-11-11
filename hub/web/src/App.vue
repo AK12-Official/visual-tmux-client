@@ -25,6 +25,7 @@ import {
 import { getConfig, resolveFontSize } from './config'
 import { getPreference, setLocale, onLocaleChange, getLocale, t, type LanguagePreference, type SupportedLocale } from './i18n/index'
 import { safeStorageGet, safeStorageSet, safeStorageRemove } from './storage'
+import { enterFullscreen, leaveFullscreen } from './platform'
 import SessionList from './components/SessionList.vue'
 import TerminalView from './components/TerminalView.vue'
 import ToastStack from './components/ToastStack.vue'
@@ -309,11 +310,11 @@ const mainEl = ref<HTMLElement | null>(null)
 // unhandled rejection would trip the global error banner in main.ts.
 function toggleFullscreen(): void {
   if (document.fullscreenElement) {
-    document.exitFullscreen().catch(() => {
+    leaveFullscreen().catch(() => {
       /* already exited */
     })
   } else {
-    mainEl.value?.requestFullscreen().catch(() => {
+    if (mainEl.value) enterFullscreen(mainEl.value).catch(() => {
       notify('warning', t('terminal.fullscreenRefusedNotice'))
     })
   }
@@ -406,7 +407,7 @@ function closePanel(): void {
     if (!window.confirm(t('files.closeManagerUnsavedPrompt'))) return
   }
   if (document.fullscreenElement) {
-    document.exitFullscreen().catch(() => {
+    leaveFullscreen().catch(() => {
       /* already exited */
     })
   }

@@ -191,6 +191,19 @@ func readConfigFile(workDir string, pf *parsedFlags, lookupEnv EnvLookup) (strin
 // Load parses command-line arguments, checks for version/help, loads configuration from YAML,
 // applies environment variable overrides and explicit CLI flags, and validates the result.
 func Load(args []string, workDir string, lookupEnv EnvLookup, version string) (*Config, *Provenance, error) {
+	return loadConfig(args, workDir, workDir, lookupEnv, false)
+}
+
+// LoadDesktop preserves server configuration parsing while choosing a stable
+// implicit file location and overriding desktop-owned transport settings before
+// semantic validation. Explicit paths remain relative to the invoking directory.
+func LoadDesktop(args []string, workDir, userConfigDir string, lookupEnv EnvLookup) (*Config, *Provenance, error) {
+	return loadConfig(args, workDir, filepath.Join(userConfigDir, "visual-tmux-client"), lookupEnv, true)
+}
+
+func loadConfig(
+	args []string, workDir, implicitDir string, lookupEnv EnvLookup, desktop bool,
+) (*Config, *Provenance, error) {
 	if lookupEnv == nil {
 		lookupEnv = os.LookupEnv
 	}
@@ -199,8 +212,12 @@ func Load(args []string, workDir string, lookupEnv EnvLookup, version string) (*
 	if err != nil {
 		return nil, nil, err
 	}
+	if desktop && pf.explicitAddr {
+		return nil, nil, errors.New("desktop mode manages server.addr; --addr is unavailable")
+	}
 
-	yamlPath, yamlData, explicitConfig, err := readConfigFile(workDir, pf, lookupEnv)
+	configBase := selectedConfigBase(workDir, implicitDir, pf, lookupEnv)
+	yamlPath, yamlData, explicitConfig, err := readConfigFile(configBase, pf, lookupEnv)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -227,16 +244,38 @@ func Load(args []string, workDir string, lookupEnv EnvLookup, version string) (*
 		cfg.Server.Addr = pf.addr
 		prov.AddrSource = SourceCLI
 	}
+	if desktop {
+		// Server mode deliberately forbids port zero in configuration. Validate
+		// the desktop-owned setting using the normal loopback default, then ask
+		// the OS to allocate the desktop port after all other fields pass.
+		cfg.Server.Addr = DefaultServerAddr
+		cfg.Auth.Token = ""
+		cfg.WebSocket.Origin = ""
+		prov.AddrSource, prov.TokenSource, prov.OriginSource = SourceDesktop, SourceDesktop, SourceDesktop
+	}
 
 	if err := ValidateConfig(&cfg); err != nil {
 		return nil, nil, err
 	}
+	if desktop {
+		cfg.Server.Addr = "127.0.0.1:0"
+	}
 
-	if cfg.Auth.Token == "" {
+	if cfg.Auth.Token == "" && !desktop {
 		prov.TokenSource = SourceGenerated
 	}
 
 	return &cfg, &prov, nil
+}
+
+func selectedConfigBase(workDir, implicitDir string, pf *parsedFlags, lookup EnvLookup) string {
+	if pf.explicitConfig {
+		return workDir
+	}
+	if path, ok := lookup("VISUAL_TMUX_CLIENT_CONFIG"); ok && path != "" {
+		return workDir
+	}
+	return implicitDir
 }
 
 func applyYAML(cfg *Config, prov *Provenance, data []byte, configDir string) error {

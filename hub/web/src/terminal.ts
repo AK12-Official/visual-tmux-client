@@ -9,6 +9,8 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { issueTicket, AuthError } from './api'
 import { getConfig } from './config'
+import { copyText } from './platform'
+import { isDesktop } from './desktop'
 import { t } from './i18n/index'
 
 export type ConnState = 'connecting' | 'connected' | 'reconnecting' | 'ended'
@@ -192,14 +194,14 @@ export class TerminalSession {
       // shell, which is emphatically not what a copy gesture asked for.
       const clipboard =
         typeof navigator !== 'undefined' ? (navigator.clipboard as Clipboard | undefined) : undefined
-      if (!clipboard) {
+      if (!clipboard && !isDesktop()) {
         this.hooks.onNotice(
           t('terminal.copyInsecureContextNotice'),
           'warning',
         )
         return false
       }
-      clipboard.writeText(selection).catch(() => {
+      copyText(selection).catch(() => {
         // A blocked clipboard is a degraded-but-recoverable state, not a
         // failure of the terminal itself: warn rather than error.
         this.hooks.onNotice(t('terminal.copyBlockedNotice'), 'warning')
