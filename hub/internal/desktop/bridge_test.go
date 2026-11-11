@@ -14,6 +14,32 @@ import (
 
 const testOrigin = "http://127.0.0.1:12345"
 
+func TestFreshLaunchCreatesNewDocumentWithoutQueryCredential(t *testing.T) {
+	b := NewBridge("test-bearer")
+	if err := b.SetOrigin(testOrigin); err != nil {
+		t.Fatal(err)
+	}
+	first, err := b.LaunchURL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := b.LaunchURL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	u1, err := url.Parse(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, err := url.Parse(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u1.RawQuery == u2.RawQuery || u1.Query().Get("launch") != "" || u2.Query().Get("launch") != "" {
+		t.Fatal("fresh launch did not force a new secret-free document URL")
+	}
+}
+
 func bridgeRequest(b *Bridge, path, body, origin, token string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(http.MethodPost, testOrigin+desktopPrefix+path, strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")

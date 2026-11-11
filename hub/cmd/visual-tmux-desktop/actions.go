@@ -17,6 +17,7 @@ func attachDownload(
 	controller *desktop.Controller, native *application.App, window *application.WebviewWindow,
 	enabled bool, limit int64,
 ) {
+	controller.Bridge.AttachExternalLinks(native.Browser.OpenURL)
 	controller.Bridge.AttachDownload(enabled, limit, func(ctx context.Context, name string) (string, error) {
 		selected, err := native.Dialog.SaveFileWithOptions(&application.SaveFileDialogOptions{
 			Title: "Save file / 保存文件",

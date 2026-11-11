@@ -80,7 +80,7 @@ Only the evidence explicitly recorded below is complete; a mount observation is 
 | Save chooser, cancellation and byte-equal destination | Pending | Pending | Pending | Pending |
 | CGO-disabled original headless build remains independent | Same Linux build, display-independent | Passed | Passed, native CI and original CI | Passed, native CI and original CI |
 
-The current command requires explicit `--spike`; without it, it refuses to start. It uses a newly created temporary host-state directory, disables file access and injects a read-only synthetic session backend and refusing process factory. It never uses the user's saved hosts, generates no real terminal process and performs no tmux cleanup. The temporary state is removed through bounded shutdown. Automatic login, reload recovery, preference storage/hydration and the testable backend controller are implemented. Native save-dialog/clipboard wiring and streaming download code compile and have transport tests; actual chooser interaction is still pending. Production entry, quit confirmation/flush, single-instance behavior, platform packaging and complete runtime acceptance remain unfinished.
+The ordinary native command now loads desktop configuration and starts the real backend. `--spike` explicitly selects the disposable verification mode described here; compatibility bundles still default to that mode. It uses a newly created temporary host-state directory, disables file access and injects a read-only synthetic session backend and refusing process factory. It never uses the user's saved hosts, generates no real terminal process and performs no tmux cleanup. The temporary state is removed through bounded shutdown. Automatic login, reload recovery, preference storage/hydration and the testable backend controller are implemented. Native save-dialog/clipboard wiring and streaming download code compile and have transport tests; actual chooser interaction is still pending. The production entry, quit confirmation/flush, single-instance focus adapter and native package scripts are implemented; their complete cross-platform/runtime acceptance remains pending.
 
 Use fake backend/session/process services for the initial container spike, a private temporary host-state directory and private file fixtures. Never connect the spike to the developer's real tmux or host database. Follow repository isolation helpers for later tmux tests; clearing `TMUX` alone is not isolation.
 
@@ -94,13 +94,24 @@ Completed task checkboxes are tracked in `openspec/changes/add-desktop-applicati
 - Preferences are bounded, allowlisted, versioned and atomically replaced with private permissions. Tests cover restart, interrupted staging, invalid/corrupt files, excluded token/draft keys, failed writes and revision conflicts. Frontend tests cover hydration before i18n import, serialized updates, document-session recovery and visible persistence failure.
 - Desktop file save uses a native chooser callback, captured source host/revision and a staged destination. Source access still goes through the existing authenticated file route, now honoring an optional expected connection revision for downloads. Tests cover byte equality, cancellation, limits, failed transfer, old-destination preservation, disabled access and stale source refusal. Native chooser/overwrite interaction has not been validated live.
 
+Additional implementation evidence in the current working revision:
+
+- Normal desktop startup uses `LoadDesktop`, acquires the native single-instance profile before backend state ownership, shows startup failures in a native window and observes backend failures. Informational `--help`/`--version` return before GUI/state initialization; both passed with `DISPLAY` and `WAYLAND_DISPLAY` removed.
+- User close and Quit/Cmd+Q use an idempotent confirmation state machine. The mounted workspace checks its existing editor dirty flag, then flushes serialized preferences with a five-second bound. Cancel, failed/stalled flush, stale replies and concurrent forced shutdown have focused tests. The actual X11 window-close probe received the frontend flush approval and exited normally.
+- External-URL pages do not initialize the Wails runtime: `ExecJS` queued indefinitely in a real probe. Quit requests therefore use authenticated HTTP long polling, with pending polls released before bounded HTTP shutdown. No native raw binding was introduced.
+- Fresh-code reload needs a new document, not only a fragment change. A public document counter forces full navigation while the one-use code remains in the fragment. The X11 probe passed session-token reload and native-issued fresh-code reload, then closed through the normal window-close hook.
+- Desktop-composed HTTP/WS integration tests verify secret-free bare/public responses, protected host/session routes, one-use launch exchange, foreign WebSocket-origin rejection and terminal session-ticket binding. Existing WS tests additionally retain host/revision/replay binding coverage.
+- Activated external links are routed through a validated HTTP/HTTPS action. GTK WebKit navigation policy also rejects off-origin navigations and responses. The real X11 probe deliberately attempted an external navigation, observed it being blocked, then successfully reloaded the owned workspace. The equivalent WKWebView delegate proxy is implemented but awaits macOS CI.
+- A native packaging script produces Ubuntu DEBs with a launcher/icon and declared GTK4/WebKitGTK runtime dependencies, and development-only macOS app ZIPs. A local DEB was built. The first clean Ubuntu container installed it successfully but failed inside native GUI startup; container renderer/runtime diagnosis remains in progress, so package launch acceptance is not claimed.
+- CI now includes actual synthetic WebView authentication/reload/quit probes on Linux Xvfb and both macOS runners, plus separate development packages. These new checks await execution for this revision.
+
 Latest local commands/results:
 
 | Command (Go commands in `hub/`, npm in `hub/web/`) | Result |
 | --- | --- |
 | `go test ./...` with Go 1.27.3 | Passed all packages, including existing isolated tmux regression tests |
 | `GOTOOLCHAIN=go1.26.10 go test -race ./internal/desktop ./internal/config ./internal/app ./internal/desktop/spike ./internal/transport/http` | Passed |
-| `npm test` | Passed all 31 test files, including new desktop bootstrap tests |
+| `npm test` | Passed all 33 test files, including desktop bootstrap, quit and external-link routing |
 | `npm run build` | Passed type checking and Vite build |
 | `GOTOOLCHAIN=go1.26.10 go build -tags desktop -o /tmp/vtc-desktop-spike ./cmd/visual-tmux-desktop` | Passed |
 | `/tmp/vtc-desktop-spike --spike --probe` | Passed actual X11 WebView automatic auth, synthetic workspace mount, same-origin HTTP action and reload, then exited normally |
@@ -115,7 +126,7 @@ Latest local commands/results:
 
 The installed linter's Go export-data reader could not consume the host Go 1.27.3 cache. Checks were rerun successfully with Go 1.26.10; this did not require weakening lint rules or changing the headless runtime contract. Native GUI probes use fake sessions only. Full Go regressions use the repository's existing disposable tmux test fixtures; green tests are not a claim of universal isolation.
 
-Overall tracked progress is 12/35. The current implementation is deliberately still a disposable compatibility spike. Native user-quit confirmation/flush, normal desktop entry, single-instance focus, complete downloads/clipboard/fullscreen runtime acceptance, production packages and untested platforms remain open. The HTTP architecture change itself is approved and resolved; the remaining gate is execution evidence and unfinished integration, not another request to approve that architecture.
+Overall tracked progress is 16/35. The compatibility probe remains disposable; a separate normal desktop entry is now implemented. Single-instance focus verification, complete downloads/clipboard/fullscreen runtime acceptance, package installation and untested platforms remain open. The HTTP architecture change itself is approved and resolved; the remaining gate is execution evidence and unfinished integration, not another request to approve that architecture.
 
 ### Remote compatibility workflow
 

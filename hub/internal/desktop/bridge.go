@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,13 +25,14 @@ const (
 // Bridge exposes only explicitly registered desktop HTTP actions. No Wails raw
 // messages or generated service bindings authorize a native operation.
 type Bridge struct {
-	mu      sync.Mutex
-	origin  string
-	token   string
-	code    string
-	expires time.Time
-	now     func() time.Time
-	actions map[string]http.Handler
+	mu       sync.Mutex
+	origin   string
+	token    string
+	code     string
+	expires  time.Time
+	now      func() time.Time
+	actions  map[string]http.Handler
+	document uint64
 }
 
 func NewBridge(token string) *Bridge {
@@ -79,7 +81,11 @@ func (b *Bridge) LaunchURL() (string, error) {
 		return "", errors.New("desktop bridge is not ready")
 	}
 	b.code, b.expires = code, b.now().Add(launchLifetime)
-	return b.origin + "/?desktop=1#launch=" + url.QueryEscape(code), nil
+	// A new fragment alone is same-document navigation and cannot rerun the
+	// bootstrap. The public counter forces a new document without exposing code.
+	b.document++
+	return b.origin + "/?desktop=1&document=" + strconv.FormatUint(b.document, 10) +
+		"#launch=" + url.QueryEscape(code), nil
 }
 
 func (b *Bridge) Wrap(next http.Handler) http.Handler {

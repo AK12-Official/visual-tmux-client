@@ -11,21 +11,21 @@
 - [x] 2.3 Add the testable desktop controller around `app.New/Start/Addr/Shutdown`, optional desktop-only handler registration and a readiness check; verify startup order and cleanup on state, listener, readiness and window-construction failures using fake services/native adapters.
 - [ ] 2.4 Wire the native main-thread window to the controller, observe backend failures and add actionable startup/runtime error surfaces; verify the window loads the actual dynamic port and backend failure releases the listener and registry lock.
 - [ ] 2.5 Add single-instance focus behavior for the same desktop profile and retain existing registry ownership enforcement; verify a repeated desktop launch focuses its window and a headless state owner produces a conflict without modifying or stopping that owner.
-- [ ] 2.6 Keep desktop imports behind explicit native build boundaries and implement help/version without GUI or state initialization; verify ordinary `go test ./...`, CGO-disabled headless builds and informational desktop flags require no display or state store.
+- [x] 2.6 Keep desktop imports behind explicit native build boundaries and implement help/version without GUI or state initialization; verify ordinary `go test ./...`, CGO-disabled headless builds and informational desktop flags require no display or state store.
 
 ## 3. Implement launch authentication and frontend initialization
 
 - [x] 3.1 Add fresh desktop bearer generation and a bounded one-use launch-code exchange with exact bound Host/Origin, JSON/body-size validation and no-store responses; verify success, expiry, reuse, malformed/foreign requests, no-secret logging and absence of desktop handlers in ordinary server mode.
 - [x] 3.2 Split `main.ts` into minimal platform bootstrap and deferred application imports; consume/remove the launch fragment before initialization and hydrate desktop credentials before protected requests; verify bootstrap ordering, rejected exchange and unchanged ordinary browser login in frontend tests.
-- [ ] 3.3 Add desktop document-session credential recovery and native-controlled fresh-code reload while keeping tokens out of durable preference storage; verify reload succeeds once, stale tokens show recoverable initialization errors and session/host failures retain their existing classification.
-- [ ] 3.4 Verify auth boundaries through HTTP/WS integration tests: bare URL and unauthorized clients receive no credential, public client config remains secret-free, protected routes require bearer and terminal tickets retain host/revision/session binding and origin rejection.
+- [x] 3.3 Add desktop document-session credential recovery and native-controlled fresh-code reload while keeping tokens out of durable preference storage; verify reload succeeds once, stale tokens show recoverable initialization errors and session/host failures retain their existing classification.
+- [x] 3.4 Verify auth boundaries through HTTP/WS integration tests: bare URL and unauthorized clients receive no credential, public client config remains secret-free, protected routes require bearer and terminal tickets retain host/revision/session binding and origin rejection.
 
 ## 4. Persist desktop preferences across dynamic ports
 
 - [x] 4.1 Add the versioned, private preference store with a 1 MiB total bound, validated key/value limits, atomic replacement and serialized writes; verify corrupt/unsupported files, write failure, interrupted replacement, unknown keys and credential/draft exclusion using temporary state directories.
 - [x] 4.2 Add desktop-only authenticated snapshot read/update APIs with version/conflict handling; verify only current authenticated callers can read/write allowed preferences and rejected updates leave the prior durable snapshot intact.
 - [x] 4.3 Install a seeded synchronous preference adapter before i18n/application module evaluation and queue serialized durable updates; verify first-render locale, configured font clamping, sidebar/recent host restoration, host-scoped ordering/pins and unchanged browser localStorage behavior.
-- [ ] 4.4 Add visible persistence errors and bounded pending-write flush for normal quit; verify rapid consecutive updates preserve the latest value, flush failure is reported and an unwritable store leaves terminals and editor drafts usable.
+- [x] 4.4 Add visible persistence errors and bounded pending-write flush for normal quit; verify rapid consecutive updates preserve the latest value, flush failure is reported and an unwritable store leaves terminals and editor drafts usable.
 - [ ] 4.5 Exercise a complete preference-change, normal-quit and restart sequence with a different listener port; record that all specified preferences restore and no credentials appear in `desktop-preferences.json`.
 
 ## 5. Adapt native interactions without changing transport

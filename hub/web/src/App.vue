@@ -26,6 +26,7 @@ import { getConfig, resolveFontSize } from './config'
 import { getPreference, setLocale, onLocaleChange, getLocale, t, type LanguagePreference, type SupportedLocale } from './i18n/index'
 import { safeStorageGet, safeStorageSet, safeStorageRemove } from './storage'
 import { enterFullscreen, leaveFullscreen } from './platform'
+import { installDesktopQuit } from './desktop-lifecycle'
 import SessionList from './components/SessionList.vue'
 import TerminalView from './components/TerminalView.vue'
 import ToastStack from './components/ToastStack.vue'
@@ -970,8 +971,10 @@ function onOffline() {
 }
 
 let unlistenLocale: (() => void) | null = null
+let unlistenDesktopQuit: (() => void) | null = null
 
 onMounted(async () => {
+  unlistenDesktopQuit = installDesktopQuit(() => !filesDirty.value || window.confirm(t('files.closeManagerUnsavedPrompt')))
   unlistenLocale = onLocaleChange((locale, pref) => {
     currentPreference.value = pref
     currentLocale.value = locale
@@ -984,6 +987,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  unlistenDesktopQuit?.()
   unlistenLocale?.()
   stopPolling()
   window.removeEventListener('online', onOnline)

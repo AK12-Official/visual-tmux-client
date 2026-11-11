@@ -76,3 +76,14 @@ test('failed preference persistence is not reported as durable success', async (
   assert.equal(safeStorageGet('vtc:locale'),'en')
   setPlatformStorage()
 })
+
+test('stale document credential gives native reload recovery before mounting', async () => {
+  setPlatformStorage()
+  const session = memoryStorage()
+  session.setItem(DESKTOP_TOKEN_KEY, 'stale-process-token')
+  const fetchFn = (async () => new Response('unauthorized', { status: 401 })) as typeof fetch
+  await assert.rejects(initializeDesktop({ search: '?desktop=1', hash: '', pathname: '/' },
+    { replaceState() {} }, session, fetchFn), /Application > Reload workspace/)
+  assert.equal(session.getItem(DESKTOP_TOKEN_KEY), 'stale-process-token')
+  setPlatformStorage()
+})

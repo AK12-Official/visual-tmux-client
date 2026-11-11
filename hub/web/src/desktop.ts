@@ -84,7 +84,12 @@ export async function initializeDesktop(
   }
   if (!desktopToken) throw new Error('Desktop authorization unavailable. Reopen the application to retry.')
   try { window.localStorage.removeItem(BROWSER_TOKEN_KEY) } catch { /* desktop credential remains document-scoped */ }
-  const snapshot = await desktopRequest<Snapshot>('preferences-read', {}, fetchFn)
+  let snapshot: Snapshot
+  try {
+    snapshot = await desktopRequest<Snapshot>('preferences-read', {}, fetchFn)
+  } catch (error) {
+    throw new Error('Desktop initialization failed. Use Application > Reload workspace or reopen the application to retry.', { cause: error })
+  }
   if (snapshot.version !== 1 || !Number.isSafeInteger(snapshot.revision) || !snapshot.values ||
       typeof snapshot.values !== 'object' || Array.isArray(snapshot.values) || Object.values(snapshot.values).some(v => typeof v !== 'string')) {
     throw new Error('Invalid desktop preferences response')

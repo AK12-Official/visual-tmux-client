@@ -1,7 +1,13 @@
 import { desktopWarning, initializeDesktop } from './desktop'
 
 // Hydrate desktop storage before importing modules that read it at import time.
-void initializeDesktop().then(() => import('./application')).catch(async (error: unknown) => {
+void initializeDesktop().then(async (desktop) => {
+  if (desktop) {
+    const { installDesktopLinks } = await import('./desktop-links')
+    installDesktopLinks()
+  }
+  return import('./application')
+}).catch(async (error: unknown) => {
   desktopWarning(error instanceof Error ? error.message : String(error))
   const root = document.getElementById('app')
   if (root) {
