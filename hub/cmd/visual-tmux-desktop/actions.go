@@ -20,7 +20,7 @@ func attachDownload(
 	controller.Bridge.AttachExternalLinks(native.Browser.OpenURL)
 	chooseDestination := func(ctx context.Context, name string) (desktop.Destination, error) {
 		selected, err := native.Dialog.SaveFileWithOptions(&application.SaveFileDialogOptions{
-			Title: "Save file / 保存文件",
+			Title: "Save file / 保存文件", ButtonText: "Save / 保存",
 		}).
 			AttachToWindow(window).SetFilename(name).PromptForSingleSelection()
 		if probeDestination != "" {

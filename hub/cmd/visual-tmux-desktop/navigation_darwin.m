@@ -3,8 +3,6 @@
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
-#import <CoreGraphics/CoreGraphics.h>
-#include <unistd.h>
 
 @interface VTCNavigationGuard : NSObject <WKNavigationDelegate, WKUIDelegate>
 @property(nonatomic, copy) NSString *origin;
@@ -141,6 +139,26 @@ int vtcScheduleDialogProbe(void *window, int approve, const char *text) {
     return 1;
 }
 
+static BOOL vtcPressSaveButton(id element, NSString *prompt, NSUInteger depth, NSMutableSet *visited) {
+    if (!element || depth > 24 || visited.count > 2000) return NO;
+    NSValue *identity = [NSValue valueWithNonretainedObject:element];
+    if ([visited containsObject:identity]) return NO;
+    [visited addObject:identity];
+    if ([element respondsToSelector:@selector(accessibilityRole)] &&
+        [[element accessibilityRole] isEqualToString:NSAccessibilityButtonRole] &&
+        [element respondsToSelector:@selector(accessibilityLabel)] &&
+        [[element accessibilityLabel] isEqualToString:prompt] &&
+        [element respondsToSelector:@selector(accessibilityPerformPress)]) {
+        return [element accessibilityPerformPress];
+    }
+    if ([element respondsToSelector:@selector(accessibilityChildren)]) {
+        for (id child in [element accessibilityChildren]) {
+            if (vtcPressSaveButton(child, prompt, depth + 1, visited)) return YES;
+        }
+    }
+    return NO;
+}
+
 int vtcScheduleSaveProbe(void *window, int approve, const char *path) {
     NSWindow *parent = (__bridge NSWindow *)window;
     NSString *destination = [NSString stringWithUTF8String:path];
@@ -154,15 +172,10 @@ int vtcScheduleSaveProbe(void *window, int approve, const char *path) {
                 panel.directoryURL = [NSURL fileURLWithPath:destination.stringByDeletingLastPathComponent];
                 panel.nameFieldStringValue = destination.lastPathComponent;
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-                    // Save-panel content lives in another process. Send a real
-                    // key event through our own application's event pipeline,
-                    // never to the user's global keyboard event stream.
-                    CGEventRef down = CGEventCreateKeyboardEvent(NULL, 36, true);
-                    CGEventRef up = CGEventCreateKeyboardEvent(NULL, 36, false);
-                    CGEventPostToPid(getpid(), down);
-                    CGEventPostToPid(getpid(), up);
-                    CFRelease(down);
-                    CFRelease(up);
+                    // Use the panel's own accessibility tree, including its
+                    // remote content. No global input or foreign app is touched.
+                    BOOL pressed = vtcPressSaveButton(panel, panel.prompt, 0, [NSMutableSet new]);
+                    fprintf(stderr, "spike: owned save accessibility button pressed: %s\n", pressed ? "yes" : "no");
                 });
             } else { [panel cancel:nil]; }
             [timer invalidate];

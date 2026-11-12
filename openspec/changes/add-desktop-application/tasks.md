@@ -10,7 +10,7 @@
 - [x] 2.2 Add desktop tmux executable resolution using explicit config, PATH and documented macOS fallback locations without a shell; verify resolution order and actionable missing-local-tmux behavior using injected lookups, with remote host access unaffected.
 - [x] 2.3 Add the testable desktop controller around `app.New/Start/Addr/Shutdown`, optional desktop-only handler registration and a readiness check; verify startup order and cleanup on state, listener, readiness and window-construction failures using fake services/native adapters.
 - [x] 2.4 Wire the native main-thread window to the controller, observe backend failures and add actionable startup/runtime error surfaces; verify the window loads the actual dynamic port and backend failure releases the listener and registry lock.
-- [ ] 2.5 Add single-instance focus behavior for the same desktop profile and retain existing registry ownership enforcement; verify a repeated desktop launch focuses its window and a headless state owner produces a conflict without modifying or stopping that owner.
+- [x] 2.5 Add single-instance focus behavior for the same desktop profile and retain existing registry ownership enforcement; verify a repeated desktop launch focuses its window and a headless state owner produces a conflict without modifying or stopping that owner.
 - [x] 2.6 Keep desktop imports behind explicit native build boundaries and implement help/version without GUI or state initialization; verify ordinary `go test ./...`, CGO-disabled headless builds and informational desktop flags require no display or state store.
 
 ## 3. Implement launch authentication and frontend initialization

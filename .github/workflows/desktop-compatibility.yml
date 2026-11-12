@@ -176,6 +176,19 @@ jobs:
           if-no-files-found: error
       - name: Package development desktop application
         run: DESKTOP_BINARY=desktop-build/visual-tmux-desktop sh scripts/package-desktop.sh
+      - name: Install and exercise packaged Ubuntu application
+        if: runner.os == 'Linux'
+        run: |
+          set -- desktop-packages/*.deb
+          test "$#" -eq 1
+          sudo apt-get install --yes "$PWD/$1"
+          test -x /usr/bin/visual-tmux-desktop
+          test -f /usr/share/applications/io.github.ak12official.visualtmuxclient.desktop
+          mkdir -p "$RUNNER_TEMP/vtc-empty-path"
+          # The installed binary gets an empty PATH: neither Go nor Node can be
+          # invoked for its frontend or backend. Display helpers run outside it.
+          GSK_RENDERER=cairo GDK_DEBUG=no-portals dbus-run-session -- xvfb-run -a \
+            env PATH="$RUNNER_TEMP/vtc-empty-path" /usr/bin/visual-tmux-desktop --spike --probe
       - name: Exercise packaged macOS launch through Launch Services
         if: runner.os == 'macOS'
         run: |
