@@ -438,7 +438,7 @@ export const zhCN: LocaleMessages = {
     mtime_unavailable: 'Hub 未提供文件最后修改时间',
     host_unavailable: '主机不可达或已断开连接',
     host_unsupported: '该主机不支持此文件操作',
-    tmux_unavailable: '此主机上的 tmux 不可用',
+    tmux_unavailable: '此主机上的 tmux 不可用。请安装 tmux 或修正配置的可执行文件路径。',
     outcome_unknown: '写入结果不确定；连接在提交过程中中断',
     host_revision_conflict: '主机配置已更改，请刷新',
     unknown: '未知错误: {diagnostic}',

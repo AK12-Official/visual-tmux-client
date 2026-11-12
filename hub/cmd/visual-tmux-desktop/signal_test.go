@@ -7,11 +7,13 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -118,11 +120,24 @@ func runFocusFixture() error {
 	if err != nil {
 		return err
 	}
+	var missingTmuxVisible atomic.Bool
+	missingNotice := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct{}
+		if desktop.DecodeJSON(r, &body) != nil {
+			http.Error(w, "invalid fixture", http.StatusBadRequest)
+			return
+		}
+		missingTmuxVisible.Store(true)
+		desktop.WriteJSON(w, map[string]bool{"ok": true})
+	})
+	window.controller.Bridge.Register("fixture-missing-tmux", missingNotice)
+	window.fixtureJS = missingTmuxJS
 	go func() {
 		ticker := time.NewTicker(10 * time.Millisecond)
 		defer ticker.Stop()
 		for range ticker.C {
-			if window.frontendReady.Load() {
+			if window.frontendReady.Load() && missingTmuxVisible.Load() {
+				fmt.Fprintln(os.Stderr, "focus fixture: actionable missing-tmux notice visible")
 				window.window.Load().Hide()
 				if _, err := fmt.Fprintln(os.Stdout, "FOCUS_FIXTURE_HIDDEN"); err != nil {
 					return
@@ -141,6 +156,18 @@ func runFocusFixture() error {
 	}()
 	return window.run()
 }
+
+const missingTmuxJS = `(() => {
+ const timer = setInterval(async () => {
+  const text = document.getElementById('app')?.textContent || '';
+  if (!text.includes('Install tmux') && !text.includes('请安装 tmux')) return;
+  clearInterval(timer);
+  await fetch('/api/desktop/fixture-missing-tmux', {
+   method:'POST', headers:{'Content-Type':'application/json',
+    Authorization:'Bearer '+sessionStorage.getItem('vtc:desktop-token')}, body:'{}'
+  });
+ },100);
+})()`
 
 func TestNativeSignalReleasesListenerAndState(t *testing.T) {
 	if runtime.GOOS == "linux" && os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {

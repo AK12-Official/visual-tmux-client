@@ -439,7 +439,7 @@ export const en: LocaleMessages = {
     mtime_unavailable: 'the hub did not say when the file last changed',
     host_unavailable: 'the host is unreachable or disconnected',
     host_unsupported: 'this file operation is not supported on this host',
-    tmux_unavailable: 'tmux is unavailable on this host',
+    tmux_unavailable: 'tmux is unavailable on this host. Install tmux or correct its configured executable path.',
     outcome_unknown: 'the write outcome is uncertain; the connection dropped during commit',
     host_revision_conflict: 'the host configuration has changed; please refresh',
     unknown: 'Unknown error: {diagnostic}',

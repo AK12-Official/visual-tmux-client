@@ -212,13 +212,14 @@ jobs:
           file "$app/Contents/MacOS/visual-tmux-desktop"
           # Launch Services is also used by Finder. Probe mode owns temporary
           # state and cannot use saved hosts or start a real tmux process.
-          PATH=/usr/bin:/bin /usr/bin/open -n -W -a "$app" --env PATH=/usr/bin:/bin \
+          PATH=/usr/bin:/bin:/usr/sbin:/sbin /usr/bin/open -n -W -a "$app" \
+            --env PATH=/usr/bin:/bin:/usr/sbin:/sbin \
             --stdout "$PWD/packaged-launch/stdout.log" --stderr "$PWD/packaged-launch/stderr.log" \
             --args --spike --probe-startup
           cat packaged-launch/stderr.log
-          rg -F 'spike: minimal package PATH: true' packaged-launch/stderr.log
-          rg -F 'spike: PASS authenticated HTTP action and both reload modes' packaged-launch/stderr.log
-          rg -F 'spike: frontend approved quit after preference flush' packaged-launch/stderr.log
+          /usr/bin/grep -F 'spike: minimal package PATH: true' packaged-launch/stderr.log
+          /usr/bin/grep -F 'spike: PASS authenticated HTTP action and both reload modes' packaged-launch/stderr.log
+          /usr/bin/grep -F 'spike: frontend approved quit after preference flush' packaged-launch/stderr.log
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() && steps.native-package.outcome == 'success' }}
         with:

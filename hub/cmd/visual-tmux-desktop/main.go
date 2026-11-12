@@ -49,6 +49,7 @@ type desktopWindow struct {
 	temporaryDir    string
 	probe           bool
 	startupProbe    bool
+	fixtureJS       string // populated only by native test fixtures
 	passed          atomic.Bool
 	frontendReady   atomic.Bool
 	navigationReady atomic.Bool
@@ -146,7 +147,7 @@ func (s *desktopWindow) run() error {
 	if s.native == nil {
 		s.createNative("")
 	}
-	js := ""
+	js := s.fixtureJS
 	if s.probe {
 		s.controller.Bridge.Register("probe", http.HandlerFunc(s.probeMounted))
 		s.attachDialogProbe()
@@ -154,7 +155,8 @@ func (s *desktopWindow) run() error {
 		js = probeJS
 		if s.startupProbe {
 			fmt.Fprintln(os.Stderr, "spike: startup-only scope; save and input acceptance excluded")
-			fmt.Fprintln(os.Stderr, "spike: minimal package PATH:", os.Getenv("PATH") == "/usr/bin:/bin")
+			minimalPath := "/usr/bin:/bin:/usr/sbin:/sbin"
+			fmt.Fprintln(os.Stderr, "spike: minimal package PATH:", os.Getenv("PATH") == minimalPath)
 			js = "window.__vtcProbeStartupOnly = true;\n" + js
 		}
 	}
