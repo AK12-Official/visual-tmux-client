@@ -2,6 +2,17 @@
 
 This is an execution record for `add-desktop-application`, not a claim of released desktop support. A checkbox in the implementation plan is completed only when all of its specified evidence exists. Native builds, actual WebView behavior and package installation are separate checks.
 
+## Current user-directed deferral
+
+The user has deferred the outstanding macOS interactive validation and will
+perform it on their Mac. Follow the [macOS acceptance handoff](desktop-macos-acceptance.md).
+The full macOS chooser probe is therefore excluded from CI until revisited;
+previously passing native builds/package/startup regressions remain enabled.
+CI records the deferral explicitly. A green workflow does not count deferred
+checks as passed. Existing macOS evidence is retained, cross-platform task
+checkboxes remain open, and Linux work is not paused. Overall progress remains
+27/35; this change is not archived or desktop-release-ready.
+
 ## Target matrix
 
 | Target | Native build | Real WebView integration | Installed package | Status |

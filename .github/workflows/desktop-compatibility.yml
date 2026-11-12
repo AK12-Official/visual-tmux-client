@@ -129,15 +129,17 @@ jobs:
             go test -tags desktop -ldflags '-extldflags=-mmacosx-version-min=12.0' ./cmd/visual-tmux-desktop
           fi
       - name: Exercise real WebView authentication, reload and flushed quit
-        if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' && runner.os == 'Linux' }}
         timeout-minutes: 2
         working-directory: desktop-build
         run: |
-          if [ "$RUNNER_OS" = Linux ]; then
-            GSK_RENDERER=cairo GDK_DEBUG=no-portals dbus-run-session -- xvfb-run -a ./visual-tmux-desktop-spike --probe
-          else
-            ./visual-tmux-desktop-spike --probe
-          fi
+          GSK_RENDERER=cairo GDK_DEBUG=no-portals dbus-run-session -- xvfb-run -a ./visual-tmux-desktop-spike --probe
+      - name: Record deferred macOS interactive acceptance
+        if: runner.os == 'macOS'
+        run: |
+          echo 'macOS interactive acceptance is deferred by the user for testing on their Mac.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Build/package/startup checks do not complete the deferred save/input acceptance.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Follow docs/desktop-macos-acceptance.md; related OpenSpec checkboxes remain open.' >> "$GITHUB_STEP_SUMMARY"
       - name: Package development compatibility artifact
         env:
           TARGET_ARCH: ${{ matrix.arch }}

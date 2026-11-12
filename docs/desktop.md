@@ -85,7 +85,7 @@ The explicit disposable probe never uses saved hosts or real tmux sessions:
 
 It uses temporary state, synthetic sessions and native WebViews. Automated native-dialog probes operate only on their own window. Follow the verification record for current probe coverage. Manual Chinese composition, clipboard shortcuts, terminal scrolling/resize/fullscreen, full file editing and package installation still need their recorded target-specific acceptance; an automated Unicode string round-trip does not prove IME support. Run tmux-backed Go tests outside tmux and only through the repository's guarded disposable fixtures.
 
-Package startup can be verified separately with `--spike --probe-startup`. This explicitly excludes chooser/input acceptance; the complete `--probe` check remains required for the integration gate. CI still fails when that complete check fails, while publishing clearly labeled development packages for review.
+Package startup can be verified separately with `--spike --probe-startup`. This explicitly excludes chooser/input acceptance. At the user's request, outstanding macOS interactive validation is deferred for testing on their Mac; see the [handoff checklist](desktop-macos-acceptance.md). CI runs the complete Linux probe and existing macOS build/package/startup regressions, records the macOS interactive deferral, and publishes clearly labeled development packages for review. Green CI does not complete the deferred integration gate or input acceptance.
 
 For an isolated headless Wayland integration check on Ubuntu 24.04 with Weston 13 available:
 

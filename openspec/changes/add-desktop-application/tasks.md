@@ -1,3 +1,9 @@
+macOS interactive acceptance is deferred at the user's request and will be
+performed on their Mac. Existing build/package/startup evidence remains valid;
+pending macOS portions of tasks 1.3, 5.2–5.5, 6.2, 8.2 and 8.3 remain unchecked.
+See `docs/desktop-macos-acceptance.md` for the handoff checklist. Linux work is
+not paused by this decision. A green CI run does not complete manual acceptance.
+
 ## 1. Prove native container compatibility
 
 - [x] 1.1 Add an implementation verification record with the Ubuntu 24.04 amd64 Wayland/X11 and macOS arm64/amd64 matrix, runtime/toolchain versions, commands and pending evidence; verify unexecuted combinations are explicitly pending.
