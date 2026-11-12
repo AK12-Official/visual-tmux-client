@@ -59,9 +59,14 @@
   const cell=screen.width/dimensions.cols,row=screen.height/dimensions.rows;
   await request('drag','',{x:screen.x+cell*.2,y:screen.y+row*.5,
    endX:screen.x+cell*18,endY:screen.y+row*.5});
+  await wait(()=>document.querySelector('.xterm-selection')?.children.length>0,'native drag selection rendered');
   await request('key-copy');
-  await new Promise(r=>setTimeout(r,200));
-  const copied=await request('clipboard-status');
+  let copied;
+  for(let attempt=0;attempt<200;attempt++){
+   copied=await request('clipboard-status');
+   if(copied.text.includes('stream-中文-'))break;
+   await new Promise(r=>setTimeout(r,50));
+  }
   if(!copied.text.includes('stream-中文-'))throw new Error('Selected terminal text was not copied: '+copied.text);
   const copiedState=await request('status');
   if(copiedState.input.split('\u0003').length!==dimensions.input.split('\u0003').length)
