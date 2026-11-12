@@ -183,9 +183,11 @@ jobs:
           path: desktop-artifacts/
           if-no-files-found: error
       - name: Package development desktop application
+        id: native-package
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
         run: DESKTOP_BINARY=desktop-build/visual-tmux-desktop sh scripts/package-desktop.sh
       - name: Install and exercise packaged Ubuntu application
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && steps.native-package.outcome == 'success' && runner.os == 'Linux' }}
         run: |
           set -- desktop-packages/*.deb
           test "$#" -eq 1
@@ -198,7 +200,8 @@ jobs:
           GSK_RENDERER=cairo GDK_DEBUG=no-portals dbus-run-session -- xvfb-run -a \
             env PATH="$RUNNER_TEMP/vtc-empty-path" /usr/bin/visual-tmux-desktop --spike --probe
       - name: Exercise packaged macOS launch through Launch Services
-        if: runner.os == 'macOS'
+        if: ${{ !cancelled() && steps.native-package.outcome == 'success' && runner.os == 'macOS' }}
+        timeout-minutes: 2
         run: |
           mkdir -p packaged-launch
           set -- desktop-packages/*_development-unsigned.zip
@@ -209,13 +212,15 @@ jobs:
           file "$app/Contents/MacOS/visual-tmux-desktop"
           # Launch Services is also used by Finder. Probe mode owns temporary
           # state and cannot use saved hosts or start a real tmux process.
-          PATH=/usr/bin:/bin /usr/bin/open -n -W -a "$app" \
+          PATH=/usr/bin:/bin /usr/bin/open -n -W -a "$app" --env PATH=/usr/bin:/bin \
             --stdout "$PWD/packaged-launch/stdout.log" --stderr "$PWD/packaged-launch/stderr.log" \
-            --args --spike --probe
+            --args --spike --probe-startup
           cat packaged-launch/stderr.log
+          rg -F 'spike: minimal package PATH: true' packaged-launch/stderr.log
           rg -F 'spike: PASS authenticated HTTP action and both reload modes' packaged-launch/stderr.log
           rg -F 'spike: frontend approved quit after preference flush' packaged-launch/stderr.log
       - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() && steps.native-package.outcome == 'success' }}
         with:
           name: desktop-development-${{ runner.os }}-${{ matrix.arch }}
           path: desktop-packages/

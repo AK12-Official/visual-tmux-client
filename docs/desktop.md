@@ -73,6 +73,8 @@ DESKTOP_BINARY=./visual-tmux-desktop sh scripts/package-desktop.sh
 
 The script produces an Ubuntu amd64 DEB with GTK4/WebKitGTK runtime dependencies, launcher and icon, or an architecture-specific macOS `.app` ZIP. The DEB includes a narrowly attached AppArmor profile for `/usr/bin/visual-tmux-desktop`, allowing WebKit to create its renderer sandbox under Ubuntu 24.04 namespace restrictions. Install/remove hooks load/unload only that profile when AppArmor is enabled. The macOS development archive is labeled `development-unsigned`: it uses ad-hoc signing with no Developer ID or notarization. These are development artifacts, not a desktop release. CI publishes them as workflow artifacts and preserves existing headless releases.
 
+On Ubuntu with restricted namespaces, a source binary at another path needs a matching AppArmor profile. The DEB installation configures the packaged executable's path. Source build success alone does not verify sandbox startup from an arbitrary location.
+
 Optional signing is available only through an explicitly selected `notarize` input on a manual Desktop compatibility workflow run on `main`. Configure repository secrets `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGNING_IDENTITY` (a Developer ID Application identity), `MACOS_NOTARY_API_KEY_P8_BASE64`, `MACOS_NOTARY_KEY_ID` and `MACOS_NOTARY_ISSUER_ID`. Pull-request and ordinary unsigned builds do not receive these secrets. The signing script uses a temporary private keychain, signs with hardened runtime and timestamp, requires an explicit Accepted notarization result, staples and validates the ticket, and checks Gatekeeper before producing a `developer-id-notarized` archive. Failed checks produce no signed artifact. Actual Developer ID/notarization execution remains pending because no signing credentials were supplied; successful signing would not complete the separate GUI acceptance matrix.
 
 The explicit disposable probe never uses saved hosts or real tmux sessions:
@@ -82,3 +84,13 @@ The explicit disposable probe never uses saved hosts or real tmux sessions:
 ```
 
 It uses temporary state, synthetic sessions and native WebViews. Automated native-dialog probes operate only on their own window. Follow the verification record for current probe coverage. Manual Chinese composition, clipboard shortcuts, terminal scrolling/resize/fullscreen, full file editing and package installation still need their recorded target-specific acceptance; an automated Unicode string round-trip does not prove IME support. Run tmux-backed Go tests outside tmux and only through the repository's guarded disposable fixtures.
+
+Package startup can be verified separately with `--spike --probe-startup`. This explicitly excludes chooser/input acceptance; the complete `--probe` check remains required for the integration gate. CI still fails when that complete check fails, while publishing clearly labeled development packages for review.
+
+For an isolated headless Wayland integration check on Ubuntu 24.04 with Weston 13 available:
+
+```sh
+python3 scripts/probe-desktop-wayland.py ./visual-tmux-desktop
+```
+
+The script creates private HOME/config/cache/runtime directories, starts its own compositor and D-Bus session, runs the complete disposable probe, then stops only its own compositor. `--weston-prefix /path/to/extracted/usr` supports privately extracted Weston packages. It records a log under `/tmp` and excludes physical keyboard/IME/scroll/trackpad acceptance.

@@ -48,6 +48,7 @@ type desktopWindow struct {
 	cfg             config.Config
 	temporaryDir    string
 	probe           bool
+	startupProbe    bool
 	passed          atomic.Bool
 	frontendReady   atomic.Bool
 	navigationReady atomic.Bool
@@ -69,6 +70,7 @@ func run() (err error) {
 	flags.SetOutput(io.Discard)
 	spikeMode := flags.Bool("spike", defaultSpike == "true", "run disposable spike; no real tmux or saved hosts")
 	probe := flags.Bool("probe", false, "verify authenticated HTTP action, Vue mount and reload, then quit")
+	startupProbe := flags.Bool("probe-startup", false, "verify startup/auth/reload/quit only; excludes save/input")
 	configPath := flags.String("config", "", "path to YAML configuration file")
 	showVersion := flags.Bool("version", false, "print version and exit")
 	if err := flags.Parse(os.Args[1:]); err != nil {
@@ -83,12 +85,13 @@ func run() (err error) {
 		fmt.Println(version)
 		return nil
 	}
-	if flags.NArg() != 0 || (*probe && !*spikeMode) || (*spikeMode && *configPath != "") {
-		return errors.New("unexpected arguments; --probe requires --spike, which cannot use --config")
+	if flags.NArg() != 0 || ((*probe || *startupProbe) && !*spikeMode) ||
+		(*probe && *startupProbe) || (*spikeMode && *configPath != "") {
+		return errors.New("unexpected arguments; select one probe with --spike, which cannot use --config")
 	}
 	var instance *desktopWindow
 	if *spikeMode {
-		instance, err = newSpike(*probe)
+		instance, err = newSpike(*probe || *startupProbe)
 	} else {
 		instance, err = newDesktop(*configPath)
 	}
@@ -97,6 +100,7 @@ func run() (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, instance.close()) }()
+	instance.startupProbe = *startupProbe
 	return instance.run()
 }
 
@@ -148,6 +152,11 @@ func (s *desktopWindow) run() error {
 		s.attachDialogProbe()
 		s.attachSaveProbe()
 		js = probeJS
+		if s.startupProbe {
+			fmt.Fprintln(os.Stderr, "spike: startup-only scope; save and input acceptance excluded")
+			fmt.Fprintln(os.Stderr, "spike: minimal package PATH:", os.Getenv("PATH") == "/usr/bin:/bin")
+			js = "window.__vtcProbeStartupOnly = true;\n" + js
+		}
 	}
 	window := s.native.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name: "main", Title: "Visual Tmux Client",
@@ -183,7 +192,7 @@ func (s *desktopWindow) probeMounted(w http.ResponseWriter, r *http.Request) {
 	}
 	switch result.Stage {
 	case probeFinalStage:
-		if !s.dialogsPassed.Load() || !s.downloadPassed.Load() {
+		if !s.startupProbe && (!s.dialogsPassed.Load() || !s.downloadPassed.Load()) {
 			http.Error(w, "native dialogs did not pass", http.StatusServiceUnavailable)
 			return
 		}
@@ -253,6 +262,7 @@ const probeJS = `(() => {
     if (!response.ok) throw new Error('Native integration probe failed: '+await response.text());
     return response.json();
    };
+   if (!window.__vtcProbeStartupOnly) {
    for (const approved of [false,true]) {
     await action('probe-dialog',{approved,text:''});
     if (window.confirm('Native confirmation probe / 原生确认测试') !== approved) throw new Error('Confirmation mismatch');
@@ -266,6 +276,7 @@ const probeJS = `(() => {
     const result = await action('download',{hostId:'local',connectionRevision:1,path:initial.sourcePath});
     if (result.cancelled === approved) throw new Error('Save cancellation mismatch');
     await action('probe-save-result',{approved});
+   }
    }
    sessionStorage.setItem('vtc-spike-stage','1'); location.reload();
   }
