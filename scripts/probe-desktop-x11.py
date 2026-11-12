@@ -63,9 +63,9 @@ with tempfile.TemporaryDirectory(prefix='vtc-x11-', dir='/tmp') as temporary:
                                       env=helper_env, pass_fds=(write_fd,), stdout=server_log, stderr=server_log)
             os.close(write_fd)
             write_fd = None
-            if not select.select([read_fd], [], [], 8)[0]:
+            if not select.select([read_fd], [], [], 30)[0]:
                 server_log.seek(0)
-                raise RuntimeError('Private X server was not ready: ' + server_log.read())
+                raise RuntimeError(f'Private X server was not ready within 30s (exit={server.poll()}): ' + server_log.read())
             display = os.read(read_fd, 32).decode().strip()
             if not display.isdecimal():
                 server_log.seek(0)
@@ -98,6 +98,9 @@ with tempfile.TemporaryDirectory(prefix='vtc-x11-', dir='/tmp') as temporary:
                 print(wm_log.read()[-2000:])
             print('Full X11 probe log:', args.log)
             raise SystemExit(exit_code)
+    except Exception as error:
+        args.log.write_text('Private X11 verification failed: ' + str(error) + '\n')
+        raise
     finally:
         stop_owned(verifier, group=True)
         os.close(read_fd)
