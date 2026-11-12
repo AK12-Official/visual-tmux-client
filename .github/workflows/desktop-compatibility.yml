@@ -110,12 +110,19 @@ jobs:
         working-directory: hub
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            GSK_RENDERER=cairo dbus-run-session -- xvfb-run -a go test -tags desktop ./cmd/visual-tmux-desktop
+            go test -c -tags desktop -o ../desktop-build/visual-tmux-desktop.test ./cmd/visual-tmux-desktop
+            # Grant namespaces only to these disposable native test executables.
+            # Keep WebKit's renderer sandbox and global AppArmor policy enabled.
+            sed "s|/usr/bin/visual-tmux-desktop|$GITHUB_WORKSPACE/desktop-build/visual-tmux-desktop{,-spike,.test}|" \
+              ../packaging/desktop/visual-tmux-desktop.apparmor > ../desktop-build/ci.apparmor
+            sudo apparmor_parser -r ../desktop-build/ci.apparmor
+            GSK_RENDERER=cairo dbus-run-session -- xvfb-run -a ../desktop-build/visual-tmux-desktop.test
           else
             go test -tags desktop -ldflags '-extldflags=-mmacosx-version-min=12.0' ./cmd/visual-tmux-desktop
           fi
       - name: Exercise real WebView authentication, reload and flushed quit
         if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
+        timeout-minutes: 2
         working-directory: desktop-build
         run: |
           if [ "$RUNNER_OS" = Linux ]; then

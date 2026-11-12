@@ -152,7 +152,11 @@ int vtcScheduleSaveProbe(void *window, int approve, const char *path) {
                 panel.directoryURL = [NSURL fileURLWithPath:destination.stringByDeletingLastPathComponent];
                 panel.nameFieldStringValue = destination.lastPathComponent;
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-            [panel.defaultButtonCell performClick:nil];
+                    NSEvent *enter = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+                        modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime
+                        windowNumber:panel.windowNumber context:nil characters:@"\r"
+                        charactersIgnoringModifiers:@"\r" isARepeat:NO keyCode:36];
+                    [panel sendEvent:enter];
                 });
             } else { [panel cancel:nil]; }
             [timer invalidate];
@@ -160,4 +164,15 @@ int vtcScheduleSaveProbe(void *window, int approve, const char *path) {
     }];
     [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
     return 1;
+}
+
+void vtcCancelOwnedDialogs(void *window) {
+    NSWindow *parent = (__bridge NSWindow *)window;
+    NSWindow *sheet = parent.attachedSheet;
+    if (!sheet) return;
+    if ([sheet isKindOfClass:[NSSavePanel class]]) {
+        [(NSSavePanel *)sheet cancel:nil];
+    } else {
+        [parent endSheet:sheet returnCode:NSModalResponseCancel];
+    }
 }

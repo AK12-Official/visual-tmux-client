@@ -61,6 +61,9 @@ func (s *desktopWindow) createNative(profile string) {
 		Mac:                         application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: true},
 		DisableDefaultSignalHandler: true,
 		ShouldQuit: func() bool {
+			if os.Getenv("VTC_NATIVE_FIXTURE_MODE") == "focus" {
+				fmt.Fprintln(os.Stderr, "focus fixture: native quit requested; lifecycle absent:", s.lifecycle == nil)
+			}
 			if s.lifecycle == nil || s.lifecycle.State() == desktop.Stopped {
 				return true
 			}

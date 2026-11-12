@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+case "${1:-}" in
+  remove|deconfigure)
+    if command -v apparmor_parser >/dev/null 2>&1 && [ -d /sys/kernel/security/apparmor ]; then
+      apparmor_parser -R /etc/apparmor.d/visual-tmux-desktop
+    fi
+    ;;
+esac

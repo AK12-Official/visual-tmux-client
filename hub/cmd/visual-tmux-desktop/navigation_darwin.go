@@ -8,10 +8,14 @@ package main
 #include <stdlib.h>
 int vtcInstallNavigation(void *window, const char *origin);
 int vtcBlockedCount(void *window);
+void vtcCancelOwnedDialogs(void *window);
 */
 import "C"
 
-import "unsafe"
+import (
+	"github.com/wailsapp/wails/v3/pkg/application"
+	"unsafe"
+)
 
 func installNavigationGuard(window unsafe.Pointer, origin string) bool {
 	cOrigin := C.CString(origin)
@@ -20,3 +24,7 @@ func installNavigationGuard(window unsafe.Pointer, origin string) bool {
 }
 
 func blockedNavigationCount(window unsafe.Pointer) int { return int(C.vtcBlockedCount(window)) }
+
+func cancelOwnedDialogs(window *application.WebviewWindow) {
+	application.InvokeSync(func() { C.vtcCancelOwnedDialogs(window.NativeWindow()) })
+}

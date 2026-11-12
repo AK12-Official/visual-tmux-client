@@ -22,10 +22,14 @@ trap 'rm -rf "$staging"' EXIT HUP INT TERM
 case "$(uname -s)/$(uname -m)" in
   Linux/x86_64)
     root="$staging/root"
-    mkdir -p "$root/DEBIAN" "$root/usr/bin" "$root/usr/share/applications" \
+    mkdir -p "$root/DEBIAN" "$root/etc/apparmor.d" "$root/usr/bin" "$root/usr/share/applications" \
       "$root/usr/share/icons/hicolor/scalable/apps" "$root/usr/share/doc/visual-tmux-desktop"
     cp "$binary" "$root/usr/bin/visual-tmux-desktop"
     chmod 755 "$root/usr/bin/visual-tmux-desktop"
+    cp "$project_dir/packaging/desktop/visual-tmux-desktop.apparmor" "$root/etc/apparmor.d/visual-tmux-desktop"
+    cp "$project_dir/packaging/desktop/postinst" "$root/DEBIAN/postinst"
+    cp "$project_dir/packaging/desktop/prerm" "$root/DEBIAN/prerm"
+    chmod 755 "$root/DEBIAN/postinst" "$root/DEBIAN/prerm"
     cp "$project_dir/packaging/desktop/visual-tmux-client.desktop" \
       "$root/usr/share/applications/io.github.ak12official.visualtmuxclient.desktop"
     cp "$project_dir/packaging/desktop/visual-tmux-client.svg" "$root/usr/share/icons/hicolor/scalable/apps/"

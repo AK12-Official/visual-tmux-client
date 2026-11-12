@@ -1,0 +1,9 @@
+# Ubuntu 24.04 requires an explicit grant for WebKit's user-namespace sandbox.
+# This grants namespaces to this executable; WebKit/bubblewrap still creates and
+# enforces the renderer sandbox. It does not disable AppArmor system-wide.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile visual-tmux-desktop /usr/bin/visual-tmux-desktop flags=(unconfined) {
+  userns,
+}

@@ -18,7 +18,10 @@ import (
 
 func (s *desktopWindow) attachLifecycle(window *application.WebviewWindow) {
 	requests := make(chan struct{}, 1)
-	s.lifecycle = desktop.NewLifecycle(s.close, func(err error) {
+	s.lifecycle = desktop.NewLifecycle(func() error {
+		cancelOwnedDialogs(window)
+		return s.close()
+	}, func(err error) {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "desktop shutdown:", err)
 		}
@@ -36,6 +39,9 @@ func (s *desktopWindow) attachLifecycle(window *application.WebviewWindow) {
 	s.attachFullscreen(window, requests)
 	s.attachQuitPoll(requests, window)
 	window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
+		if os.Getenv("VTC_NATIVE_FIXTURE_MODE") == "focus" {
+			fmt.Fprintln(os.Stderr, "focus fixture: window closing; state:", s.lifecycle.State())
+		}
 		if s.lifecycle.State() == desktop.Stopped {
 			return
 		}
@@ -75,7 +81,10 @@ func (s *desktopWindow) attachLifecycle(window *application.WebviewWindow) {
 	go func() {
 		defer signal.Stop(shutdownSignals)
 		select {
-		case <-shutdownSignals:
+		case received := <-shutdownSignals:
+			if os.Getenv("VTC_NATIVE_FIXTURE_MODE") == "focus" {
+				fmt.Fprintln(os.Stderr, "focus fixture: received signal:", received)
+			}
 			s.lifecycle.Stop()
 		case <-s.lifecycle.Done():
 		case <-s.native.Context().Done():
