@@ -39,7 +39,7 @@ func (s *desktopWindow) attachLifecycle(window *application.WebviewWindow) {
 	s.attachFullscreen(window, requests)
 	s.attachQuitPoll(requests, window)
 	window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
-		if os.Getenv("VTC_NATIVE_FIXTURE_MODE") == "focus" {
+		if focusFixture() {
 			fmt.Fprintln(os.Stderr, "focus fixture: window closing; state:", s.lifecycle.State())
 		}
 		if s.lifecycle.State() == desktop.Stopped {
@@ -82,7 +82,7 @@ func (s *desktopWindow) attachLifecycle(window *application.WebviewWindow) {
 		defer signal.Stop(shutdownSignals)
 		select {
 		case received := <-shutdownSignals:
-			if os.Getenv("VTC_NATIVE_FIXTURE_MODE") == "focus" {
+			if focusFixture() {
 				fmt.Fprintln(os.Stderr, "focus fixture: received signal:", received)
 			}
 			s.lifecycle.Stop()

@@ -55,13 +55,16 @@ func newDesktop(configPath string) (*desktopWindow, error) {
 func (s *desktopWindow) createNative(profile string) {
 	logger := desktop.NativeLogger(os.Stderr)
 	options := application.Options{
-		Name:                        "Visual Tmux Client",
-		Linux:                       application.LinuxOptions{ApplicationID: "io.github.ak12official.visualtmuxclient"},
-		Logger:                      logger,
-		Mac:                         application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: true},
+		Name:   "Visual Tmux Client",
+		Linux:  application.LinuxOptions{ApplicationID: "io.github.ak12official.visualtmuxclient"},
+		Logger: logger,
+		// The owned close hook explicitly quits after confirmation and cleanup.
+		// Keep Cocoa's automatic policy out of the lifecycle state machine,
+		// including when the existing window is temporarily hidden.
+		Mac:                         application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: false},
 		DisableDefaultSignalHandler: true,
 		ShouldQuit: func() bool {
-			if os.Getenv("VTC_NATIVE_FIXTURE_MODE") == "focus" {
+			if focusFixture() {
 				fmt.Fprintln(os.Stderr, "focus fixture: native quit requested; lifecycle absent:", s.lifecycle == nil)
 			}
 			if s.lifecycle == nil || s.lifecycle.State() == desktop.Stopped {
@@ -71,7 +74,7 @@ func (s *desktopWindow) createNative(profile string) {
 			return false
 		},
 		OnShutdown: func() {
-			if os.Getenv("VTC_NATIVE_FIXTURE_MODE") == "focus" {
+			if focusFixture() {
 				fmt.Fprintln(os.Stderr, "focus fixture: native shutdown")
 			}
 			if err := s.close(); err != nil {
@@ -90,7 +93,7 @@ func (s *desktopWindow) createNative(profile string) {
 		options.SingleInstance = &application.SingleInstanceOptions{
 			UniqueID: profile,
 			OnSecondInstanceLaunch: func(application.SecondInstanceData) {
-				if os.Getenv("VTC_NATIVE_FIXTURE_MODE") == "focus" {
+				if focusFixture() {
 					fmt.Fprintln(os.Stderr, "focus fixture: second launch received")
 				}
 				if window := s.window.Load(); window != nil {
@@ -121,3 +124,5 @@ func showStartupError(s *desktopWindow, failure error) {
 		fmt.Fprintln(os.Stderr, "desktop error window unavailable:", err)
 	}
 }
+
+func focusFixture() bool { return os.Getenv("VTC_NATIVE_FIXTURE_MODE") == "focus" }

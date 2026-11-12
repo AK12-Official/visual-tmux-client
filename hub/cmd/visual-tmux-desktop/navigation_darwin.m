@@ -3,6 +3,8 @@
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
+#import <CoreGraphics/CoreGraphics.h>
+#include <unistd.h>
 
 @interface VTCNavigationGuard : NSObject <WKNavigationDelegate, WKUIDelegate>
 @property(nonatomic, copy) NSString *origin;
@@ -151,12 +153,16 @@ int vtcScheduleSaveProbe(void *window, int approve, const char *path) {
             if (approve) {
                 panel.directoryURL = [NSURL fileURLWithPath:destination.stringByDeletingLastPathComponent];
                 panel.nameFieldStringValue = destination.lastPathComponent;
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-                    NSEvent *enter = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
-                        modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime
-                        windowNumber:panel.windowNumber context:nil characters:@"\r"
-                        charactersIgnoringModifiers:@"\r" isARepeat:NO keyCode:36];
-                    [panel sendEvent:enter];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+                    // Save-panel content lives in another process. Send a real
+                    // key event through our own application's event pipeline,
+                    // never to the user's global keyboard event stream.
+                    CGEventRef down = CGEventCreateKeyboardEvent(NULL, 36, true);
+                    CGEventRef up = CGEventCreateKeyboardEvent(NULL, 36, false);
+                    CGEventPostToPid(getpid(), down);
+                    CGEventPostToPid(getpid(), up);
+                    CFRelease(down);
+                    CFRelease(up);
                 });
             } else { [panel cancel:nil]; }
             [timer invalidate];

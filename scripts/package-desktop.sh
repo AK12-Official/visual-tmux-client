@@ -1,6 +1,7 @@
 #!/bin/sh
 # Package a native binary whose embedded frontend has already been built.
 set -eu
+umask 022
 
 project_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 version=${DESKTOP_VERSION:-0.5.0-desktop.dev}
@@ -30,6 +31,7 @@ case "$(uname -s)/$(uname -m)" in
     cp "$project_dir/packaging/desktop/postinst" "$root/DEBIAN/postinst"
     cp "$project_dir/packaging/desktop/prerm" "$root/DEBIAN/prerm"
     chmod 755 "$root/DEBIAN/postinst" "$root/DEBIAN/prerm"
+    printf '%s\n' '/etc/apparmor.d/visual-tmux-desktop' > "$root/DEBIAN/conffiles"
     cp "$project_dir/packaging/desktop/visual-tmux-client.desktop" \
       "$root/usr/share/applications/io.github.ak12official.visualtmuxclient.desktop"
     cp "$project_dir/packaging/desktop/visual-tmux-client.svg" "$root/usr/share/icons/hicolor/scalable/apps/"

@@ -2,7 +2,9 @@
 set -eu
 case "${1:-}" in
   remove|deconfigure)
-    if command -v apparmor_parser >/dev/null 2>&1 && [ -d /sys/kernel/security/apparmor ]; then
+    if command -v apparmor_parser >/dev/null 2>&1 &&
+       [ -r /sys/kernel/security/apparmor/profiles ] &&
+       grep -q '^visual-tmux-desktop ' /sys/kernel/security/apparmor/profiles; then
       apparmor_parser -R /etc/apparmor.d/visual-tmux-desktop
     fi
     ;;
