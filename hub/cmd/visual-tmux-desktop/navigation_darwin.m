@@ -174,7 +174,8 @@ int vtcScheduleSaveProbe(void *window, int approve, const char *path) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
                     // Use the panel's own accessibility tree, including its
                     // remote content. No global input or foreign app is touched.
-                    BOOL pressed = vtcPressSaveButton(panel, panel.prompt, 0, [NSMutableSet new]);
+                    BOOL pressed = [panel accessibilityPerformConfirm];
+                    if (!pressed) pressed = vtcPressSaveButton(panel, panel.prompt, 0, [NSMutableSet new]);
                     fprintf(stderr, "spike: owned save accessibility button pressed: %s\n", pressed ? "yes" : "no");
                 });
             } else { [panel cancel:nil]; }

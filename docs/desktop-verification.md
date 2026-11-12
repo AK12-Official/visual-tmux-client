@@ -7,7 +7,7 @@ This is an execution record for `add-desktop-application`, not a claim of releas
 | Target | Native build | Real WebView integration | Installed package | Status |
 | --- | --- | --- | --- | --- |
 | Ubuntu 24.04 amd64, Wayland | Pending | Pending | Pending | Not validated |
-| Ubuntu 24.04 amd64, X11 | Passed: tagged spike compiled | Automatic auth/workspace/reload passed via HTTP action; remaining GUI checks pending | Pending | Compatibility gate not passed |
+| Ubuntu 24.04 amd64, X11 | Passed: native build | Auth/reload/save/cancel/flushed quit passed; physical workflow checks pending | DEB installed and launched with empty PATH in CI | Full acceptance pending |
 | macOS arm64, documented minimum 12+ | Passed on macos-15 CI | Auth/workspace/reloads/navigation restriction/clean window close passed; remaining GUI checks pending | Pending | Compatibility gate not passed |
 | macOS amd64, documented minimum 12+ | Passed on macos-15-intel CI | Auth/workspace/reloads/navigation restriction/clean window close passed; remaining GUI checks pending | Pending | Compatibility gate not passed |
 
@@ -135,7 +135,7 @@ Latest local commands/results:
 
 The installed linter's Go export-data reader could not consume the host Go 1.27.3 cache. Checks were rerun successfully with Go 1.26.10; this did not require weakening lint rules or changing the headless runtime contract. Native GUI probes use fake sessions only. Full Go regressions use the repository's existing disposable tmux test fixtures; green tests are not a claim of universal isolation.
 
-Overall tracked progress is 22/35. The compatibility probe remains disposable; a separate normal desktop entry is now implemented. Complete downloads/clipboard/fullscreen runtime acceptance, package installation and untested platforms remain open. The HTTP architecture change itself is approved and resolved; the remaining gate is execution evidence and unfinished integration, not another request to approve that architecture.
+Overall tracked progress is 23/35. The compatibility probe remains disposable; a separate normal desktop entry is now implemented. Complete downloads/clipboard/fullscreen runtime acceptance, package installation and untested platforms remain open. The HTTP architecture change itself is approved and resolved; the remaining gate is execution evidence and unfinished integration, not another request to approve that architecture.
 
 ### Remote compatibility workflow
 
@@ -183,3 +183,5 @@ Record actual native test results here as implementation progresses. Leave unava
 - Native fullscreen layout regression checks now cover browser defaults, desktop requests and OS-initiated exits. Local Go vet (ordinary and tagged), race checks, ordinary/tagged lint, strict OpenSpec validation and workflow lint pass. The extra fullscreen test file raises the frontend suite to 34 files; its targeted test and the production build pass.
 
 - Task 2.5 is complete again after the real native signal/focus tests passed on Linux and both macOS architectures at `74737a5a32ae7e2b9806120f641cb3ee3934d17e` in [run 43215640556](https://github.com/AK12-Official/visual-tmux-client/actions/runs/43215640556). Cocoa automatic last-window termination is disabled; the owned lifecycle performs confirmed quit and cleanup. Headless ownership conflict preservation is covered separately by composed backend tests.
+
+- Task 7.1 is complete: at `2f8e0dad8a8521d30fa2e256cf9334d79365da7f`, Ubuntu CI [run 43216368634](https://github.com/AK12-Official/visual-tmux-client/actions/runs/43216368634) installed the DEB, loaded its targeted AppArmor profile, checked the installed executable/launcher, and launched `/usr/bin/visual-tmux-desktop --spike --probe` with an empty PATH. The installed application passed native save/cancel/byte equality, auth/reloads and flushed exit without Go/Node in PATH or a pre-existing backend. Clean runtime dependency installation had separately passed in the Ubuntu container. This does not establish Wayland, portal, real-host workflows or physical input acceptance.

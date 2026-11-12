@@ -85,6 +85,14 @@ jobs:
           uname -sm
           go version
           node --version
+      - name: Verify notarization fails closed without credentials
+        if: runner.os == 'macOS'
+        run: |
+          if sh scripts/notarize-desktop-macos.sh nonexistent-development.zip; then
+            echo 'Signing unexpectedly accepted missing credentials.' >&2
+            exit 1
+          fi
+          test ! -d desktop-notarized
       - name: Build shared frontend
         working-directory: hub/web
         run: |
