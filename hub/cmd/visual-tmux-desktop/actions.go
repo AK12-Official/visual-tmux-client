@@ -62,6 +62,8 @@ func attachDownload(
 			http.Error(w, "invalid clipboard request", http.StatusBadRequest)
 			return
 		}
+		// Wails dispatches SetText itself, but its manager lazily initializes
+		// the clipboard before dispatch. Serialize the entire manager call.
 		copied := false
 		application.InvokeSync(func() { copied = native.Clipboard.SetText(body.Text) })
 		if !copied {

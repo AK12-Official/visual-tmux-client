@@ -20,7 +20,9 @@ if not binary.is_file():
 with tempfile.TemporaryDirectory(prefix='vtc-wl-', dir='/tmp') as runtime:
     os.chmod(runtime, 0o700)
     env = dict(os.environ, XDG_RUNTIME_DIR=runtime)
-    env.pop('DISPLAY', None)
+    for variable in ['DISPLAY', 'DBUS_SESSION_BUS_ADDRESS', 'DBUS_STARTER_ADDRESS',
+                     'DBUS_STARTER_BUS_TYPE', 'AT_SPI_BUS_ADDRESS', 'IBUS_ADDRESS']:
+        env.pop(variable, None)
     for variable, directory in [('HOME', 'home'), ('XDG_CONFIG_HOME', 'config'),
                                 ('XDG_DATA_HOME', 'data'), ('XDG_CACHE_HOME', 'cache')]:
         private = Path(runtime) / directory

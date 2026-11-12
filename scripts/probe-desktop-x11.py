@@ -37,7 +37,8 @@ binary = args.binary.resolve()
 with tempfile.TemporaryDirectory(prefix='vtc-x11-', dir='/tmp') as temporary:
     root = Path(temporary)
     env = dict(os.environ)
-    for variable in ['WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS', 'IBUS_ADDRESS']:
+    for variable in ['WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS', 'DBUS_STARTER_ADDRESS',
+                     'DBUS_STARTER_BUS_TYPE', 'AT_SPI_BUS_ADDRESS', 'IBUS_ADDRESS']:
         env.pop(variable, None)
     for variable in ['HOME', 'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME']:
         directory = root / variable

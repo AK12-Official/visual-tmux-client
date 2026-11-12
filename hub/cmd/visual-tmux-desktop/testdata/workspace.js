@@ -34,7 +34,7 @@
   document.querySelector('.xterm-helper-textarea').focus();
   await request('key-copy');
   await status(value=>value.input.includes('\u0003'),'Ctrl+C input');
-  await action('clipboard',{text:'paste-中文\nline2\n'});
+  await Promise.all(Array.from({length:8},()=>action('clipboard',{text:'paste-中文\nline2\n'})));
   const clipboard=await request('clipboard-status');
   if(clipboard.text!=='paste-中文\nline2\n')throw new Error('Native clipboard bytes differ: '+clipboard.text);
   await request('key-paste');

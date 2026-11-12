@@ -9,7 +9,7 @@ in progress; passing a native fixture does not complete the full target matrix.
 Environment: Ubuntu 24.04 amd64, GTK 4.14.5, WebKitGTK 2.52.6,
 Go 1.26.10, authenticated private Xvfb/Openbox X11 display and a separate
 headless Weston 13 Wayland compositor. Each run uses private HOME/XDG state
-and a new session bus. WebKit and browser sandboxes remain enabled.
+and a new session bus, with inherited D-Bus starter addresses removed. WebKit and browser sandboxes remain enabled.
 
 | Behavior | X11 | Wayland |
 | --- | --- | --- |
@@ -17,7 +17,7 @@ and a new session bus. WebKit and browser sandboxes remain enabled.
 | Single-instance focus and signal cleanup | Passed in native test suite | Existing controller coverage; new physical acceptance pending |
 | Continuous ANSI/Chinese output through the actual HTTP/WebSocket/frontend | Passed with injected terminal process | Passed with injected terminal process |
 | Ctrl+C without selection reaches terminal as `0x03` | Passed with native XTest input | Pending |
-| Native clipboard exact Unicode/multiline bytes and Ctrl+Shift+V paste | Passed | Pending |
+| Concurrent first-use clipboard calls, exact Unicode/multiline bytes and Ctrl+Shift+V paste | Passed | Pending |
 | Native drag selection and Ctrl+C copy without sending an interrupt | Passed | Pending |
 | Visible copy failure with clipboard HTTP failure injected in the real page | Passed | Pending |
 | WebKit input-method context commits Chinese text | Passed | Pending |
@@ -46,7 +46,9 @@ dispatch, not successful TLS rendering: its disposable self-signed target is
 expected to fail certificate validation. No certificate or sandbox bypass is used.
 The owned workspace stays mounted at its original origin throughout.
 
-GTK clipboard writes now run on the GTK main thread. Copy failures use a message
+Clipboard manager calls, including concurrent first use, now serialize on the
+GTK main thread. Wails already dispatches actual writes; this also protects its
+manager's lazy initialization before that dispatch. Copy failures use a message
 applicable to both desktop and browser environments. The DEB declares `xdg-utils`,
 required by the pinned Wails Linux browser opener. A rebuilt DEB installed in the
 disposable Ubuntu runtime container and automatically installed that dependency.
@@ -83,13 +85,17 @@ Production download paths still come exclusively from the native chooser.
 
 ## Regression results
 
-The final private X11 suite passed all three native tests (focus, signal cleanup,
+The private X11 suite passed all three native tests (focus, signal cleanup,
 workspace); the workspace case completed in 8.23 seconds. The final Weston
 workspace case and both existing full auth/dialog/download/reload/flush probes
 also passed. Logs were retained at `/tmp/vtc-x11-all-native-final.log`,
 `/tmp/vtc-wayland-workspace-final.log`, `/tmp/vtc-x11-spike-final.log` and
 `/tmp/vtc-wayland-spike-final.log` for this local run. CI preserves its X11 log
-as an artifact.
+as an artifact. A subsequent X11 run under the Go race detector also passed
+eight simultaneous first-use clipboard requests and the full workspace flow
+(`/tmp/vtc-x11-clipboard-race.log`, 9.55 seconds). The Wayland workspace passed
+under the race detector after inherited D-Bus starter addresses were removed
+(`/tmp/vtc-wayland-workspace-race.log`).
 
 The continuation also passed 34 frontend test files and the frontend build,
 ordinary Go tests, the complete desktop-tagged Go suite, desktop-tagged vet/lint,
@@ -97,6 +103,12 @@ ordinary Go tests, the complete desktop-tagged Go suite, desktop-tagged vet/lint
 build, actionlint and strict OpenSpec validation. Native UI cases run on their
 private displays separately from the display-free tagged Go suite. No tmux
 isolation helper was changed.
+
+Remote [desktop compatibility run 43268738195](https://github.com/AK12-Official/visual-tmux-client/actions/runs/43268738195)
+passed all three native targets for `fe748d6`; ordinary
+[CI run 43268738216](https://github.com/AK12-Official/visual-tmux-client/actions/runs/43268738216)
+also passed, including the four existing headless packages. These results do not
+complete the deferred macOS interactive checks.
 
 ## Remaining Linux evidence
 
