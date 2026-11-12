@@ -90,6 +90,8 @@ go build -tags desktop -o ../visual-tmux-desktop ./cmd/visual-tmux-desktop
 
 Linux builds need `pkg-config`, `libgtk-4-dev` and `libwebkitgtk-6.0-dev`; macOS builds need Xcode Command Line Tools and the deployment-target flags in the desktop guide. Installed desktop packages need neither Go nor Node. Local sessions still require tmux.
 
+On macOS, replace the Go build line with `MACOSX_DEPLOYMENT_TARGET=12.0 go build -tags desktop -ldflags '-extldflags=-mmacosx-version-min=12.0' -o ../visual-tmux-desktop ./cmd/visual-tmux-desktop`. On Ubuntu with restricted user namespaces, use the DEB's configured AppArmor profile; a source binary at another path needs its own matching profile. Packaging and unsigned/notarized artifact status are documented in the desktop guide.
+
 Use `--config <file>` for an explicit configuration. Otherwise desktop mode discovers `visual-tmux-client/visual-tmux-client.yaml` under the OS user configuration directory. It owns the loopback address, fresh token and same-origin policy; `--addr` is unavailable. A headless process owning the same host state must be closed before desktop startup. Desktop UI preferences persist separately from the changing port; credentials and editor drafts are excluded. Closing the window or choosing Quit confirms unsaved edits and waits for preference writes. Returning to the existing server command remains available after closing the desktop.
 
 ## Configuration

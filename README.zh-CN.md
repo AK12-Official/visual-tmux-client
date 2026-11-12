@@ -88,6 +88,8 @@ go build -tags desktop -o ../visual-tmux-desktop ./cmd/visual-tmux-desktop
 
 Linux 构建需要 `pkg-config`、`libgtk-4-dev`、`libwebkitgtk-6.0-dev`；macOS 需要 Xcode Command Line Tools 和桌面指南中的部署目标参数。安装后的桌面包不需要 Go 或 Node，本地会话仍需要 tmux。
 
+macOS 请将 Go 构建行替换为 `MACOSX_DEPLOYMENT_TARGET=12.0 go build -tags desktop -ldflags '-extldflags=-mmacosx-version-min=12.0' -o ../visual-tmux-desktop ./cmd/visual-tmux-desktop`。Ubuntu 若限制用户命名空间，请使用 DEB 配置的 AppArmor 规则；其他路径下的源码构建程序需要匹配其路径的规则。打包方法及未签名/公证产物状态见桌面指南。
+
 可用 `--config <文件>` 显式指定配置；否则从系统用户配置目录下发现 `visual-tmux-client/visual-tmux-client.yaml`。桌面模式管理 loopback 地址、随机 Token 和同源策略，不提供 `--addr`。若已有 headless 进程占用同一主机状态目录，需要先关闭它。界面偏好独立于动态端口保存，不持久化凭据或编辑草稿。关闭窗口或选择 Quit 会先确认未保存编辑，再等待偏好写入；关闭桌面后仍可改用原有服务器命令。
 
 ## 配置说明

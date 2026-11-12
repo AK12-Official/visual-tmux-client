@@ -46,10 +46,10 @@
 ## 7. Build packages and document operation
 
 - [x] 7.1 Add a native Ubuntu 24.04 amd64 desktop build/package job with declared GTK4/WebKitGTK runtime dependencies, DEB launcher/icon and embedded assets; verify clean installation and launch without Go/Node or a separately running backend.
-- [ ] 7.2 Add native macOS arm64/amd64 build jobs and architecture-specific `.app` ZIP artifacts with a documented deployment target; verify bundle architecture/assets, launch from Finder with a minimal PATH and missing-tmux diagnostics.
+- [x] 7.2 Add native macOS arm64/amd64 build jobs and architecture-specific `.app` ZIP artifacts with a documented deployment target; verify bundle architecture/assets, launch from Finder with a minimal PATH and missing-tmux diagnostics.
 - [x] 7.3 Add optional credential-driven macOS signing/notarization and explicit unsigned-development labeling; verify unsigned CI remains usable without signing secrets and signed release claims are gated by signature/notarization checks.
 - [x] 7.4 Preserve existing headless CI/release jobs and add desktop-tagged checks without requiring native libraries in ordinary tests; verify all four existing headless artifacts and their version metadata remain produced.
-- [ ] 7.5 Update both READMEs and desktop build/verification documentation for launch modes, managed transport settings, config/state paths, shared-state conflicts, dependencies, quit/unsaved-edit behavior, signing status and rollback; verify examples against packaged behavior and list only actually validated support.
+- [x] 7.5 Update both READMEs and desktop build/verification documentation for launch modes, managed transport settings, config/state paths, shared-state conflicts, dependencies, quit/unsaved-edit behavior, signing status and rollback; verify examples against packaged behavior and list only actually validated support.
 
 ## 8. Validate the complete desktop workflow
 
