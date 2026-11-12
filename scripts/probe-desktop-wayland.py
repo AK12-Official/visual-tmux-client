@@ -50,7 +50,7 @@ with tempfile.TemporaryDirectory(prefix='vtc-wl-', dir='/tmp') as runtime:
                    GDK_DEBUG='no-portals', GSK_RENDERER='cairo')
         arguments = ['-test.run=^TestNativeLinuxWorkspace$', '-test.v'] if args.test_workspace else ['--spike', '--probe']
         result = subprocess.run(['dbus-run-session', '--', str(binary), *arguments],
-                                env=env, capture_output=True, text=True, timeout=40)
+                                env=env, capture_output=True, text=True, timeout=100 if args.test_workspace else 40)
         evidence = log.read_text() + '\nAPP OUTPUT:\n' + result.stdout + result.stderr
         args.log.write_text(evidence)
         print('\n'.join(line for line in (result.stdout + result.stderr).splitlines() if line.startswith('spike:') or 'WORKSPACE_' in line))

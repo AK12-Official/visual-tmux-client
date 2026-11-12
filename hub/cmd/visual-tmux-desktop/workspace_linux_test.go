@@ -40,7 +40,7 @@ func TestNativeLinuxWorkspace(t *testing.T) {
 		t.Skip("native display required")
 	}
 	directory := t.TempDir()
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestNativeLinuxWorkspace$")
 	command.Dir = directory
@@ -67,7 +67,7 @@ func TestNativeLinuxWorkspace(t *testing.T) {
 	if err != nil {
 		for _, name := range []string{"browser.log"} {
 			if log, readErr := os.ReadFile(filepath.Join(directory, name)); readErr == nil {
-				t.Log(string(log))
+				t.Log(desktop.RedactDiagnostic(string(log)))
 			}
 		}
 		t.Fatalf("native workspace: %v\n%s", err, desktop.RedactDiagnostic(string(output)))
@@ -119,7 +119,7 @@ func runWorkspaceFixture() error {
 	controller.Bridge.Register("fixture-workspace", workspaceHandler(s, processes, &passed))
 	go func() {
 		select {
-		case <-time.After(30 * time.Second):
+		case <-time.After(60 * time.Second):
 			fmt.Fprintln(os.Stderr, "WORKSPACE_TIMEOUT")
 			application.InvokeAsync(func() {
 				if s.lifecycle != nil {

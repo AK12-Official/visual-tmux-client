@@ -44,7 +44,10 @@ starts real Chrome with a temporary profile and waits for its owned processes.
 The HTTP target confirms a browser request without Authorization. HTTPS proves
 dispatch, not successful TLS rendering: its disposable self-signed target is
 expected to fail certificate validation. No certificate or sandbox bypass is used.
-The owned workspace stays mounted at its original origin throughout.
+The owned workspace stays mounted at its original origin throughout. Browser
+startup has a separate bounded budget for cold CI runners. Exit code, elapsed
+time, timeout status and bounded failure diagnostics are retained, so a handler
+that starts and exits without reaching the HTTP target still fails acceptance.
 
 Clipboard manager calls, including concurrent first use, now serialize on the
 GTK main thread. Wails already dispatches actual writes; this also protects its

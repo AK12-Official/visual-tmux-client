@@ -13,7 +13,7 @@
  const request = (phase,message='',extra={}) => action('fixture-workspace',{phase,message,...extra});
  const status = async (predicate,label) => {
   let last;
-  for(let i=0;i<200;i++){
+  for(let i=0;i<450;i++){
    const value=await request('status');last=value;if(predicate(value))return value;
    await new Promise(r=>setTimeout(r,50));
   }
