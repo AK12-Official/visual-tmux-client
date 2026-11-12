@@ -276,7 +276,7 @@ export const zhCN: LocaleMessages = {
     noLiveTerminalNotice: '没有可插入路径的活动终端。',
     processExited: '进程已退出，退出码 {code}',
     copyInsecureContextNotice: '复制失败：浏览器在非安全上下文（HTTPS 或 localhost 以外）未暴露剪贴板。',
-    copyBlockedNotice: '复制失败：浏览器阻止了剪贴板写入。',
+    copyBlockedNotice: '复制失败：剪贴板访问被拒绝或暂不可用，请重试。',
   },
   files: {
     hostTitle: '主机: {name}',

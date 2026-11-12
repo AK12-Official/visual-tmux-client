@@ -9,6 +9,7 @@ import time
 
 parser = argparse.ArgumentParser(description='Isolated Ubuntu 24.04/Weston 13 WebView probe; no physical input acceptance.')
 parser.add_argument('binary', type=Path)
+parser.add_argument('--test-workspace', action='store_true', help='run the compiled native workspace test')
 parser.add_argument('--weston-prefix', type=Path, default=Path('/usr'))
 parser.add_argument('--log', type=Path, default=Path('/tmp/vtc-wayland-result.log'))
 args = parser.parse_args()
@@ -45,11 +46,12 @@ with tempfile.TemporaryDirectory(prefix='vtc-wl-', dir='/tmp') as runtime:
             raise RuntimeError(log.read_text() if log.exists() else compositor.stderr.read().decode())
         env.update(WAYLAND_DISPLAY='vtc-wayland', GDK_BACKEND='wayland',
                    GDK_DEBUG='no-portals', GSK_RENDERER='cairo')
-        result = subprocess.run(['dbus-run-session', '--', str(binary), '--spike', '--probe'],
+        arguments = ['-test.run=^TestNativeLinuxWorkspace$', '-test.v'] if args.test_workspace else ['--spike', '--probe']
+        result = subprocess.run(['dbus-run-session', '--', str(binary), *arguments],
                                 env=env, capture_output=True, text=True, timeout=40)
         evidence = log.read_text() + '\nAPP OUTPUT:\n' + result.stdout + result.stderr
         args.log.write_text(evidence)
-        print('\n'.join(line for line in result.stderr.splitlines() if line.startswith('spike:')))
+        print('\n'.join(line for line in (result.stdout + result.stderr).splitlines() if line.startswith('spike:') or 'WORKSPACE_' in line))
         if result.returncode:
             print(evidence[-8000:])
         print('HEADLESS_WAYLAND_PROBE_EXIT', result.returncode, 'full log:', args.log)

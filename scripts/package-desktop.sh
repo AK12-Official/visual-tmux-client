@@ -44,7 +44,7 @@ Architecture: amd64
 Maintainer: AK12-Official <noreply@github.com>
 Section: utils
 Priority: optional
-Depends: libgtk-4-1 (>= 4.14), libwebkitgtk-6.0-4 (>= 2.44), libc6 (>= 2.39)
+Depends: libgtk-4-1 (>= 4.14), libwebkitgtk-6.0-4 (>= 2.44), libc6 (>= 2.39), xdg-utils
 Recommends: tmux
 Description: Visual tmux desktop workspace (development build)
  Embeds the Vue interface and Go backend. No Go or Node runtime is needed.

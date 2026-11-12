@@ -69,6 +69,7 @@ static int vtcScheduleDialogProbe(void *window, int approve, const char *text) {
 G_GNUC_BEGIN_IGNORE_DEPRECATIONS
 static gboolean vtcRespondToSaveDialog(gpointer data) {
     VTCDialogProbe *probe = data;
+    if (++probe->attempts >= 50) return G_SOURCE_REMOVE;
     GListModel *windows = gtk_window_get_toplevels();
     for (guint i = 0; i < g_list_model_get_n_items(windows); i++) {
         GtkWindow *window = g_list_model_get_item(windows, i);
@@ -89,15 +90,31 @@ static gboolean vtcRespondToSaveDialog(gpointer data) {
         }
         if (!probe->configured) {
             char *directory = g_path_get_dirname(probe->text);
-            char *name = g_path_get_basename(probe->text);
             GFile *folder = g_file_new_for_path(directory);
             gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(window), folder, NULL);
-            gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(window), name);
             g_object_unref(folder);
             g_free(directory);
-            g_free(name);
         }
         if (++probe->configured >= 3) {
+            GFile *selected=gtk_file_chooser_get_file(GTK_FILE_CHOOSER(window));
+            GFile *expected=g_file_new_for_path(probe->text);
+            gboolean matches=selected && g_file_equal(selected,expected);
+            if (selected) g_object_unref(selected);
+            g_object_unref(expected);
+            if (!matches) {
+                char *name=g_path_get_basename(probe->text);
+                char *directory=g_path_get_dirname(probe->text);
+                GFile *folder=g_file_new_for_path(directory);
+                GFile *current=gtk_file_chooser_get_current_folder(GTK_FILE_CHOOSER(window));
+                if (current && g_file_equal(current,folder)) {
+                    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(window),name);
+                } else if (probe->configured%5==0) {
+                    gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(window),folder,NULL);
+                }
+                if (current) g_object_unref(current);
+                g_object_unref(folder);g_free(directory);
+                g_free(name);g_object_unref(window);return G_SOURCE_CONTINUE;
+            }
             g_printerr("spike: GTK chooser automation accepts\n");
             gtk_dialog_response(GTK_DIALOG(window), GTK_RESPONSE_ACCEPT);
             g_object_unref(window);
@@ -106,7 +123,7 @@ static gboolean vtcRespondToSaveDialog(gpointer data) {
         g_object_unref(window);
         return G_SOURCE_CONTINUE;
     }
-    return ++probe->attempts < 50 ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
+    return G_SOURCE_CONTINUE;
 }
 G_GNUC_END_IGNORE_DEPRECATIONS
 

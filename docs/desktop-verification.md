@@ -13,12 +13,19 @@ checks as passed. Existing macOS evidence is retained, cross-platform task
 checkboxes remain open, and Linux work is not paused. Overall progress remains
 27/35; this change is not archived or desktop-release-ready.
 
+## Latest Linux continuation
+
+See [Linux acceptance](desktop-linux-acceptance.md) for the current per-behavior
+results, reproducible native X11/Wayland commands and outstanding Linux checks.
+The new real-WebView suite covers native input, system-browser routing, file
+preview/save, overwrite cancellation/confirmation and dirty quit.
+
 ## Target matrix
 
 | Target | Native build | Real WebView integration | Installed package | Status |
 | --- | --- | --- | --- | --- |
-| Ubuntu 24.04 amd64, Wayland | Passed: native Linux build | Headless Weston 13 auth/save/reload/quit passed; physical input pending | Pending | Full acceptance pending |
-| Ubuntu 24.04 amd64, X11 | Passed: native build | Auth/reload/save/cancel/flushed quit passed; physical workflow checks pending | DEB installed and launched with empty PATH in CI | Full acceptance pending |
+| Ubuntu 24.04 amd64, Wayland | Passed: native Linux build | Headless Weston 13 auth/save/reload, file UI/overwrite/dirty quit passed; physical input pending | Pending | Full acceptance pending |
+| Ubuntu 24.04 amd64, X11 | Passed: native build | Auth/reload, native input, clipboard, wheel, fullscreen, file UI and dirty quit passed; full real-host workflow pending | DEB installed and launched with empty PATH in CI | Full acceptance pending |
 | macOS arm64, documented deployment target 12+ | Passed on macos-15 CI | Auth/reloads/navigation/quit passed; save acceptance and physical input pending | App ZIP launched through Launch Services with minimal OS PATH | Full acceptance pending |
 | macOS amd64, documented deployment target 12+ | Passed on macos-15-intel CI | Auth/reloads/navigation/quit passed; save acceptance and physical input pending | App ZIP launched through Launch Services with minimal OS PATH | Full acceptance pending |
 

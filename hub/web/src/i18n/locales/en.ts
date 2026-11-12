@@ -277,7 +277,7 @@ export const en: LocaleMessages = {
     noLiveTerminalNotice: 'No live terminal to insert into.',
     processExited: 'Process exited with code {code}',
     copyInsecureContextNotice: 'Copy failed: the browser exposes no clipboard outside a secure context (HTTPS or localhost).',
-    copyBlockedNotice: 'Copy failed: the browser blocked the clipboard write.',
+    copyBlockedNotice: 'Copy failed: clipboard access was denied or unavailable. Try again.',
   },
   files: {
     hostTitle: 'Host: {name}',

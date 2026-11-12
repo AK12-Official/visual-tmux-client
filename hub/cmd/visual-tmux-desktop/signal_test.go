@@ -27,9 +27,11 @@ import (
 )
 
 // Native Run must execute on the original main thread, including in fixtures.
+var nativeFixtureRunner = runSignalFixture
+
 func TestMain(m *testing.M) {
 	if os.Getenv("VTC_NATIVE_SIGNAL_FIXTURE") == "1" {
-		run := runSignalFixture
+		run := nativeFixtureRunner
 		if os.Getenv("VTC_NATIVE_FIXTURE_MODE") == "focus" {
 			run = runFocusFixture
 		}

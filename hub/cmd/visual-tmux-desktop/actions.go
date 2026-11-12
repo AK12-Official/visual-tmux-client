@@ -62,7 +62,9 @@ func attachDownload(
 			http.Error(w, "invalid clipboard request", http.StatusBadRequest)
 			return
 		}
-		if !native.Clipboard.SetText(body.Text) {
+		copied := false
+		application.InvokeSync(func() { copied = native.Clipboard.SetText(body.Text) })
+		if !copied {
 			http.Error(w, "clipboard unavailable", http.StatusServiceUnavailable)
 			return
 		}

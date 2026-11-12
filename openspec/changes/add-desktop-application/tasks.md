@@ -3,6 +3,9 @@ performed on their Mac. Existing build/package/startup evidence remains valid;
 pending macOS portions of tasks 1.3, 5.2–5.5, 6.2, 8.2 and 8.3 remain unchecked.
 See `docs/desktop-macos-acceptance.md` for the handoff checklist. Linux work is
 not paused by this decision. A green CI run does not complete manual acceptance.
+Current Linux passes and outstanding checks are tracked individually in
+`docs/desktop-linux-acceptance.md`; combined task checkboxes below stay open
+until their complete required evidence exists.
 
 ## 1. Prove native container compatibility
 
