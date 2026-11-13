@@ -97,6 +97,23 @@ static int vtcPrivateWheel(void *window,int down) {
     XFlush(display);dlclose(library);return 1;
 }
 
+static int vtcPrivatePinyin(void *window) {
+    if (g_strcmp0(g_getenv("VTC_PRIVATE_DISPLAY"),"1") ||
+        g_strcmp0(g_getenv("VTC_PRIVATE_IME"),"1")) return 0;
+    GtkWidget *root=GTK_WIDGET(window);
+    if (!GDK_IS_X11_DISPLAY(gtk_widget_get_display(root))) return 0;
+    void *library=dlopen("libXtst.so.6",RTLD_NOW|RTLD_LOCAL);
+    if (!library) return 0;
+    VTCKey send=(VTCKey)dlsym(library,"XTestFakeKeyEvent");
+    if (!send) {dlclose(library);return 0;}
+    Display *display=gdk_x11_display_get_xdisplay(gtk_widget_get_display(root));
+    for (const char *p="zhongwen ";*p;p++) {
+        unsigned int key=XKeysymToKeycode(display,(KeySym)*p);
+        send(display,key,True,20);send(display,key,False,20);
+    }
+    XFlush(display);dlclose(library);return 1;
+}
+
 typedef struct { GtkWidget *root; int approve; int attempts; } VTCOverwriteProbe;
 static GtkWidget *vtcOverwriteButton(GtkWidget *widget, const char *label) {
     if (GTK_IS_BUTTON(widget) && !g_strcmp0(gtk_button_get_label(GTK_BUTTON(widget)),label)) return widget;
@@ -128,7 +145,7 @@ static gboolean vtcOverwriteReply(gpointer data) {
         }
         g_object_unref(window);
     }
-    return ++probe->attempts<100 ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
+    return ++probe->attempts<300 ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
 }
 static void vtcOverwriteFree(gpointer data) {
     VTCOverwriteProbe *probe=data;
@@ -153,9 +170,15 @@ static int vtcInputCommit(void *window,const char *text) {
 */
 import "C"
 
-import "unsafe"
+import (
+	"os"
+	"unsafe"
+)
 
 func privatePointer(window unsafe.Pointer, x, y, endX, endY float64, drag bool) bool {
+	if os.Getenv("VTC_PRIVATE_WAYLAND") == "1" {
+		return privateWaylandInput(window, "pointer", x, y, endX, endY, drag)
+	}
 	var dragging C.int
 	if drag {
 		dragging = 1
@@ -164,6 +187,13 @@ func privatePointer(window unsafe.Pointer, x, y, endX, endY float64, drag bool) 
 }
 
 func privateKey(window unsafe.Pointer, paste bool) bool {
+	if os.Getenv("VTC_PRIVATE_WAYLAND") == "1" {
+		operation := "copy"
+		if paste {
+			operation = "paste"
+		}
+		return privateWaylandInput(window, operation, 0, 0, 0, 0, false)
+	}
 	key := C.int(1)
 	if paste {
 		key = 2
@@ -186,9 +216,26 @@ func scheduleOverwrite(window unsafe.Pointer, approved bool) bool {
 }
 
 func privateWheel(window unsafe.Pointer, down bool) bool {
+	if os.Getenv("VTC_PRIVATE_WAYLAND") == "1" {
+		operation := "wheel-up"
+		if down {
+			operation = "wheel-down"
+		}
+		return privateWaylandInput(window, operation, 0, 0, 0, 0, false)
+	}
 	var direction C.int
 	if down {
 		direction = 1
 	}
 	return C.vtcPrivateWheel(window, direction) != 0
+}
+
+func privatePinyin(window unsafe.Pointer) bool {
+	if os.Getenv("VTC_PRIVATE_IME") != "1" {
+		return false
+	}
+	if os.Getenv("VTC_PRIVATE_WAYLAND") == "1" {
+		return privateWaylandInput(window, "pinyin", 0, 0, 0, 0, false)
+	}
+	return C.vtcPrivatePinyin(window) != 0
 }

@@ -29,6 +29,8 @@ def stop_owned(process, group=False):
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--prefix', type=Path, default=Path('/usr'), help='Xvfb/Openbox installation prefix')
 parser.add_argument('--log', type=Path, default=Path('/tmp/vtc-x11-probe.log'))
+parser.add_argument('--portal', action='store_true', help='exercise the GTK desktop-portal chooser')
+parser.add_argument('--ime', action='store_true', help='run a private IBus/libpinyin service')
 parser.add_argument('binary', type=Path)
 parser.add_argument('arguments', nargs=argparse.REMAINDER)
 args = parser.parse_args()
@@ -46,6 +48,13 @@ with tempfile.TemporaryDirectory(prefix='vtc-x11-', dir='/tmp') as temporary:
         env[variable] = str(directory)
     env.update(GDK_BACKEND='x11', GSK_RENDERER='cairo', GDK_DEBUG='no-portals',
                GSETTINGS_BACKEND='memory', GIO_USE_VFS='local', VTC_PRIVATE_DISPLAY='1')
+    portal_config = Path(env['XDG_CONFIG_HOME']) / 'xdg-desktop-portal'
+    portal_config.mkdir(mode=0o700)
+    (portal_config / 'portals.conf').write_text('[preferred]\ndefault=gtk\n')
+    env['XDG_CURRENT_DESKTOP'] = 'X-Generic'
+    if args.portal:
+        env.update(VTC_PRIVATE_PORTAL='1', GTK_USE_PORTAL='1', GDK_DEBUG='', GTK_A11Y='atspi',
+                   VTC_PORTAL_DRIVER=str(Path(__file__).with_name('probe-desktop-portal.py').resolve()))
     authority = root / 'Xauthority'
     cookie = secrets.token_hex(16)
     xauth = prefix / 'bin/xauth'
@@ -77,6 +86,8 @@ with tempfile.TemporaryDirectory(prefix='vtc-x11-', dir='/tmp') as temporary:
                                        env=helper_env, stdout=wm_log, stderr=wm_log)
             with (root / 'test.log').open('w') as test_log:
                 command = [str(binary), *args.arguments]
+                if args.ime:
+                    command = ['python3', str(Path(__file__).with_name('probe-desktop-ime.py')), *command]
                 verifier = subprocess.Popen(['dbus-run-session', '--', *command], env=env,
                                             stdout=test_log, stderr=subprocess.STDOUT, start_new_session=True)
                 try:

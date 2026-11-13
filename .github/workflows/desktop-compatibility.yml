@@ -13,6 +13,7 @@ on:
       - '.github/workflows/desktop-compatibility.yml'
       - 'scripts/package-desktop.sh'
       - 'scripts/probe-desktop-*.py'
+      - 'scripts/testdata/**'
       - 'scripts/notarize-desktop-macos.sh'
       - 'packaging/desktop/**'
 
@@ -74,7 +75,9 @@ jobs:
           done
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=30 install --yes --no-install-recommends \
-            pkg-config libgtk-4-dev libwebkitgtk-6.0-dev xvfb xauth openbox libxtst6 dbus-x11 tmux
+            pkg-config libgtk-4-dev libwebkitgtk-6.0-dev xvfb xauth openbox libxtst6 dbus-x11 tmux \
+            weston libweston-13-dev ibus ibus-libpinyin ibus-gtk4 \
+            xdg-desktop-portal xdg-desktop-portal-gtk at-spi2-core gir1.2-atspi-2.0 python3-gi
       - name: Ensure disposable tmux fixture dependency on macOS
         if: runner.os == 'macOS'
         run: command -v tmux >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install tmux
@@ -125,11 +128,17 @@ jobs:
             sed "s|/usr/bin/visual-tmux-desktop|$GITHUB_WORKSPACE/desktop-build/visual-tmux-desktop{,-spike,.test}|" \
               ../packaging/desktop/visual-tmux-desktop.apparmor > ../desktop-build/ci.apparmor
             sudo apparmor_parser -r ../desktop-build/ci.apparmor
-            python3 ../scripts/probe-desktop-x11.py --log ../desktop-build/native-x11.log \
+            python3 ../scripts/probe-desktop-x11.py --ime --portal --log ../desktop-build/native-x11.log \
               ../desktop-build/visual-tmux-desktop.test -test.v
           else
             go test -tags desktop -ldflags '-extldflags=-mmacosx-version-min=12.0' ./cmd/visual-tmux-desktop
           fi
+      - name: Verify Wayland input and native workspace
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.native-build.outcome == 'success' }}
+        working-directory: hub
+        run: |
+          python3 ../scripts/probe-desktop-wayland.py ../desktop-build/visual-tmux-desktop.test \
+            --test-suite --test-input --ime --log ../desktop-build/native-wayland.log
       - name: Preserve Linux native verification logs
         if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v7

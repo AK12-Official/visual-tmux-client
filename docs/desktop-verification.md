@@ -24,7 +24,7 @@ preview/save, overwrite cancellation/confirmation and dirty quit.
 
 | Target | Native build | Real WebView integration | Installed package | Status |
 | --- | --- | --- | --- | --- |
-| Ubuntu 24.04 amd64, Wayland | Passed: native Linux build | Headless Weston 13 auth/save/reload, file UI/overwrite/dirty quit passed; physical input pending | Pending | Full acceptance pending |
+| Ubuntu 24.04 amd64, Wayland | Passed: native Linux build | Headless Weston 13 native input/IME/clipboard/fullscreen/scroll, auth/save/reload and dirty quit passed; physical hardware pending | Pending | Full acceptance pending |
 | Ubuntu 24.04 amd64, X11 | Passed: native build | Auth/reload, native input, clipboard, wheel, fullscreen, file UI and dirty quit passed; full real-host workflow pending | DEB installed and launched with empty PATH in CI | Full acceptance pending |
 | macOS arm64, documented deployment target 12+ | Passed on macos-15 CI | Auth/reloads/navigation/quit passed; save acceptance and physical input pending | App ZIP launched through Launch Services with minimal OS PATH | Full acceptance pending |
 | macOS amd64, documented deployment target 12+ | Passed on macos-15-intel CI | Auth/reloads/navigation/quit passed; save acceptance and physical input pending | App ZIP launched through Launch Services with minimal OS PATH | Full acceptance pending |
@@ -212,3 +212,16 @@ Record actual native test results here as implementation progresses. Leave unava
 - Task 7.2 is complete at `c989db0fbe159b7a9cfdcf09279725697b9871d9` in [run 43218977022](https://github.com/AK12-Official/visual-tmux-client/actions/runs/43218977022). Both macOS architectures passed native signal/focus tests whose fixture waits until the actual Vue workspace displays the actionable missing-tmux notice. Both architecture-specific app ZIPs passed strict ad-hoc signature verification, native Mach-O architecture inspection, and launch via `open -n -W -a` (Launch Services, the Finder launch path) with `--env PATH=/usr/bin:/bin:/usr/sbin:/sbin`. The packaged process confirmed that PATH and passed startup/auth/both reloads/flushed exit. This uses `--probe-startup`, so it does not pass save/input acceptance or minimum macOS 12 runtime acceptance. The only failing native step in each macOS job remains the full save-acceptance probe. Development packages were uploaded; no release was published.
 - Task 7.5 is complete: both READMEs and desktop operation/verification guides describe the managed settings, profile/state paths, ownership conflicts, dependencies/AppArmor, native build/deployment arguments, quit/draft semantics, optional signing and rollback. Package examples are supported by the installed Ubuntu and macOS Launch Services checks above. Unvalidated interactive workflows and minimum-version execution remain explicitly pending.
 - Remaining implementation acceptance tasks: 1.3, 5.2–5.5, 6.2, 8.2 and 8.3. macOS system-save confirmation cannot currently be driven by the runner's public in-process interfaces; a usable interactive macOS session has been requested. Physical IME/copy/paste/scroll/trackpad/fullscreen and dirty-editor/complete real-host workflows need their recorded target-specific acceptance. The draft must remain unarchived and must not be labeled desktop-release-ready.
+
+### Linux virtual-seat and real IME verification
+
+The subsequent full X11 and Weston 13 native suites pass with Go's race detector.
+They exercise real IBus/libpinyin composition (actual keys, DOM composition events
+and exactly-once Chinese terminal input), clipboard/paste/copy, trusted external
+links, fullscreen/resize, wheel scrolling, file operations and dirty quit. Weston
+also passes virtual finger-axis scrolling in both directions. See
+[Linux acceptance](desktop-linux-acceptance.md) for commands, isolation and scope.
+Earlier pending statements about these specific virtual-display cases are
+superseded by this evidence; physical hardware, portal and real-host GUI cases
+remain separately tracked there. Repeated-launch Show/Focus now runs on the UI
+thread after full-suite race detection exposed concurrent native-window access.

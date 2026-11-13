@@ -47,6 +47,9 @@ func TestNativeLinuxWorkspace(t *testing.T) {
 	command.Env = append(tmux.ScrubbedEnv(), "VTC_NATIVE_SIGNAL_FIXTURE=1", "VTC_NATIVE_FIXTURE_MODE=workspace",
 		"VTC_NATIVE_SIGNAL_STATE="+directory, "GDK_DEBUG=no-portals", "GSK_RENDERER=cairo",
 		"GSETTINGS_BACKEND=memory", "GIO_USE_VFS=local")
+	if os.Getenv("VTC_PRIVATE_PORTAL") == "1" {
+		command.Env = append(tmux.FilterEnv(command.Env, "GDK_DEBUG"), "GDK_DEBUG=")
+	}
 	for _, key := range []string{"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"} {
 		private := filepath.Join(directory, key)
 		if err := os.Mkdir(private, 0700); err != nil {
@@ -54,7 +57,15 @@ func TestNativeLinuxWorkspace(t *testing.T) {
 		}
 		command.Env = append(tmux.FilterEnv(command.Env, key), key+"="+private)
 	}
-	if os.Getenv("VTC_PRIVATE_DISPLAY") == "1" {
+	if privateNativeInput() {
+		portalConfig := filepath.Join(directory, "XDG_CONFIG_HOME", "xdg-desktop-portal")
+		if err := os.Mkdir(portalConfig, 0700); err != nil {
+			t.Fatal(err)
+		}
+		portalSettings := filepath.Join(portalConfig, "portals.conf")
+		if err := os.WriteFile(portalSettings, []byte("[preferred]\ndefault=gtk\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
 		command.Env = append(command.Env, prepareWorkspaceBrowser(t, directory)...)
 		query := exec.Command("xdg-mime", "query", "default", "x-scheme-handler/http")
 		query.Env = command.Env
@@ -172,9 +183,11 @@ func workspaceHandler(s *desktopWindow, processes *workspaceProcesses, passed *a
 			desktop.WriteJSON(w, map[string]any{"created": processes.created.Load(), "closed": processes.closed.Load(),
 				"frames": processes.frames.Load(), "resizes": processes.resizes.Load(), "state": s.lifecycle.State(),
 				"cols": processes.cols.Load(), "rows": processes.rows.Load(), "input": input,
-				"fullscreen": s.window.Load().IsFullscreen(), "privateInput": os.Getenv("VTC_PRIVATE_DISPLAY") == "1",
-				"sourcePath": filepath.Join(os.Getenv("VTC_NATIVE_SIGNAL_STATE"), "source", "draft.txt"),
-				"httpURL":    processes.httpURL, "httpsURL": processes.httpsURL,
+				"fullscreen": s.window.Load().IsFullscreen(), "privateInput": privateNativeInput(),
+				"privateWayland": os.Getenv("VTC_PRIVATE_WAYLAND") == "1",
+				"privateIME":     os.Getenv("VTC_PRIVATE_IME") == "1",
+				"sourcePath":     filepath.Join(os.Getenv("VTC_NATIVE_SIGNAL_STATE"), "source", "draft.txt"),
+				"httpURL":        processes.httpURL, "httpsURL": processes.httpsURL,
 				"externalHits": processes.externalHits.Load(),
 				"browserHTTP":  strings.Contains(string(browser), processes.httpURL),
 				"browserHTTPS": strings.Contains(string(browser), processes.httpsURL),
@@ -187,6 +200,35 @@ func workspaceHandler(s *desktopWindow, processes *workspaceProcesses, passed *a
 				return
 			}
 			desktop.WriteJSON(w, map[string]bool{"ok": true})
+		case "download-cancel":
+			destination := filepath.Join(os.Getenv("VTC_NATIVE_SIGNAL_STATE"), "cancelled.txt")
+			ready := false
+			if os.Getenv("VTC_PRIVATE_PORTAL") == "1" {
+				processes.startPortal(destination, "cancel")
+				ready = true
+			} else {
+				application.InvokeSync(func() {
+					ready = scheduleSaveProbe(s.window.Load().NativeWindow(), false, destination)
+				})
+			}
+			if !ready {
+				http.Error(w, "cancel chooser unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			desktop.WriteJSON(w, map[string]bool{"ok": true})
+		case "download-cancel-result":
+			if processes.portal != nil {
+				if err := <-processes.portal; err != nil {
+					http.Error(w, "portal cancel driver failed", http.StatusConflict)
+					return
+				}
+			}
+			_, err := os.Stat(filepath.Join(os.Getenv("VTC_NATIVE_SIGNAL_STATE"), "cancelled.txt"))
+			if !errors.Is(err, os.ErrNotExist) {
+				http.Error(w, "chooser cancellation created a destination", http.StatusConflict)
+				return
+			}
+			desktop.WriteJSON(w, map[string]bool{"ok": true})
 		case "overwrite":
 			destination := filepath.Join(os.Getenv("VTC_NATIVE_SIGNAL_STATE"), "download.txt")
 			if err := os.WriteFile(destination, []byte("keep"), 0600); err != nil {
@@ -194,9 +236,13 @@ func workspaceHandler(s *desktopWindow, processes *workspaceProcesses, passed *a
 				return
 			}
 			ready := false
+			if os.Getenv("VTC_PRIVATE_PORTAL") == "1" {
+				processes.startPortal(destination, "save")
+			}
 			application.InvokeSync(func() {
 				pointer := s.window.Load().NativeWindow()
-				ready = scheduleSaveProbe(pointer, true, destination) && scheduleOverwrite(pointer, body.Approved)
+				ready = (os.Getenv("VTC_PRIVATE_PORTAL") == "1" || scheduleSaveProbe(pointer, true, destination)) &&
+					scheduleOverwrite(pointer, body.Approved)
 			})
 			if !ready {
 				http.Error(w, "chooser unavailable", http.StatusServiceUnavailable)
@@ -204,6 +250,12 @@ func workspaceHandler(s *desktopWindow, processes *workspaceProcesses, passed *a
 			}
 			desktop.WriteJSON(w, map[string]bool{"ok": true})
 		case "overwrite-result":
+			if processes.portal != nil {
+				if err := <-processes.portal; err != nil {
+					http.Error(w, "portal chooser driver failed", http.StatusConflict)
+					return
+				}
+			}
 			destination := filepath.Join(os.Getenv("VTC_NATIVE_SIGNAL_STATE"), "download.txt")
 			contents, err := os.ReadFile(destination)
 			expected := "keep"
@@ -230,7 +282,8 @@ func workspaceHandler(s *desktopWindow, processes *workspaceProcesses, passed *a
 		case "pause", "resume":
 			processes.paused.Store(body.Phase == "pause")
 			desktop.WriteJSON(w, map[string]bool{"ok": true})
-		case "pointer", "drag", "key-copy", "key-paste", "commit", "wheel-up", "wheel-down":
+		case "pointer", "drag", "key-copy", "key-paste", "commit", "wheel-up",
+			"wheel-down", "pinyin", "finger-up", "finger-down":
 			ok := false
 			application.InvokeSync(func() {
 				switch body.Phase {
@@ -241,6 +294,10 @@ func workspaceHandler(s *desktopWindow, processes *workspaceProcesses, passed *a
 					ok = privateKey(s.window.Load().NativeWindow(), body.Phase == "key-paste")
 				case "wheel-up", "wheel-down":
 					ok = privateWheel(s.window.Load().NativeWindow(), body.Phase == "wheel-down")
+				case "finger-up", "finger-down":
+					ok = privateWaylandInput(s.window.Load().NativeWindow(), body.Phase, 0, 0, 0, 0, false)
+				case "pinyin":
+					ok = privatePinyin(s.window.Load().NativeWindow())
 				case "commit":
 					ok = inputCommit(s.window.Load().NativeWindow(), "输入-中文")
 				}
@@ -279,12 +336,27 @@ func workspaceHandler(s *desktopWindow, processes *workspaceProcesses, passed *a
 }
 
 type workspaceProcesses struct {
+	portal                                       chan error
 	externalHits                                 atomic.Int32
 	httpURL, httpsURL, browserLog                string
 	created, closed, frames, resizes, cols, rows atomic.Int32
 	paused                                       atomic.Bool
 	mu                                           sync.Mutex
 	input                                        []byte
+}
+
+func (f *workspaceProcesses) startPortal(destination, mode string) {
+	f.portal = make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "python3", os.Getenv("VTC_PORTAL_DRIVER"), destination, mode)
+		output, err := cmd.CombinedOutput()
+		if _, writeErr := fmt.Fprint(os.Stdout, desktop.RedactDiagnostic(string(output))); err == nil {
+			err = writeErr
+		}
+		f.portal <- err
+	}()
 }
 
 type workspaceBackend struct {
@@ -394,4 +466,8 @@ func prepareWorkspaceBrowser(t *testing.T, directory string) []string {
 	}
 	return []string{"BROWSER=" + launcher, "VTC_BROWSER_ROOT=" + profiles, "VTC_BROWSER_BINARY=" + browser,
 		"VTC_BROWSER_LOG=" + filepath.Join(directory, "browser.log"), "XDG_CURRENT_DESKTOP=X-Generic"}
+}
+
+func privateNativeInput() bool {
+	return os.Getenv("VTC_PRIVATE_DISPLAY") == "1" || os.Getenv("VTC_PRIVATE_WAYLAND") == "1"
 }

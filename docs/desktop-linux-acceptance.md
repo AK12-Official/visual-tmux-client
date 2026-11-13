@@ -14,18 +14,18 @@ and a new session bus, with inherited D-Bus starter addresses removed. WebKit an
 | Behavior | X11 | Wayland |
 | --- | --- | --- |
 | Automatic authentication and both reload paths | Passed in existing native spike | Passed in existing native spike |
-| Single-instance focus and signal cleanup | Passed in native test suite | Existing controller coverage; new physical acceptance pending |
+| Single-instance focus and signal cleanup | Passed in native test suite | Passed in native race suite |
 | Continuous ANSI/Chinese output through the actual HTTP/WebSocket/frontend | Passed with injected terminal process | Passed with injected terminal process |
-| Ctrl+C without selection reaches terminal as `0x03` | Passed with native XTest input | Pending |
-| Concurrent first-use clipboard calls, exact Unicode/multiline bytes and Ctrl+Shift+V paste | Passed | Pending |
-| Native drag selection and Ctrl+C copy without sending an interrupt | Passed | Pending |
-| Visible copy failure with clipboard HTTP failure injected in the real page | Passed | Pending |
-| WebKit input-method context commits Chinese text | Passed | Pending |
-| OS fullscreen entry/exit, frontend layout and measured resize | Passed | Pending |
-| Rapid window resize reaches changed final terminal dimensions | Passed | Pending |
-| Native mouse-wheel scroll changes visible terminal output in both directions | Passed | Pending |
-| Trusted HTTP/HTTPS links dispatch through real `xdg-open` | Passed | Pending |
-| Synthetic link refuses browser launch; unsupported scheme does not execute | Passed | Existing native navigation guard evidence |
+| Ctrl+C without selection reaches terminal as `0x03` | Passed with native XTest input | Passed with private virtual seat |
+| Concurrent first-use clipboard calls, exact Unicode/multiline bytes and Ctrl+Shift+V paste | Passed | Passed with private virtual seat |
+| Native drag selection and Ctrl+C copy without sending an interrupt | Passed | Passed with private virtual seat |
+| Visible copy failure with clipboard HTTP failure injected in the real page | Passed | Passed with private virtual seat |
+| Real IBus/libpinyin composition and exactly-once Chinese commit | Passed | Passed with private virtual seat |
+| OS fullscreen entry/exit, frontend layout and measured resize | Passed | Passed with private virtual seat |
+| Rapid window resize reaches changed final terminal dimensions | Passed | Passed with private virtual seat |
+| Native mouse-wheel scroll changes visible terminal output in both directions | Passed | Passed with private virtual seat |
+| Trusted HTTP/HTTPS links dispatch through real `xdg-open` | Passed | Passed with private virtual seat |
+| Synthetic link refuses browser launch; unsupported scheme does not execute | Passed | Passed |
 | Native GTK download overwrite cancel preserves old destination | Passed | Passed |
 | Separate native replacement confirmation writes exact source bytes | Passed | Passed |
 | Markdown preview renders Chinese heading | Passed | Passed |
@@ -78,7 +78,8 @@ These are verification tools, not additional desktop runtime dependencies.
 Wayland's `--weston-prefix /path/to/usr` supports private Weston 13 libraries.
 The X11 runner allocates its display number, uses an Xauthority cookie, disables
 TCP listening and stops only its owned processes. Native input automation is
-enabled only on that private X11 display. CI runs this same X11 test suite.
+enabled only on private displays: XTest on X11 and the test-only Weston 13
+virtual seat on Wayland. CI runs both native test suites.
 
 The GTK chooser automation checks the selected path before accepting. It waits
 for asynchronous folder navigation before setting the filename, so a wrong
@@ -115,14 +116,9 @@ complete the deferred macOS interactive checks.
 
 ## Remaining Linux evidence
 
-- Real IBus/libpinyin composition and candidate selection. A private daemon was
-  attempted, but its client/engine initialization failed and a later direct-bus
-  experiment timed out. This is unverified, distinct from the passing WebKit
-  Unicode commit check. No user input-method setting was changed.
-- Wayland keyboard/clipboard/fullscreen/scroll integration and physical trackpad
-  behavior. Headless Weston and XTest evidence do not establish these cases.
-- Desktop-portal save chooser behavior; current save/overwrite probes explicitly
-  use GTK's in-process chooser with `GDK_DEBUG=no-portals`.
+- Physical trackpad behavior and compositor-managed input-method integration.
+  Private virtual-seat input and the GTK IBus module do not establish these cases.
+- Other desktop-portal implementations beyond the verified private GTK backend.
 - An entire GUI session against real local and SSH hosts, including host-key
   trust repair, reconnect and remote file operations. Existing backend tests and
   the injected native workspace exercise different portions of this path.
@@ -132,3 +128,65 @@ complete the deferred macOS interactive checks.
 OpenSpec remains 27/35 because its eight open tasks combine these outstanding
 Linux checks with deferred macOS checks. The passes above are retained as
 per-platform evidence; no combined task is checked off prematurely.
+
+## Real IME and Wayland native input continuation
+
+Both complete native suites pass with Go's race detector, including single-instance
+focus, signal cleanup and workspace interaction. Evidence:
+`/tmp/vtc-x11-full-ime-race-fixed.log` and
+`/tmp/vtc-wayland-full-ime-race-fixed.log`. A race between repeated-launch
+Show/Focus and Hide was found and fixed by scheduling window operations on the
+UI thread.
+
+A private IBus daemon with its configuration service and libpinyin 1.15.7 receives
+actual `zhongwen` + Space key events. The real page observes compositionstart
+and compositionend, and the terminal receives exactly `中文` once on both X11
+and Wayland. No user input-method configuration is changed. This verifies the
+GTK IBus module path, not every desktop's compositor-managed IM integration.
+
+The Weston 13 desktop shell uses an isolated test module and virtual seat for
+keyboard, trusted pointer clicks/drag, discrete wheel and continuous finger-axis
+scrolling. Both scroll directions change visible terminal output. Pointer
+coordinates are checked against trusted page events. This is not physical
+trackpad evidence. The module is test-only and is not shipped in the application.
+
+Reproduce with a race-enabled native test executable and installed verification
+dependencies (`weston`, `libweston-13-dev`, IBus/libpinyin, GTK4 IBus module):
+
+```sh
+python3 scripts/probe-desktop-x11.py --ime /tmp/vtc-linux-input-race.test -test.v
+python3 scripts/probe-desktop-wayland.py /tmp/vtc-linux-input-race.test --test-suite --test-input --ime
+```
+
+Private extracted installations can use the prefix flags above. The module
+targets Weston's version 13 backend ABI; its declarations follow Ubuntu's Weston
+13.0.0 source, whose upstream tarball SHA256 is
+`52ff1d4aa2394a2e416c85a338b627ce97fa71d43eb762fd4aaf145d36fc795a`.
+
+The GTK desktop-portal backend also passes native save and preliminary replacement
+confirmation on both X11 and Wayland. The app's separate replacement cancellation
+preserves the old destination, and approval writes exact source bytes. The
+automation uses AT-SPI on the private session bus, restricts access to the GTK
+portal backend PID, and restricts destinations to the test fixture directory.
+No user accessibility configuration is changed. The GTK backend is selected in
+private portal configuration; this does not validate every GNOME/KDE portal.
+
+Portal reproduction adds `--portal` to either command above. It requires
+`xdg-desktop-portal`, `xdg-desktop-portal-gtk`, AT-SPI and Python GI bindings.
+Verified logs: `/tmp/vtc-portal-fifth.log` and
+`/tmp/vtc-wayland-portal.log`. The earlier in-process chooser tests remain
+independent evidence and can be reproduced by omitting `--portal`.
+
+The complete X11 race suite additionally passes direct portal chooser cancellation
+with no destination created (`/tmp/vtc-x11-portal-cancel.log`). A repeated complete
+Wayland suite exposed a Weston compositor SIGSEGV during consecutive GTK portal
+dialogs (`/tmp/vtc-wayland-portal-cancel-repeat.log`); that combination remains
+incomplete pending diagnosis despite the earlier single-workspace pass.
+
+GDB confirms the compositor exits inside `desktop-shell.so` while calling
+`weston_desktop_surface_foreach_child`, not inside the application. The trace is
+retained in `/tmp/vtc-wayland-portal-gdb.log`. A 500 ms path-completion delay did
+not resolve it and is not counted as a fix. CI currently gates the complete
+Wayland native suite with the in-process GTK chooser and the complete X11 suite
+with the GTK portal. Repeated Wayland portal acceptance remains open; the
+optional `--portal` switch preserves the reproducer.

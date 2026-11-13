@@ -97,8 +97,10 @@ func (s *desktopWindow) createNative(profile string) {
 					fmt.Fprintln(os.Stderr, "focus fixture: second launch received")
 				}
 				if window := s.window.Load(); window != nil {
-					window.Show()
-					window.Focus()
+					application.InvokeAsync(func() {
+						window.Show()
+						window.Focus()
+					})
 				}
 			},
 		}

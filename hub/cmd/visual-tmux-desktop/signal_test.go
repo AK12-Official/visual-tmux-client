@@ -24,6 +24,7 @@ import (
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/desktop/spike"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/tmux"
 	"github.com/AK12-Official/visual-tmux-client/hub/web"
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 // Native Run must execute on the original main thread, including in fixtures.
@@ -140,7 +141,7 @@ func runFocusFixture() error {
 		for range ticker.C {
 			if window.frontendReady.Load() && missingTmuxVisible.Load() {
 				fmt.Fprintln(os.Stderr, "focus fixture: actionable missing-tmux notice visible")
-				window.window.Load().Hide()
+				application.InvokeSync(func() { window.window.Load().Hide() })
 				if _, err := fmt.Fprintln(os.Stdout, "FOCUS_FIXTURE_HIDDEN"); err != nil {
 					return
 				}

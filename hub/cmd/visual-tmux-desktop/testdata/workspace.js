@@ -39,6 +39,19 @@
   if(clipboard.text!=='paste-中文\nline2\n')throw new Error('Native clipboard bytes differ: '+clipboard.text);
   await request('key-paste');
   await status(value=>value.input.replaceAll('\r','\n').includes('paste-中文\nline2\n'),'multiline paste');
+  if(initial.privateIME){
+   const before=await request('status');
+   const composition=[];
+   const textarea=document.querySelector('.xterm-helper-textarea');
+   const collect=event=>composition.push(event.type);
+   textarea.addEventListener('compositionstart',collect);textarea.addEventListener('compositionend',collect);
+   await request('pinyin');
+   await status(value=>value.input.slice(before.input.length)==='中文','real IBus pinyin commit without duplicate input');
+   textarea.removeEventListener('compositionstart',collect);textarea.removeEventListener('compositionend',collect);
+   if(!composition.includes('compositionstart')||!composition.includes('compositionend'))
+    throw new Error('Real IBus input did not emit DOM composition events');
+   await request('checkpoint','IBus/libpinyin real DOM composition and zhongwen + Space committed 中文 exactly once');
+  }
   await request('commit');
   await status(value=>value.input.includes('输入-中文'),'native Unicode input commit');
   await status(value=>value.frames>value.rows+20,'scrollback output');
@@ -55,10 +68,23 @@
   await request('wheel-down');
   await wait(()=>firstLine()>scrolled,'native mouse wheel scroll down');
   await new Promise(r=>setTimeout(r,200));
+  if(initial.privateWayland){
+   const prior=firstLine();
+   await request('finger-up');await wait(()=>firstLine()<prior,'Wayland finger-axis scroll up');
+   const middle=firstLine();
+   await request('finger-down');await wait(()=>firstLine()>middle,'Wayland finger-axis scroll down');
+   await new Promise(r=>setTimeout(r,200));
+   await request('checkpoint','Wayland native finger-axis scroll changed visible output in both directions');
+  }
   const dimensions=await request('status');
   const cell=screen.width/dimensions.cols,row=screen.height/dimensions.rows;
+  let mouseHit;
+  window.addEventListener('mousedown',event=>{mouseHit=event;},{capture:true,once:true});
   await request('drag','',{x:screen.x+cell*.2,y:screen.y+row*.5,
    endX:screen.x+cell*18,endY:screen.y+row*.5});
+  await wait(()=>mouseHit,'native pointer delivery');
+  if(!mouseHit.isTrusted||Math.abs(mouseHit.clientX-(screen.x+cell*.2))>2||
+   Math.abs(mouseHit.clientY-(screen.y+row*.5))>2)throw new Error('Native drag missed its page coordinates');
   await wait(()=>document.querySelector('.xterm-selection')?.children.length>0,'native drag selection rendered');
   await request('key-copy');
   let copied;
@@ -95,6 +121,11 @@
    await request('overwrite-result','',{approved});
   }
   await request('checkpoint','native overwrite cancel preserves destination; confirmation replaces exact bytes');
+  await request('download-cancel');
+  const cancelled=await action('download',{hostId:'local',connectionRevision:1,path:initial.sourcePath});
+  if(!cancelled.cancelled)throw new Error('Native chooser cancellation mismatch');
+  await request('download-cancel-result');
+  await request('checkpoint','native chooser cancellation creates no destination');
   (await wait(()=>document.querySelector('.app__term-btn[aria-pressed]'),'files button')).click();
   const markdown=await wait(()=>[...document.querySelectorAll('.tree__label')].find(b=>b.textContent.trim()==='README.md'),'markdown file');
   markdown.click();
