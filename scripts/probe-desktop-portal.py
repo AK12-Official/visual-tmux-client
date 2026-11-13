@@ -11,12 +11,13 @@ gi.require_version('Atspi', '2.0')
 from gi.repository import Atspi, Gio, GLib
 
 if os.environ.get('VTC_PRIVATE_PORTAL') != '1' or not any(
-        os.environ.get(key) == '1' for key in ('VTC_PRIVATE_DISPLAY', 'VTC_PRIVATE_WAYLAND')):
+        os.environ.get(key) == '1' for key in ('VTC_PRIVATE_DISPLAY', 'VTC_PRIVATE_WAYLAND', 'VTC_PRIVATE_GNOME')):
     raise SystemExit('private portal/display required')
 destination = Path(sys.argv[1]).resolve()
 if destination.parent != Path(os.environ['VTC_NATIVE_SIGNAL_STATE']).resolve():
     raise SystemExit('destination outside private fixture')
 bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+backend = 'gnome' if os.environ.get('VTC_PRIVATE_GNOME') == '1' else 'gtk'
 Atspi.set_timeout(1000, 1000)
 
 def descendants(node):
@@ -38,7 +39,7 @@ while time.monotonic() < deadline:
     try:
         pid = bus.call_sync('org.freedesktop.DBus', '/org/freedesktop/DBus',
                             'org.freedesktop.DBus', 'GetConnectionUnixProcessID',
-                            GLib.Variant('(s)', ('org.freedesktop.impl.portal.desktop.gtk',)),
+                            GLib.Variant('(s)', ('org.freedesktop.impl.portal.desktop.' + backend,)),
                             GLib.VariantType.new('(u)'), Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
         desktop = Atspi.get_desktop(0)
         nodes = []

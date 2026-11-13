@@ -190,3 +190,57 @@ not resolve it and is not counted as a fix. CI currently gates the complete
 Wayland native suite with the in-process GTK chooser and the complete X11 suite
 with the GTK portal. Repeated Wayland portal acceptance remains open; the
 optional `--portal` switch preserves the reproducer.
+
+## GNOME Wayland portal verification
+
+A separate private GNOME Shell 46.0 / Mutter 46.2 headless desktop passes
+consecutive downloads through `org.freedesktop.impl.portal.desktop.gnome`,
+including preliminary replacement, the application's replacement cancel/approve,
+and direct chooser cancellation with no file created. Markdown preview, Unicode
+editor save and dirty-quit cancel/discard also pass. Reproduce:
+
+```sh
+python3 scripts/probe-desktop-gnome.py /tmp/vtc-portal-cancel.test --log /tmp/vtc-gnome-portal-final.log
+```
+
+The binary is compiled with `go test -race -tags desktop -c`. The runner uses
+private HOME/XDG paths, its own D-Bus and Wayland socket, memory GSettings and
+only stops its owned GNOME process. Existing displays and the user's settings
+are not used. It requests software rendering; Mutter selects a GBM device
+without mode setting on this machine. GNOME/portal dependencies are verification
+tools, not application runtime requirements.
+
+This runner does not inject native input: its input/clipboard/fullscreen matrix
+is still distinct from the passing Weston/X11 input suites. `--test-suite`
+additionally exposes a GNOME-specific remaining case: the second CLI launch
+shows the window but does not obtain focus under Mutter's activation policy
+(`/tmp/vtc-gnome-full.log`). Signal cleanup and workspace pass in that run.
+Real desktop-launch activation and forwarding its activation token require
+further implementation/verification; this focus case is not marked complete.
+The Weston shell crash is not reproduced in the GNOME portal workspace.
+
+For commit `55872bed71d3d57a7316259397037468a828c748`, both
+[desktop compatibility CI](https://github.com/AK12-Official/visual-tmux-client/actions/runs/43396670113)
+and [ordinary CI](https://github.com/AK12-Official/visual-tmux-client/actions/runs/43396670197)
+passed, including native Linux/Mac build/package checks and the existing four
+headless packages. This does not complete deferred Mac interactive acceptance.
+
+### GNOME activation-token fix
+
+The complete GNOME suite now passes under Go's race detector
+(`/tmp/vtc-gnome-focus-ack.log`): repeated launch focuses the first window,
+signal cleanup passes and the portal/file/dirty-quit workspace passes. The
+second process forwards `XDG_ACTIVATION_TOKEN` through Wails single-instance
+data; GTK retains the startup identifier until the hidden window maps again.
+
+The test creates an owned GTK launch button, activates it with Mutter's private
+remote-desktop virtual keyboard and obtains GTK's startup notification token.
+The launcher remains alive until the recipient records actual visibility and
+focus. Thus launcher exit and automatic focus fallback cannot satisfy the test.
+A bare CLI launch without a valid desktop activation token remains subject to
+the compositor's focus-stealing policy. Reproduce with the current compiled
+native test executable and `probe-desktop-gnome.py --test-suite`.
+
+Desktop-tagged golangci-lint reports zero issues for these changes. The GNOME
+input matrix beyond this launcher interaction remains distinct from the full
+X11/Weston virtual-input tests.

@@ -91,13 +91,16 @@ func (s *desktopWindow) createNative(profile string) {
 	}
 	if profile != "" {
 		options.SingleInstance = &application.SingleInstanceOptions{
-			UniqueID: profile,
-			OnSecondInstanceLaunch: func(application.SecondInstanceData) {
+			UniqueID:       profile,
+			AdditionalData: map[string]string{"activationToken": os.Getenv("XDG_ACTIVATION_TOKEN")},
+			OnSecondInstanceLaunch: func(data application.SecondInstanceData) {
 				if focusFixture() {
-					fmt.Fprintln(os.Stderr, "focus fixture: second launch received")
+					fmt.Fprintln(os.Stderr, "focus fixture: second launch received; activation token present:",
+						data.AdditionalData["activationToken"] != "")
 				}
 				if window := s.window.Load(); window != nil {
 					application.InvokeAsync(func() {
+						applyActivationToken(window, data.AdditionalData["activationToken"])
 						window.Show()
 						window.Focus()
 					})

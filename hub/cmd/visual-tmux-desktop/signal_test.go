@@ -57,9 +57,13 @@ func TestNativeSecondLaunchFocusesBeforeOpeningRegistry(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	start := func() *exec.Cmd {
+	start := func(activate bool) *exec.Cmd {
 		fixtureTest := "-test.run=^TestNativeSecondLaunchFocusesBeforeOpeningRegistry$"
 		command := exec.CommandContext(ctx, os.Args[0], fixtureTest)
+		if activate && os.Getenv("VTC_PRIVATE_GNOME") == "1" {
+			driver := os.Getenv("VTC_GNOME_ACTIVATION_DRIVER")
+			command = exec.CommandContext(ctx, "python3", driver, os.Args[0], fixtureTest)
+		}
 		command.Env = append(tmux.FilterEnv(tmux.ScrubbedEnv(),
 			"VISUAL_TMUX_CLIENT_CONFIG", "VISUAL_TMUX_CLIENT_TMUX_PATH", "VISUAL_TMUX_CLIENT_HOSTS_STATE_DIR",
 			"VISUAL_TMUX_CLIENT_HOSTS_MASTER_KEY_FILE"),
@@ -67,7 +71,7 @@ func TestNativeSecondLaunchFocusesBeforeOpeningRegistry(t *testing.T) {
 		command.Stderr = os.Stderr
 		return command
 	}
-	first := start()
+	first := start(false)
 	stdout, err := first.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +89,7 @@ func TestNativeSecondLaunchFocusesBeforeOpeningRegistry(t *testing.T) {
 	if !scanFixtureMarker(t, scanner, "FOCUS_FIXTURE_HIDDEN") {
 		t.Fatal("first window was not ready/hidden")
 	}
-	second := start()
+	second := start(true)
 	second.Stderr = nil
 	if output, err := second.CombinedOutput(); err != nil {
 		t.Fatalf("second launch opened/conflicted with registry: %v %s", err, output)
@@ -150,6 +154,13 @@ func runFocusFixture() error {
 		}
 		for range ticker.C {
 			if native := window.window.Load(); native.IsVisible() && native.IsFocused() {
+				if os.Getenv("VTC_PRIVATE_GNOME") == "1" {
+					path := filepath.Join(os.Getenv("VTC_NATIVE_SIGNAL_STATE"), "focus-ack")
+					if err := os.WriteFile(path, []byte("focused"), 0600); err != nil {
+						fmt.Fprintln(os.Stderr, "focus acknowledgement failed:", err)
+						return
+					}
+				}
 				if _, err := fmt.Fprintln(os.Stdout, "FOCUS_FIXTURE_VISIBLE"); err != nil {
 					return
 				}
