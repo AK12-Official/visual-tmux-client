@@ -63,6 +63,7 @@ expected/actual behavior and a diagnostic with credentials removed.
   headless operation must still work after the desktop application closes.
 
 Do not mark the whole cross-platform task complete from this checklist alone;
-Linux physical-input/desktop-shell acceptance has its own pending portions.
+Linux physical-input/session acceptance has its own pending portions in the
+[manual checklist](desktop-manual-checklist.md).
 Agent-run tmux tests must continue using the repository's guarded disposable
 fixtures outside tmux; no unrelated session cleanup is part of acceptance.

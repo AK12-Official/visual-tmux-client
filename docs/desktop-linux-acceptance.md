@@ -1,5 +1,14 @@
 # Linux desktop acceptance
 
+Current summary: native X11, Weston virtual input and GNOME Wayland portal
+checks pass locally, including real local/SSH GUI enrollment, key rotation and
+trust repair, remote file preview/edit/save/download, reconnect and original
+session survival across two desktop launches. The chronological records below
+retain earlier failures; later explicit passing evidence supersedes them.
+Installed-package Wayland acceptance is now an automated CI gate and is awaiting
+its current run. User-dependent checks are in the
+[manual checklist](desktop-manual-checklist.md).
+
 This record supplements [desktop verification](desktop-verification.md). macOS
 interactive acceptance remains deferred by the user. Linux acceptance is still
 in progress; passing a native fixture does not complete the full target matrix.
@@ -116,12 +125,15 @@ complete the deferred macOS interactive checks.
 
 ## Remaining Linux evidence
 
-- Physical trackpad behavior and compositor-managed input-method integration.
-  Private virtual-seat input and the GTK IBus module do not establish these cases.
-- Other desktop-portal implementations beyond the verified private GTK backend.
-- Final regression and installed-package verification for the completed real-host GUI workflow.
-- Installed-package acceptance in an actual Wayland desktop and the remaining
-  complete packaging/launcher acceptance matrix.
+- Physical mouse/touchpad, monitor scaling and normally configured desktop input
+  method behavior require the user's real devices and session. See the manual
+  checklist; virtual events do not establish physical-device acceptance.
+- Final automated CI and installed-DEB Wayland gate are agent work until the
+  recorded jobs complete. They are not assigned to the user.
+- Other compositors/portal backends are not claimed validated. GNOME/Mutter,
+  GTK portal on X11 and the explicitly recorded Weston configurations have
+  their own evidence. Weston 13's desktop-shell portal crash remains a known
+  failing test-compositor combination, not an unqualified Wayland support claim.
 
 OpenSpec remains 27/35 because its eight open tasks combine these outstanding
 Linux checks with deferred macOS checks. The passes above are retained as
