@@ -5,8 +5,7 @@ checks pass locally, including real local/SSH GUI enrollment, key rotation and
 trust repair, remote file preview/edit/save/download, reconnect and original
 session survival across two desktop launches. The chronological records below
 retain earlier failures; later explicit passing evidence supersedes them.
-Installed-package Wayland acceptance is now an automated CI gate and is awaiting
-its current run. User-dependent checks are in the
+Installed-package Wayland acceptance passed in the final recorded CI run. User-dependent checks are in the
 [manual checklist](desktop-manual-checklist.md).
 
 This record supplements [desktop verification](desktop-verification.md). macOS
@@ -128,8 +127,8 @@ complete the deferred macOS interactive checks.
 - Physical mouse/touchpad, monitor scaling and normally configured desktop input
   method behavior require the user's real devices and session. See the manual
   checklist; virtual events do not establish physical-device acceptance.
-- Final automated CI and installed-DEB Wayland gate are agent work until the
-  recorded jobs complete. They are not assigned to the user.
+- Final automated CI and installed-DEB Wayland gates passed; no automated
+  verification is assigned to the user.
 - Other compositors/portal backends are not claimed validated. GNOME/Mutter,
   GTK portal on X11 and the explicitly recorded Weston configurations have
   their own evidence. Weston 13's desktop-shell portal crash remains a known
@@ -330,3 +329,26 @@ reconnect workflow subsequently pass. This supersedes earlier initial-trust-only
 limitations for this environment. The fixture's rotation itself is covered by
 a race-enabled test proving old fingerprints fail and the new fingerprint
 succeeds. Desktop/testutil lint reports zero issues.
+
+## Final automated acceptance
+
+Validated implementation commit: `5f8a6a37ec0e59d4183dbcfb0e14238fea297cd8`.
+[Desktop compatibility run 43468407687](https://github.com/AK12-Official/visual-tmux-client/actions/runs/43468407687)
+passed Ubuntu amd64 and both native Mac targets. Ubuntu job 132033763482 logs
+prove the real-host GUI test passed, Wayland native input/workspace passed, the
+DEB was actually installed, and the installed `/usr/bin/visual-tmux-desktop`
+passed X11 and Wayland probes with an empty application PATH. Both probes
+record flushed quit; the installed Wayland probe exits 0 and its log is an
+artifact. This supplements, rather than replaces, the independently passing
+GNOME portal and race-enabled real-host runs above.
+
+[Ordinary CI run 43468407754](https://github.com/AK12-Official/visual-tmux-client/actions/runs/43468407754)
+passed validation, all four headless packages, assembly and tests. Local final
+`GOTOOLCHAIN=go1.26.10 go test ./...` and strict OpenSpec validation also pass.
+The PR is mergeable and remains a draft; no merge, release or OpenSpec archive
+was performed. Subsequent evidence-record edits change documentation only.
+
+The eight combined OpenSpec tasks stay open for the user-deferred Mac runtime
+and real physical-device/session portions. The remaining user work is exactly
+the [manual checklist](desktop-manual-checklist.md); minimum macOS runtime and
+optional owner-credential signing remain explicitly unverified.

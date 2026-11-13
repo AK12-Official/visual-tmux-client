@@ -47,6 +47,7 @@ Developer ID signing/notarization is optional and requires the owner's signing
 credentials if a signed release is desired. Current packages are development
 builds and do not claim notarization.
 
-This document lists user-dependent checks. Pending automated CI/install-package
-gates remain agent work and must not be reassigned to the user merely because
-they are queued or running.
+Automated CI and installed-package gates passed at implementation commit
+`5f8a6a37ec0e59d4183dbcfb0e14238fea297cd8`; see the final Linux evidence record.
+This document contains the remaining user-dependent checks. They are not
+waived by green CI, and combined OpenSpec tasks remain open until accepted.
