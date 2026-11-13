@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Visual Tmux Client
+Comment=Local and SSH tmux workspaces
+Exec=visual-tmux-desktop
+Icon=visual-tmux-client
+Terminal=false
+Categories=Development;TerminalEmulator;
+StartupWMClass=io.github.ak12official.visualtmuxclient

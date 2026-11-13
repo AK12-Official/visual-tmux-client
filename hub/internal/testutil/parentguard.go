@@ -74,9 +74,15 @@ const standInSettle = 250 * time.Millisecond
 // run can leave its private directory behind. Later runs do not sweep other
 // directories: a matching name and a failed probe do not prove ownership.
 func ParentGuard(m *testing.M) int {
+	return RunWithParentGuard(m.Run)
+}
+
+// RunWithParentGuard provides the same guard for native fixtures whose event
+// loop must run on the original main thread rather than a testing goroutine.
+func RunWithParentGuard(run func() int) int {
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
-		return m.Run()
+		return run()
 	}
 
 	dir, err := os.MkdirTemp(guardRoot, "vtcguard")
@@ -120,7 +126,7 @@ func ParentGuard(m *testing.M) int {
 			socket, strings.Join(names, " "))
 	}
 
-	code := m.Run()
+	code := run()
 
 	if problem := w.problem(); problem != "" {
 		fmt.Fprint(os.Stderr, problem)

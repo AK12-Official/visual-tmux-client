@@ -73,6 +73,8 @@ type Options struct {
 	Socket      string
 	ProcessFact terminal.ProcessFactory
 	Backend     session.Backend
+	// WrapHTTP adds entry-specific handlers without changing the ordinary server.
+	WrapHTTP func(http.Handler) http.Handler
 }
 
 // New constructs the application composition root.
@@ -127,10 +129,14 @@ func New(cfg *config.Config, prov config.Provenance, staticFS fs.FS, opt ...Opti
 
 	routerCfg := setupHostRouterConfig(cfg, staticFS, registry, connMgr, ticketStore, terminalManager)
 	router := thttp.NewRouterWithResolver(routerCfg, runtimeResolver, ticketStore, wsHandler)
+	handler := router
+	if opts.WrapHTTP != nil {
+		handler = opts.WrapHTTP(handler)
+	}
 
 	httpServer := &http.Server{
 		Addr:              cfg.Server.Addr,
-		Handler:           router,
+		Handler:           handler,
 		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout.Duration(),
 		IdleTimeout:       cfg.Server.IdleTimeout.Duration(),
 	}

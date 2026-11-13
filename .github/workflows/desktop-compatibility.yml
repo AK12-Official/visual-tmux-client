@@ -1,0 +1,277 @@
+name: Desktop compatibility
+
+on:
+  workflow_dispatch:
+    inputs:
+      notarize:
+        description: 'Sign and notarize macOS artifacts (main branch only; requires secrets)'
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - 'hub/**'
+      - '.github/workflows/desktop-compatibility.yml'
+      - 'scripts/package-desktop.sh'
+      - 'scripts/probe-desktop-*.py'
+      - 'scripts/testdata/**'
+      - 'scripts/notarize-desktop-macos.sh'
+      - 'packaging/desktop/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-compatibility-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# These are disposable compatibility artifacts, not desktop releases. The
+# synthetic backend cannot attach to or mutate a real tmux session.
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: amd64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      GOTOOLCHAIN: go1.26.10
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
+    steps:
+      - name: Reject signing requests outside main
+        if: github.event_name == 'workflow_dispatch' && inputs.notarize && github.ref != 'refs/heads/main'
+        run: |
+          echo 'Notarization is restricted to a manual run on main.' >&2
+          exit 1
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.10'
+          cache-dependency-path: hub/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: hub/web/package-lock.json
+      - name: Install Linux native development dependencies
+        if: runner.os == 'Linux'
+        run: |
+          # The image's Azure mirror repeatedly timed out for package downloads.
+          for source in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources /etc/apt/apt-mirrors.txt; do
+            if [ -f "$source" ]; then
+              sudo sed -i \
+                -e 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+                -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+                -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' "$source"
+            fi
+          done
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=30 install --yes --no-install-recommends \
+            pkg-config libgtk-4-dev libwebkitgtk-6.0-dev xvfb xauth openbox libxtst6 dbus-x11 tmux \
+            weston libweston-13-dev ibus ibus-libpinyin ibus-gtk4 \
+            xdg-desktop-portal xdg-desktop-portal-gtk at-spi2-core gir1.2-atspi-2.0 python3-gi
+      - name: Ensure disposable tmux fixture dependency on macOS
+        if: runner.os == 'macOS'
+        run: command -v tmux >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install tmux
+      - name: Record native architecture and toolchain
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          test "$(go env GOARCH)" = "$EXPECTED_ARCH"
+          uname -sm
+          go version
+          node --version
+      - name: Verify notarization fails closed without credentials
+        if: runner.os == 'macOS'
+        run: |
+          if sh scripts/notarize-desktop-macos.sh nonexistent-development.zip; then
+            echo 'Signing unexpectedly accepted missing credentials.' >&2
+            exit 1
+          fi
+          test ! -d desktop-notarized
+      - name: Build shared frontend
+        working-directory: hub/web
+        run: |
+          npm ci
+          npm run build
+      - name: Verify transport-independent desktop code
+        working-directory: hub
+        run: go test -race ./internal/config ./internal/desktop ./internal/desktop/spike ./internal/app
+      - name: Build native compatibility entry and verify headless independence
+        id: native-build
+        working-directory: hub
+        run: |
+          mkdir -p ../desktop-build
+          native_linker_flags=''
+          if [ "$RUNNER_OS" = macOS ]; then
+            native_linker_flags='-extldflags=-mmacosx-version-min=12.0'
+          fi
+          go build -tags desktop -ldflags "-X main.defaultSpike=true $native_linker_flags" -o ../desktop-build/visual-tmux-desktop-spike ./cmd/visual-tmux-desktop
+          go build -tags desktop -ldflags "$native_linker_flags" -o ../desktop-build/visual-tmux-desktop ./cmd/visual-tmux-desktop
+          CGO_ENABLED=0 go build -o ../desktop-build/visual-tmux-client ./cmd/visual-tmux-client
+          ../desktop-build/visual-tmux-client --version
+      - name: Verify native signal cleanup
+        working-directory: hub
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            go test -c -tags desktop -o ../desktop-build/visual-tmux-desktop.test ./cmd/visual-tmux-desktop
+            # Grant namespaces only to these disposable native test executables.
+            # Keep WebKit's renderer sandbox and global AppArmor policy enabled.
+            sed "s|/usr/bin/visual-tmux-desktop|$GITHUB_WORKSPACE/desktop-build/visual-tmux-desktop{,-spike,.test}|" \
+              ../packaging/desktop/visual-tmux-desktop.apparmor > ../desktop-build/ci.apparmor
+            sudo apparmor_parser -r ../desktop-build/ci.apparmor
+            python3 ../scripts/probe-desktop-x11.py --ime --portal --log ../desktop-build/native-x11.log \
+              ../desktop-build/visual-tmux-desktop.test -test.v
+          else
+            go test -tags desktop -ldflags '-extldflags=-mmacosx-version-min=12.0' ./cmd/visual-tmux-desktop
+          fi
+      - name: Verify Wayland input and native workspace
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.native-build.outcome == 'success' }}
+        working-directory: hub
+        run: |
+          python3 ../scripts/probe-desktop-wayland.py ../desktop-build/visual-tmux-desktop.test \
+            --test-suite --test-input --ime --log ../desktop-build/native-wayland.log
+      - name: Preserve Linux native verification logs
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-native-verification-${{ matrix.arch }}
+          path: desktop-build/*.log
+          if-no-files-found: warn
+      - name: Exercise real WebView authentication, reload and flushed quit
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' && runner.os == 'Linux' }}
+        timeout-minutes: 2
+        working-directory: desktop-build
+        run: |
+          GSK_RENDERER=cairo GDK_DEBUG=no-portals dbus-run-session -- xvfb-run -a ./visual-tmux-desktop-spike --probe
+      - name: Record deferred macOS interactive acceptance
+        if: runner.os == 'macOS'
+        run: |
+          echo 'macOS interactive acceptance is deferred by the user for testing on their Mac.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Build/package/startup checks do not complete the deferred save/input acceptance.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Follow docs/desktop-macos-acceptance.md; related OpenSpec checkboxes remain open.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Package development compatibility artifact
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p desktop-artifacts
+          if [ "$RUNNER_OS" = macOS ]; then
+            app="desktop-build/VTC Compatibility Spike.app"
+            mkdir -p "$app/Contents/MacOS"
+            cp desktop-build/visual-tmux-desktop-spike "$app/Contents/MacOS/visual-tmux-desktop-spike"
+            cat > "$app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleExecutable</key><string>visual-tmux-desktop-spike</string>
+            <key>CFBundleIdentifier</key><string>io.github.ak12official.vtc.compatibility</string>
+            <key>CFBundleName</key><string>VTC Compatibility Spike</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>0.0.0</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+            plutil -lint "$app/Contents/Info.plist"
+            codesign --force --sign - "$app/Contents/MacOS/visual-tmux-desktop-spike"
+            codesign --force --sign - "$app"
+            codesign --verify --strict "$app"
+            ditto -c -k --keepParent "$app" "desktop-artifacts/compatibility-darwin-${TARGET_ARCH}.zip"
+          else
+            tar -C desktop-build -czf "desktop-artifacts/compatibility-linux-${TARGET_ARCH}.tar.gz" visual-tmux-desktop-spike
+          fi
+          cp docs/desktop-verification.md desktop-artifacts/VERIFICATION.md
+          cat > desktop-artifacts/README.txt <<'NOTE'
+          DEVELOPMENT COMPATIBILITY SPIKE ONLY. Not a desktop release.
+          Uses temporary state and synthetic sessions. Does not attach real tmux.
+          macOS artifacts use ad-hoc signing, with no Developer ID or notarization.
+          A successful build does not establish GUI, minimum-OS, Wayland or input-method acceptance.
+          See VERIFICATION.md for pending checks. This workflow does not publish a release.
+          NOTE
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-compatibility-${{ runner.os }}-${{ matrix.arch }}
+          path: desktop-artifacts/
+          if-no-files-found: error
+      - name: Package development desktop application
+        id: native-package
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
+        run: DESKTOP_BINARY=desktop-build/visual-tmux-desktop sh scripts/package-desktop.sh
+      - name: Install and exercise packaged Ubuntu application
+        if: ${{ !cancelled() && steps.native-package.outcome == 'success' && runner.os == 'Linux' }}
+        run: |
+          set -- desktop-packages/*.deb
+          test "$#" -eq 1
+          sudo apt-get install --yes "$PWD/$1"
+          test -x /usr/bin/visual-tmux-desktop
+          test -f /usr/share/applications/io.github.ak12official.visualtmuxclient.desktop
+          mkdir -p "$RUNNER_TEMP/vtc-empty-path"
+          # The installed binary gets an empty PATH: neither Go nor Node can be
+          # invoked for its frontend or backend. Display helpers run outside it.
+          GSK_RENDERER=cairo GDK_DEBUG=no-portals dbus-run-session -- xvfb-run -a \
+            env PATH="$RUNNER_TEMP/vtc-empty-path" /usr/bin/visual-tmux-desktop --spike --probe
+          python3 scripts/probe-desktop-wayland.py /usr/bin/visual-tmux-desktop \
+            --app-path "$RUNNER_TEMP/vtc-empty-path" --log desktop-build/installed-wayland.log
+      - name: Preserve installed Wayland verification log
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: installed-wayland-verification
+          path: desktop-build/installed-wayland.log
+          if-no-files-found: ignore
+      - name: Exercise packaged macOS launch through Launch Services
+        if: ${{ !cancelled() && steps.native-package.outcome == 'success' && runner.os == 'macOS' }}
+        timeout-minutes: 2
+        run: |
+          mkdir -p packaged-launch
+          set -- desktop-packages/*_development-unsigned.zip
+          test "$#" -eq 1
+          ditto -x -k "$1" packaged-launch
+          app="$PWD/packaged-launch/Visual Tmux Client.app"
+          codesign --verify --strict "$app"
+          file "$app/Contents/MacOS/visual-tmux-desktop"
+          # Launch Services is also used by Finder. Probe mode owns temporary
+          # state and cannot use saved hosts or start a real tmux process.
+          PATH=/usr/bin:/bin:/usr/sbin:/sbin /usr/bin/open -n -W -a "$app" \
+            --env PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            --stdout "$PWD/packaged-launch/stdout.log" --stderr "$PWD/packaged-launch/stderr.log" \
+            --args --spike --probe-startup
+          cat packaged-launch/stderr.log
+          /usr/bin/grep -F 'spike: minimal package PATH: true' packaged-launch/stderr.log
+          /usr/bin/grep -F 'spike: PASS authenticated HTTP action and both reload modes' packaged-launch/stderr.log
+          /usr/bin/grep -F 'spike: frontend approved quit after preference flush' packaged-launch/stderr.log
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() && steps.native-package.outcome == 'success' }}
+        with:
+          name: desktop-development-${{ runner.os }}-${{ matrix.arch }}
+          path: desktop-packages/
+          if-no-files-found: error
+      - name: Optional Developer ID signing and notarization
+        if: runner.os == 'macOS' && github.event_name == 'workflow_dispatch' && inputs.notarize && github.ref == 'refs/heads/main'
+        timeout-minutes: 25
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_API_KEY_P8_BASE64: ${{ secrets.MACOS_NOTARY_API_KEY_P8_BASE64 }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          set -- desktop-packages/*_development-unsigned.zip
+          test "$#" -eq 1
+          sh scripts/notarize-desktop-macos.sh "$1"
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'macOS' && github.event_name == 'workflow_dispatch' && inputs.notarize && github.ref == 'refs/heads/main'
+        with:
+          name: desktop-notarized-${{ matrix.arch }}
+          path: desktop-notarized/
+          if-no-files-found: error

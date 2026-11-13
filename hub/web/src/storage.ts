@@ -3,8 +3,17 @@
 // contexts may throw SecurityError on property access (globalThis.localStorage)
 // or method calls (getItem, setItem, removeItem).
 
+let platformStorage: Storage | undefined
+
+// Desktop bootstrap installs its hydrated adapter before importing application
+// modules. Explicit test storage continues to take precedence.
+export function setPlatformStorage(storage?: Storage): void {
+  platformStorage = storage
+}
+
 export function getSafeStorage(storage?: Storage | null): Storage | null {
   if (storage !== undefined) return storage
+  if (platformStorage !== undefined) return platformStorage
   try {
     if (typeof localStorage !== 'undefined') {
       return localStorage

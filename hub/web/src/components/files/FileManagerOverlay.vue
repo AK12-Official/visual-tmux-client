@@ -9,7 +9,6 @@ import {
   FileApiError,
   createEntry,
   deleteEntry,
-  downloadFile,
   fetchWorkingDirectory,
   probeFile,
   readFile,
@@ -18,6 +17,8 @@ import {
   type Entry,
   type StartDirectory,
 } from '../../files/api'
+import { copyText, saveDownload } from '../../platform'
+import { isDesktop } from '../../desktop'
 import { basename, dirname, joinPath, quoteForShell } from '../../files/pathUtils'
 import { createPending } from '../../files/pending'
 import { reasonFor as reasonForCode } from '../../files/reasons'
@@ -1638,13 +1639,7 @@ async function deleteTarget(entry: Entry, path: string) {
 async function download(path: string, name: string) {
   const targetHost = host.value
   try {
-    const blob = await downloadFile(path, targetHost)
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = name
-    link.click()
-    URL.revokeObjectURL(url)
+    await saveDownload(path, name, targetHost, currentHostConnRev(targetHost))
   } catch (err) {
     report(err, 'files.downloadFailedNamed', { name })
   }
@@ -1652,7 +1647,7 @@ async function download(path: string, name: string) {
 
 async function copyPathToClipboard(path: string) {
   const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
-  if (!clipboard) {
+  if (!clipboard && !isDesktop()) {
     emit(
       'notice',
       t('files.copyFailedSecureContext'),
@@ -1661,7 +1656,7 @@ async function copyPathToClipboard(path: string) {
     return
   }
   try {
-    await clipboard.writeText(path)
+    await copyText(path)
   } catch {
     emit('notice', t('files.copyFailed'), 'warning')
   }

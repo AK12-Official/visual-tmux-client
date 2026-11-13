@@ -308,6 +308,31 @@ func TestListRouteReturnsEntriesAndTruncation(t *testing.T) {
 
 // read and download are the same bytes with different intent, and both carry the
 // metadata the browser needs to decide how to present the file.
+func TestDownloadChecksCapturedConnectionRevisionBeforeReading(t *testing.T) {
+	reads := 0
+	svc := &mockFileService{readFn: func(string) (files.ReadResult, error) {
+		reads++
+		return openReadResult(t, "captured source"), nil
+	}}
+	router := NewRouter(testRouterConfig("tok", nil), &mockSessionService{}, svc, &mockTicketIssuer{}, nil)
+	for _, tc := range []struct {
+		revision string
+		status   int
+	}{{"2", http.StatusConflict}, {"bad", http.StatusBadRequest}, {"1", http.StatusOK}} {
+		request := httptest.NewRequest(http.MethodGet, "/api/hosts/local/files/download?path=/source", nil)
+		request.Header.Set("Authorization", "Bearer tok")
+		request.Header.Set("X-Expected-Connection-Revision", tc.revision)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != tc.status {
+			t.Fatalf("revision %s: got %d want %d", tc.revision, response.Code, tc.status)
+		}
+	}
+	if reads != 1 {
+		t.Fatal("stale download reached source")
+	}
+}
+
 func TestReadAndDownloadSetTheirHeaders(t *testing.T) {
 	const content = "file contents"
 	svc := &mockFileService{readFn: func(string) (files.ReadResult, error) {

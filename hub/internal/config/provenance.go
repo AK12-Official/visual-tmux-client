@@ -14,6 +14,8 @@ const (
 	SourceCLI Source = "cli"
 	// SourceGenerated indicates the credential was generated automatically.
 	SourceGenerated Source = "generated"
+	// SourceDesktop indicates a transport setting owned by the desktop entry.
+	SourceDesktop Source = "desktop"
 )
 
 // Provenance records the origin of key configuration values and the configuration file path.
