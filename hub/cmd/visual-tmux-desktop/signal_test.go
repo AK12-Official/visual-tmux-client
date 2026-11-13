@@ -22,6 +22,7 @@ import (
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/config"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/desktop"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/desktop/spike"
+	"github.com/AK12-Official/visual-tmux-client/hub/internal/testutil"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/tmux"
 	"github.com/AK12-Official/visual-tmux-client/hub/web"
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -29,9 +30,19 @@ import (
 
 // Native Run must execute on the original main thread, including in fixtures.
 var nativeFixtureRunner = runSignalFixture
+var nativeFixtureGuard bool
 
 func TestMain(m *testing.M) {
 	if os.Getenv("VTC_NATIVE_SIGNAL_FIXTURE") == "1" {
+		if nativeFixtureGuard {
+			os.Exit(testutil.RunWithParentGuard(func() int {
+				if err := nativeFixtureRunner(); err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					return 1
+				}
+				return 0
+			}))
+		}
 		run := nativeFixtureRunner
 		if os.Getenv("VTC_NATIVE_FIXTURE_MODE") == "focus" {
 			run = runFocusFixture
@@ -42,7 +53,7 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	os.Exit(testutil.ParentGuard(m))
 }
 
 func TestNativeSecondLaunchFocusesBeforeOpeningRegistry(t *testing.T) {

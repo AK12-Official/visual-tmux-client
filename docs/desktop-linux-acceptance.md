@@ -244,3 +244,58 @@ native test executable and `probe-desktop-gnome.py --test-suite`.
 Desktop-tagged golangci-lint reports zero issues for these changes. The GNOME
 input matrix beyond this launcher interaction remains distinct from the full
 X11/Weston virtual-input tests.
+
+### Real-host GUI fixture preparation
+
+The desktop command's normal TestMain now installs `testutil.ParentGuard`.
+`RunWithParentGuard` factors the same implementation for native fixture event
+loops which must run on the original main thread; it retains all stand-in,
+socket snapshot, session comparison and owned cleanup checks. Existing testutil
+race tests pass (3.507 s), desktop-tagged command tests pass (6.094 s), and
+combined desktop/testutil lint reports zero issues. No real-host GUI acceptance
+is claimed by this preparation. That remains an outstanding Linux item.
+
+### Real local and SSH GUI continuation
+
+The X11 race-enabled native fixture now passes two consecutive desktop starts
+against real isolated local tmux and disposable SSH-backed tmux sessions
+(`/tmp/vtc-real-hosts-diagnostic.log`, 4.24 s). The real frontend selects each
+host/session and verifies visible terminal output with ANSI/Chinese source
+bytes. Each desktop quits normally; the second start renders both original
+sessions again. Host registration/trust is preseeded by the fixture: this does
+not establish GUI enrollment or trust-repair acceptance, which remain pending.
+
+The first real local run exposed concurrent initial-dimension reads versus
+resize writes in Attachment.Start. Initial dimensions are now copied under the
+attachment mutex before input pumping starts. The local native race test and
+existing terminal race tests pass. A restart fixture initially timed out;
+stage-report requests now preserve diagnostic boundaries and the latest run
+passes, but broader display and reconnect/file/trust workflows remain open.
+
+Real SSH GUI file preview/edit/save and reconnect now pass in both desktop
+rounds under the race detector (`/tmp/vtc-real-files-confirm.log`, 6.70 s).
+The fixture opens the remote README preview, edits draft.txt in CodeMirror,
+answers the real native save confirmation and checks exact source-file bytes
+from the parent fixture. Each round saves different Unicode content. It then
+drops SSH connections, observes a non-connected UI state and requires a larger
+remote output counter after reconnect. The second desktop start reuses both
+original sessions. Earlier file-save timeouts were caused by the unhandled
+native confirmation and are superseded by this passing run. GUI host enrollment,
+trust repair and real-host native download remain pending.
+
+Real remote binary download now passes in both X11 desktop rounds under the
+race detector (`/tmp/vtc-real-download.log`, 8.45 s). The actual file UI opens
+a private binary SFTP fixture, invokes the native save chooser, and verifies
+exact bytes including NUL, 0xff and Chinese text at the selected destination.
+Each round uses a distinct destination. The same run retains remote preview,
+Unicode save, SSH reconnect and original-session survival coverage. The portal
+variant of this real-host download is implemented but not yet verified.
+
+The complete real-host workflow also passes through the GTK portal on X11
+(`/tmp/vtc-real-download-portal.log`, 10.89 s) and GNOME Wayland's portal
+(`/tmp/vtc-real-hosts-gnome.log`, 13.65 s), both with Go's race detector. Each
+run includes two desktop starts, original local/SSH session reattachment,
+remote Markdown preview, different Unicode edits saved per round, binary
+byte-equal native download, and SSH drop/reconnect with advancing output.
+Desktop/testutil/terminal lint reports zero issues. GUI enrollment and trust
+repair remain separate pending checks.

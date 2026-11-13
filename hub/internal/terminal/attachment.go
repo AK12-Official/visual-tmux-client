@@ -111,6 +111,9 @@ func (a *Attachment) Epoch() uint64 {
 
 // Start initiates the pumping goroutines, sends the ready frame, flushes staged data, and triggers repaint.
 func (a *Attachment) Start() {
+	a.mu.Lock()
+	cols, rows := a.cols, a.rows
+	a.mu.Unlock()
 	go a.outputPump()
 	go a.writePump()
 	go a.inputPump()
@@ -119,8 +122,8 @@ func (a *Attachment) Start() {
 	_ = a.peer.SendText(writeCtx, readyMessage{ //nolint:errcheck // Best effort ready notification
 		Type:    "ready",
 		Session: a.session,
-		Cols:    a.cols,
-		Rows:    a.rows,
+		Cols:    cols,
+		Rows:    rows,
 	})
 	cancel()
 
