@@ -10,6 +10,7 @@ import time
 
 parser = argparse.ArgumentParser(description='Isolated Weston 13 WebView verification; input devices are virtual.')
 parser.add_argument('binary', type=Path)
+parser.add_argument('--app-path', type=Path, help='PATH used only by the production probe process')
 parser.add_argument('--portal', action='store_true', help='exercise the GTK desktop-portal chooser')
 parser.add_argument('--ime', action='store_true', help='run private IBus/libpinyin with the virtual seat')
 parser.add_argument('--test-input', action='store_true', help='build and load a private Weston 13 input seat')
@@ -81,6 +82,10 @@ with tempfile.TemporaryDirectory(prefix='vtc-wl-', dir='/tmp') as runtime:
         if args.ime:
             if not args.test_input: raise RuntimeError('--ime requires --test-input')
             command=['python3',str(Path(__file__).with_name('probe-desktop-ime.py')),*command]
+        if args.app_path:
+            if args.test_suite or args.test_workspace or args.ime:
+                raise RuntimeError('--app-path is only for production package probes')
+            command=['/usr/bin/env', 'PATH='+str(args.app_path.resolve()), *command]
         result = subprocess.run(['dbus-run-session', '--',*command],
                                 env=env, capture_output=True, text=True, timeout=100 if args.test_workspace or args.test_suite else 40)
         evidence = log.read_text() + '\nAPP OUTPUT:\n' + result.stdout + result.stderr

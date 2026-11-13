@@ -219,6 +219,15 @@ jobs:
           # invoked for its frontend or backend. Display helpers run outside it.
           GSK_RENDERER=cairo GDK_DEBUG=no-portals dbus-run-session -- xvfb-run -a \
             env PATH="$RUNNER_TEMP/vtc-empty-path" /usr/bin/visual-tmux-desktop --spike --probe
+          python3 scripts/probe-desktop-wayland.py /usr/bin/visual-tmux-desktop \
+            --app-path "$RUNNER_TEMP/vtc-empty-path" --log desktop-build/installed-wayland.log
+      - name: Preserve installed Wayland verification log
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: installed-wayland-verification
+          path: desktop-build/installed-wayland.log
+          if-no-files-found: ignore
       - name: Exercise packaged macOS launch through Launch Services
         if: ${{ !cancelled() && steps.native-package.outcome == 'success' && runner.os == 'macOS' }}
         timeout-minutes: 2
