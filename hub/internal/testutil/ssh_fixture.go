@@ -77,6 +77,7 @@ type DisposableSSHServer struct {
 	mu     sync.Mutex
 	conns  []net.Conn
 	closed bool
+	config *ssh.ServerConfig
 }
 
 func generateHostSigner(t *testing.T) (ssh.Signer, ssh.PublicKey, string, string) {
@@ -249,6 +250,7 @@ func NewDisposableSSHServer(t *testing.T, cfg DisposableSSHConfig) *DisposableSS
 	}
 
 	serverConfig := buildServerConfig(server, hostSigner)
+	server.config = serverConfig
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -264,12 +266,12 @@ func NewDisposableSSHServer(t *testing.T, cfg DisposableSSHConfig) *DisposableSS
 		server.Close()
 	})
 
-	go server.serve(serverConfig)
+	go server.serve()
 
 	return server
 }
 
-func (s *DisposableSSHServer) serve(config *ssh.ServerConfig) {
+func (s *DisposableSSHServer) serve() {
 	for {
 		tcpConn, err := s.Listener.Accept()
 		if err != nil {
@@ -283,6 +285,7 @@ func (s *DisposableSSHServer) serve(config *ssh.ServerConfig) {
 			return
 		}
 		s.conns = append(s.conns, tcpConn)
+		config := s.config
 		s.mu.Unlock()
 
 		go func(c net.Conn) {
@@ -308,6 +311,17 @@ func (s *DisposableSSHServer) serve(config *ssh.ServerConfig) {
 			_ = sshConn.Wait() //nolint:errcheck // best effort wait
 		}(tcpConn)
 	}
+}
+
+// RotateHostKey changes the key for future handshakes on the same disposable
+// endpoint. Existing sessions remain until DropConnections is called.
+func (s *DisposableSSHServer) RotateHostKey() string {
+	signer, _, fingerprint, _ := generateHostSigner(s.t)
+	config := buildServerConfig(s, signer)
+	s.mu.Lock()
+	s.config = config
+	s.mu.Unlock()
+	return fingerprint
 }
 
 func handlePTYReq(req *ssh.Request, term *string, cols, rows *uint32) bool {

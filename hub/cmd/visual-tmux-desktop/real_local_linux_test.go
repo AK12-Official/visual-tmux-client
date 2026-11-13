@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -20,7 +21,6 @@ import (
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/app"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/config"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/desktop"
-	"github.com/AK12-Official/visual-tmux-client/hub/internal/host"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/testutil"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/tmux"
 	"github.com/AK12-Official/visual-tmux-client/hub/web"
@@ -88,20 +88,34 @@ func TestNativeRealLocalTerminal(t *testing.T) {
 		t.Fatalf("private remote server: %v %d %s", err, code, stderr)
 	}
 	directory := t.TempDir()
-	registry, err := host.NewRegistry(ctx, filepath.Join(directory, "state"), "")
+	enrollment, err := json.Marshal(map[string]any{
+		"address": remote.Addr, "port": remote.Port, "username": remote.User,
+		"password": remote.Password, "fingerprint": remote.Fingerprint,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, saveErr := registry.Save(ctx, host.HostInput{
-		ID: "remote", Name: "Disposable SSH", Address: remote.Addr, Port: uint16(remote.Port), Username: remote.User,
-		CredentialType: "password", Credentials: host.Credentials{Password: remote.Password},
-		HostKey: remote.HostPubKey.Marshal(),
-	}, 0)
-	closeErr := registry.Close()
-	if saveErr != nil || closeErr != nil {
-		t.Fatalf("enroll fixture: %v %v", saveErr, closeErr)
+	if err := os.WriteFile(filepath.Join(directory, "enrollment.json"), enrollment, 0600); err != nil {
+		t.Fatal(err)
 	}
+
 	for round := range 2 {
+		if round == 1 {
+			fingerprint := remote.RotateHostKey()
+			remote.DropConnections()
+			var details map[string]any
+			if err := json.Unmarshal(enrollment, &details); err != nil {
+				t.Fatal(err)
+			}
+			details["fingerprint"] = fingerprint
+			rotated, err := json.Marshal(details)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, "enrollment.json"), rotated, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
 		command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestNativeRealLocalTerminal$")
 		command.Env = append(tmux.ScrubbedEnv(), "VTC_NATIVE_SIGNAL_FIXTURE=1", "VTC_NATIVE_FIXTURE_MODE=real-local",
 			"VTC_NATIVE_SIGNAL_STATE="+directory, "VTC_REAL_SOCKET_DIR="+sockets, "VTC_REAL_TMUX="+path,
@@ -136,7 +150,12 @@ func runRealLocalFixture() error {
 	if err != nil {
 		return err
 	}
-	fixtureJS := "window.__vtcRealRound=" + os.Getenv("VTC_REAL_ROUND") + ";\n" + realLocalJS
+	enrollment, err := os.ReadFile(filepath.Join(os.Getenv("VTC_NATIVE_SIGNAL_STATE"), "enrollment.json"))
+	if err != nil {
+		return err
+	}
+	fixtureJS := "window.__vtcEnrollment=" + string(enrollment) + ";\n" +
+		"window.__vtcRealRound=" + os.Getenv("VTC_REAL_ROUND") + ";\n" + realLocalJS
 	s := &desktopWindow{cfg: cfg, controller: controller, fixtureJS: fixtureJS}
 	processes := &workspaceProcesses{}
 	destination := filepath.Join(os.Getenv("VTC_NATIVE_SIGNAL_STATE"), "download-"+os.Getenv("VTC_REAL_ROUND")+".bin")

@@ -119,9 +119,7 @@ complete the deferred macOS interactive checks.
 - Physical trackpad behavior and compositor-managed input-method integration.
   Private virtual-seat input and the GTK IBus module do not establish these cases.
 - Other desktop-portal implementations beyond the verified private GTK backend.
-- An entire GUI session against real local and SSH hosts, including host-key
-  trust repair, reconnect and remote file operations. Existing backend tests and
-  the injected native workspace exercise different portions of this path.
+- Final regression and installed-package verification for the completed real-host GUI workflow.
 - Installed-package acceptance in an actual Wayland desktop and the remaining
   complete packaging/launcher acceptance matrix.
 
@@ -299,3 +297,24 @@ remote Markdown preview, different Unicode edits saved per round, binary
 byte-equal native download, and SSH drop/reconnect with advancing output.
 Desktop/testutil/terminal lint reports zero issues. GUI enrollment and trust
 repair remain separate pending checks.
+
+GUI SSH enrollment and initial trust confirmation now pass on native X11 with
+Go's race detector (`/tmp/vtc-real-enroll-ready.log`, 8.51 s). The parent no
+longer pre-enrolls the host: the real page opens host management, fills the
+form, probes the disposable server, compares the displayed fingerprint with
+the fixture's exact public-key fingerprint, confirms trust, and saves. The
+second desktop start reuses that UI-created registry entry. Both rounds still
+pass terminal/file/download/reconnect checks. Probe automation waits for Vue's
+actual enabled button state. Desktop lint reports zero issues. Host-key
+replacement/trust repair remains distinct and unverified by initial enrollment.
+
+GUI trust repair now passes on native X11 under the race detector
+(`/tmp/vtc-real-trust-repair.log`, 8.80 s). On the same disposable SSH address,
+the parent rotates the actual server key before the second desktop start.
+The UI first refuses the connection (`host_unavailable`), then probes the
+existing host, compares the displayed new fingerprint with the rotated key,
+confirms trust and saves. The original remote session and full file/download/
+reconnect workflow subsequently pass. This supersedes earlier initial-trust-only
+limitations for this environment. The fixture's rotation itself is covered by
+a race-enabled test proving old fingerprints fail and the new fingerprint
+succeeds. Desktop/testutil lint reports zero issues.

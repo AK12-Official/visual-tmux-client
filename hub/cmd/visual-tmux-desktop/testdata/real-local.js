@@ -4,9 +4,55 @@
   Authorization:'Bearer '+sessionStorage.getItem('vtc:desktop-token')},body:JSON.stringify({message,failed})});
  const wait=async(predicate,label)=>{
   for(let i=0;i<400;i++){if(predicate())return;await new Promise(r=>setTimeout(r,50));}
-  throw Error('Timed out: '+label+' host='+document.querySelector('#host-select')?.value);
+  const error=document.querySelector('.host-alert--danger')?.textContent?.trim()??'';
+  throw Error('Timed out: '+label+' host='+document.querySelector('#host-select')?.value+' error='+error);
  };
  (async()=>{
+  if(window.__vtcRealRound===0){
+   const manage=()=>[...document.querySelectorAll('.app__bar-btn')].find(n=>/Manage remote hosts|管理远程主机/.test(n.getAttribute('aria-label')??''));
+   await wait(manage,'host manager');manage().click();
+   await wait(()=>document.querySelector('.host-modal__add-btn'),'add host');
+   document.querySelector('.host-modal__add-btn').click();
+   await wait(()=>document.querySelector('#host-field-id'),'host form');
+   const details=window.__vtcEnrollment;
+   for(const [key,value] of Object.entries({id:'remote',name:'Disposable SSH',address:details.address,
+     port:details.port,username:details.username,password:details.password})){
+    const input=document.querySelector('#host-field-'+key);
+    input.value=String(value);input.dispatchEvent(new Event('input',{bubbles:true}));
+   }
+   await wait(()=>!document.querySelector('.host-probe__probe-btn').disabled,'probe enabled');
+   document.querySelector('.host-probe__probe-btn').click();
+   await wait(()=>document.querySelector('.host-probe-fingerprint'),'server fingerprint');
+   if(document.querySelector('.host-probe-fingerprint').textContent.trim()!==details.fingerprint)throw Error('Wrong server fingerprint');
+   document.querySelector('.host-probe__trust-btn').click();
+   await wait(()=>document.querySelector('.host-probe-trusted-indicator'),'fingerprint trusted');
+   document.querySelector('.host-form button[type=submit]').click();
+   await wait(()=>!document.querySelector('#host-field-id'),'host saved');
+   document.querySelector('.host-modal__close').click();
+   await report('GUI host enrollment and exact fingerprint trust');
+  }else{
+   const manage=()=>[...document.querySelectorAll('.app__bar-btn')].find(n=>/Manage remote hosts|管理远程主机/.test(n.getAttribute('aria-label')??''));
+   await wait(manage,'repair host manager');manage().click();
+   const card=()=>[...document.querySelectorAll('.host-card')].find(n=>n.querySelector('.host-card__name')?.textContent==='Disposable SSH');
+   await wait(card,'persisted remote card');
+   const control=pattern=>[...card().querySelectorAll('button')].find(n=>pattern.test(n.getAttribute('aria-label')??''));
+   control(/Test|测试/).click();
+   await wait(()=>card().querySelector('.host-caps-error'),'old key rejected');
+   if(!/key|密钥|指纹|fingerprint|trust|信任|host_unavailable/i.test(card().querySelector('.host-caps-error').textContent))throw Error('Expected host-key failure: '+card().querySelector('.host-caps-error').textContent);
+   await report('rotated key rejected before repair');
+   control(/Edit|编辑/).click();
+   await wait(()=>document.querySelector('.host-probe__probe-btn'),'repair probe');
+   document.querySelector('.host-probe__probe-btn').click();
+   await wait(()=>document.querySelector('.host-probe-fingerprint'),'rotated fingerprint');
+   if(document.querySelector('.host-probe-fingerprint').textContent.trim()!==window.__vtcEnrollment.fingerprint)throw Error('Wrong rotated fingerprint');
+   document.querySelector('.host-probe__trust-btn').click();
+   await wait(()=>document.querySelector('.host-probe-trusted-indicator'),'repaired trust');
+   document.querySelector('.host-form button[type=submit]').click();
+   await wait(()=>!document.querySelector('#host-field-id'),'repair saved');
+   document.querySelector('.host-modal__close').click();
+   await report('GUI repaired trust with exact rotated fingerprint');
+  }
+
   for(const [id,session,marker] of [['local','real-gui','REAL_GUI_中文'],['remote','remote-gui','REAL_REMOTE_中文']]){
    await wait(()=>document.querySelector('#host-select'),'host selector');
    await report('select '+id);
