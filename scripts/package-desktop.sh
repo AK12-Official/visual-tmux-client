@@ -4,7 +4,7 @@ set -eu
 umask 022
 
 project_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-version=${DESKTOP_VERSION:-0.5.0-desktop.dev}
+version=${DESKTOP_VERSION:-0.6.0-desktop.dev}
 output_dir=${OUTPUT_DIR:-"$project_dir/desktop-packages"}
 binary=${DESKTOP_BINARY:?Set DESKTOP_BINARY to a natively built visual-tmux-desktop}
 case "$version" in
@@ -67,7 +67,7 @@ CONTROL
 <key>CFBundleIdentifier</key><string>io.github.ak12official.visualtmuxclient</string>
 <key>CFBundleName</key><string>Visual Tmux Client</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.5.0</string>
+<key>CFBundleShortVersionString</key><string>0.6.0</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
