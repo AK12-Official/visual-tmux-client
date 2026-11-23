@@ -2,7 +2,6 @@
 
 Use the development package from the current PR's Desktop compatibility run.
 Record the commit, OS version, architecture, desktop session and input method.
-Keep macOS OpenSpec acceptance pending until the corresponding checks pass.
 
 ## Linux physical desktop
 
@@ -38,28 +37,16 @@ as a known reproducer in the Linux record; it is not a passing configuration.
 
 ## macOS
 
-Follow the full [macOS handoff](desktop-macos-acceptance.md), using the artifact
-for your Mac's architecture. In particular:
+The user reported passing the full [macOS manual acceptance checklist](desktop-macos-acceptance.md)
+on 2026-11-23, including the minimum-version runtime check. Developer ID signing
+and notarization remain optional and require the owner’s signing credentials.
 
-- [ ] Finder launch, automatic login, both reload paths and repeat-launch focus.
-- [ ] Native file save/download, exact bytes, cancel and overwrite; stale host
-  revision and failed destination writes must preserve the existing file.
-- [ ] System-browser links, clipboard, Chinese input, terminal shortcuts,
-  mouse/touchpad scrolling, fullscreen and resize.
-- [ ] Dirty editor close and Cmd+Q: cancel preserves drafts/attachments; confirm
-  discard exits. Relaunch restores locale, font, sidebar, recent host and pins.
-- [ ] Local/SSH terminal and file workflow, trust repair, reconnect and tmux
-  session survival after desktop quit/relaunch.
-- [ ] Missing-tmux guidance, bounded exit, next-launch state-lock availability
-  and continued headless operation.
-
-The supported minimum macOS version also requires execution on that OS version;
-building on newer CI runners does not prove minimum-version runtime support.
-Developer ID signing/notarization is optional and requires the owner's signing
-credentials if a signed release is desired. Current packages are development
-builds and do not claim notarization.
+- [ ] Investigate and fix progressive desktop slowdown during extended use.
+  The user observed increasing lag until the app became unusable. Track the
+  fix and sustained-use verification in
+  [desktop performance TODO](TODO.md#桌面应用).
 
 Automated CI and installed-package gates passed at implementation commit
 `5f8a6a37ec0e59d4183dbcfb0e14238fea297cd8`; see the final Linux evidence record.
-This document contains the remaining user-dependent checks. They are not
-waived by green CI, and combined OpenSpec tasks remain open until accepted.
+The user subsequently confirmed that the remaining Desktop OpenSpec acceptance
+tasks passed and approved closing them.

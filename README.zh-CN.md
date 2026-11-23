@@ -74,7 +74,7 @@ VISUAL_TMUX_CLIENT_TOKEN="$(openssl rand -base64 32)" ./visual-tmux-client
 
 ## 实验性桌面应用
 
-桌面入口通过原生窗口承载现有 Vue 前端，并在进程内运行原有 Go HTTP/WebSocket 后端，自动完成登录。开发版本面向 Ubuntu 24.04 amd64 和 macOS arm64/amd64；完整桌面验收仍在进行，Wayland、交互输入和文件操作等不能视为已全部支持。请先查看[构建与运行说明](docs/desktop.md)及[实际验证记录](docs/desktop-verification.md)。
+桌面入口通过原生窗口承载现有 Vue 前端，并在进程内运行原有 Go HTTP/WebSocket 后端，自动完成登录。开发版本面向 Ubuntu 24.04 amd64 和 macOS arm64/amd64。桌面验收清单已完成，安装包通过 CI 提供为开发构建产物。详见[构建与运行说明](docs/desktop.md)、[验证记录](docs/desktop-verification.md)及 [macOS 已知卡顿问题](docs/TODO.md#桌面应用)。
 
 先构建前端，再使用 Go 1.26.10、启用 CGO 构建桌面入口：
 

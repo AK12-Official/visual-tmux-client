@@ -152,12 +152,12 @@ jobs:
         working-directory: desktop-build
         run: |
           GSK_RENDERER=cairo GDK_DEBUG=no-portals dbus-run-session -- xvfb-run -a ./visual-tmux-desktop-spike --probe
-      - name: Record deferred macOS interactive acceptance
+      - name: Record macOS probe coverage
         if: runner.os == 'macOS'
         run: |
-          echo 'macOS interactive acceptance is deferred by the user for testing on their Mac.' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Build/package/startup checks do not complete the deferred save/input acceptance.' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Follow docs/desktop-macos-acceptance.md; related OpenSpec checkboxes remain open.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'macOS CI covers native builds, packaging and packaged startup.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Interactive save and input coverage is recorded separately.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'See docs/desktop-macos-acceptance.md for the manual acceptance record.' >> "$GITHUB_STEP_SUMMARY"
       - name: Package development compatibility artifact
         env:
           TARGET_ARCH: ${{ matrix.arch }}
@@ -195,7 +195,7 @@ jobs:
           Uses temporary state and synthetic sessions. Does not attach real tmux.
           macOS artifacts use ad-hoc signing, with no Developer ID or notarization.
           A successful build does not establish GUI, minimum-OS, Wayland or input-method acceptance.
-          See VERIFICATION.md for pending checks. This workflow does not publish a release.
+          See VERIFICATION.md for acceptance evidence. This workflow does not publish a release.
           NOTE
       - uses: actions/upload-artifact@v7
         with:

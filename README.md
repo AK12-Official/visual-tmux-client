@@ -76,7 +76,7 @@ Run `./visual-tmux-client --help` to see all flags and environment variables.
 
 ## Experimental desktop application
 
-The desktop entry hosts the same embedded Vue interface and Go HTTP/WebSocket backend in a native window. It signs in automatically. Development builds target Ubuntu 24.04 amd64 and macOS arm64/amd64; the full desktop acceptance matrix is still in progress, including Wayland and interactive input/file workflows. See [build and operation instructions](docs/desktop.md) and [actual verification results](docs/desktop-verification.md) before treating a target as supported.
+The desktop entry hosts the same embedded Vue interface and Go HTTP/WebSocket backend in a native window. It signs in automatically. Development builds target Ubuntu 24.04 amd64 and macOS arm64/amd64. The desktop acceptance checklist is complete. Desktop packages are available as development workflow artifacts. See the [build and operation guide](docs/desktop.md), [verification results](docs/desktop-verification.md), and [known macOS responsiveness issue](docs/TODO.md#桌面应用).
 
 Build the frontend, then build the native entry with Go 1.26.10 and CGO enabled:
 

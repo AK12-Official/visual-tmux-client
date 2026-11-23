@@ -362,7 +362,8 @@ passed validation, all four headless packages, assembly and tests. Local final
 The PR is mergeable and remains a draft; no merge, release or OpenSpec archive
 was performed. Subsequent evidence-record edits change documentation only.
 
-The eight combined OpenSpec tasks stay open for the user-deferred Mac runtime
-and real physical-device/session portions. The remaining user work is exactly
-the [manual checklist](desktop-manual-checklist.md); minimum macOS runtime and
-optional owner-credential signing remain explicitly unverified.
+The user confirmed the Linux physical-device and desktop-session checks in the
+[manual checklist](desktop-manual-checklist.md) and subsequently approved closing
+the combined OpenSpec acceptance tasks.
+The user’s subsequent macOS results are recorded in the
+[macOS acceptance record](desktop-macos-acceptance.md).

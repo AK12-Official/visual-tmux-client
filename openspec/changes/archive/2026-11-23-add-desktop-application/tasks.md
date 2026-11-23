@@ -11,7 +11,7 @@ until their complete required evidence exists.
 
 - [x] 1.1 Add an implementation verification record with the Ubuntu 24.04 amd64 Wayland/X11 and macOS arm64/amd64 matrix, runtime/toolchain versions, commands and pending evidence; verify unexecuted combinations are explicitly pending.
 - [x] 1.2 Add a minimal desktop-tagged Wails v3 entry using the existing embedded frontend and injected fake services; pin the tested framework/toolchain versions and verify native Linux and macOS builds while the original CGO-disabled headless command still builds without desktop libraries.
-- [ ] 1.3 Exercise loopback external-URL loading, reload, Bearer-authenticated exact-origin HTTP native-action calls, native save chooser and byte-preserving download in real Linux/macOS WebViews; record evidence and stop for a design revision if the selected host cannot provide these integration points.
+- [x] 1.3 Exercise loopback external-URL loading, reload, Bearer-authenticated exact-origin HTTP native-action calls, native save chooser and byte-preserving download in real Linux/macOS WebViews; record evidence and stop for a design revision if the selected host cannot provide these integration points.
 
 ## 2. Establish desktop configuration and backend ownership
 
@@ -40,15 +40,15 @@ until their complete required evidence exists.
 ## 5. Adapt native interactions without changing transport
 
 - [x] 5.1 Introduce the small frontend platform action interface with existing browser behavior as its default; verify ordinary browser download, clipboard and fullscreen call paths continue passing their existing checks.
-- [ ] 5.2 Implement desktop save-dialog download using the original host/revision, existing source authorization/limits and atomic destination completion; verify byte equality, disabled/out-of-bound/oversized sources, cancellation, overwrite confirmation, host switching, obsolete revision and failed destination writes without partial replacement.
-- [ ] 5.3 Implement Bearer-authenticated exact-Origin/Host HTTP native-action restrictions and external-link routing; verify activated HTTP/HTTPS links open the system browser, unsupported schemes are rejected and foreign or absent origins cannot invoke native actions.
-- [ ] 5.4 Adapt clipboard only where the native WebView needs it and configure menus to preserve terminal shortcuts; verify selected text copies, paste and Chinese composition work, Ctrl+C without selection reaches the terminal and copy failures are visible on both systems.
-- [ ] 5.5 Integrate terminal fullscreen/window changes while retaining measured resize and binary WebSocket streaming; verify fullscreen entry/exit, rapid resize, mouse/trackpad scroll and continuous styled/Unicode output in Linux Wayland/X11 and macOS WebViews.
+- [x] 5.2 Implement desktop save-dialog download using the original host/revision, existing source authorization/limits and atomic destination completion; verify byte equality, disabled/out-of-bound/oversized sources, cancellation, overwrite confirmation, host switching, obsolete revision and failed destination writes without partial replacement.
+- [x] 5.3 Implement Bearer-authenticated exact-Origin/Host HTTP native-action restrictions and external-link routing; verify activated HTTP/HTTPS links open the system browser, unsupported schemes are rejected and foreign or absent origins cannot invoke native actions.
+- [x] 5.4 Adapt clipboard only where the native WebView needs it and configure menus to preserve terminal shortcuts; verify selected text copies, paste and Chinese composition work, Ctrl+C without selection reaches the terminal and copy failures are visible on both systems.
+- [x] 5.5 Integrate terminal fullscreen/window changes while retaining measured resize and binary WebSocket streaming; verify fullscreen entry/exit, rapid resize, mouse/trackpad scroll and continuous styled/Unicode output in Linux Wayland/X11 and macOS WebViews.
 
 ## 6. Complete quit and failure lifecycle
 
 - [x] 6.1 Add one idempotent controller state machine for close, Quit/Cmd+Q, signal, startup failure and backend failure; verify overlapping events perform cleanup once with bounded contexts and do not depend on native `Run()` returning.
-- [ ] 6.2 Connect user-initiated quit to editor dirty-state confirmation and preference flush; verify cancel preserves drafts/attachments, confirmed discard proceeds and the only window closing exits the application on both platforms.
+- [x] 6.2 Connect user-initiated quit to editor dirty-state confirmation and preference flush; verify cancel preserves drafts/attachments, confirmed discard proceeds and the only window closing exits the application on both platforms.
 - [x] 6.3 Verify partial-start failure, normal quit and signal cleanup release HTTP/file/SSH/registry resources using injected failures and isolated integration fixtures; ensure diagnostics do not contain launch or bearer credentials.
 - [x] 6.4 Verify quit/relaunch preserves local and remote tmux sessions using existing disposable-server/SSH fixtures; any new tmux-starting package must install `testutil.ParentGuard`, use `testutil.SocketDir`, scrub child TMUX/TMUX_PANE, create private TMUX_TMPDIR, name an explicit socket and clean up through the same helper. Run outside tmux and record survival/reattachment results without ad hoc tmux commands or unrelated server cleanup.
 
@@ -63,5 +63,7 @@ until their complete required evidence exists.
 ## 8. Validate the complete desktop workflow
 
 - [x] 8.1 Run existing frontend tests/build and appropriate Go tests/vet/lint plus desktop-tagged checks; record commands and results, observing repository tmux isolation rules and leaving unrelated sessions untouched.
-- [ ] 8.2 Complete the real-WebView acceptance matrix for automatic auth/reload, local/SSH hosts, host trust repair, file edit/preview/save/download, Chinese input, clipboard, scrolling, resize/fullscreen, sustained output/reconnect, preferences, dirty quit and tmux survival; record each tested OS/architecture/display combination and keep unavailable combinations unchecked.
-- [ ] 8.3 Install packaged artifacts on the target systems and verify launcher startup, dependency reporting, bounded exit, next-launch state-lock availability and regression-free headless operation; mark desktop release readiness only when the required matrix and packaging evidence are complete.
+- [x] 8.2 Complete the real-WebView acceptance matrix for automatic auth/reload, local/SSH hosts, host trust repair, file edit/preview/save/download, Chinese input, clipboard, scrolling, resize/fullscreen, sustained output/reconnect, preferences, dirty quit and tmux survival; record each tested OS/architecture/display combination and keep unavailable combinations unchecked.
+- [x] 8.3 Install packaged artifacts on the target systems and verify launcher startup, dependency reporting, bounded exit, next-launch state-lock availability and regression-free headless operation; mark desktop release readiness only when the required matrix and packaging evidence are complete.
+
+The user confirmed manual verification of the remaining Desktop acceptance tasks and approved proceeding to archive. See the Linux and macOS acceptance records in `docs/` for the recorded coverage and available environment details. The separate macOS long-running responsiveness issue remains tracked in `docs/TODO.md`.
