@@ -27,6 +27,7 @@ import { getPreference, setLocale, onLocaleChange, getLocale, t, type LanguagePr
 import { safeStorageGet, safeStorageSet, safeStorageRemove } from './storage'
 import { enterFullscreen, isFullscreen, leaveFullscreen } from './platform'
 import { installDesktopQuit } from './desktop-lifecycle'
+import { isDesktop } from './desktop'
 import SessionList from './components/SessionList.vue'
 import TerminalView from './components/TerminalView.vue'
 import ToastStack from './components/ToastStack.vue'
@@ -1026,7 +1027,7 @@ onBeforeUnmount(() => {
             :aria-label="t('common.language')"
             @change="onLanguageChange"
           >
-            <option value="auto">{{ t('common.autoLanguage') }}</option>
+            <option value="auto">{{ t(isDesktop() ? 'common.autoLanguageDesktop' : 'common.autoLanguage') }}</option>
             <option value="en">English</option>
             <option value="zh-CN">简体中文</option>
           </select>
@@ -1062,7 +1063,7 @@ onBeforeUnmount(() => {
             :aria-label="t('common.language')"
             @change="onLanguageChange"
           >
-            <option value="auto">{{ t('common.autoLanguage') }}</option>
+            <option value="auto">{{ t(isDesktop() ? 'common.autoLanguageDesktop' : 'common.autoLanguage') }}</option>
             <option value="en">English</option>
             <option value="zh-CN">简体中文</option>
           </select>

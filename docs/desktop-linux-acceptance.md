@@ -1,5 +1,19 @@
 # Linux desktop acceptance
 
+## Physical-session font regression (2026-11-16)
+
+Manual inspection of the installed desktop exposed excessive terminal character
+spacing. A real WebKitGTK 6.0 window on this machine reproduced it with xterm
+6.0: at 13px the original font stack beginning with `ui-monospace` selected a
+proportional fallback (`W` 11.414px, `i` 3.575px), while xterm allocated an
+11.4125px cell to every character. The generic `monospace` family produces
+equal 7.827px glyph advances and a 7.825px xterm cell. The terminal now uses
+that system fixed-width family; the native workspace input fixture also checks
+equal `W`/`i` advances to detect proportional fallbacks. The comparative probe
+used the installed xterm JS/CSS in a temporary native WebKit window and did not
+start tmux or access application state. Rebuilt-package visual confirmation by
+the user remains pending; this does not complete other physical-input checks.
+
 Current summary: native X11, Weston virtual input and GNOME Wayland portal
 checks pass locally, including real local/SSH GUI enrollment, key rotation and
 trust repair, remote file preview/edit/save/download, reconnect and original

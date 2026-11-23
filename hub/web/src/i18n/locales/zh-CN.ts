@@ -21,6 +21,7 @@ export const zhCN: LocaleMessages = {
     manual: '手动',
     language: '语言',
     autoLanguage: '跟随浏览器',
+    autoLanguageDesktop: '自动',
     enLanguage: 'English',
     zhLanguage: '简体中文',
     none: '无',

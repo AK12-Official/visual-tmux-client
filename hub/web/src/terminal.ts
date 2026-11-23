@@ -150,8 +150,11 @@ export class TerminalSession {
       // proposed API in xterm 6.x; accessing it throws unless this is set.
       allowProposedApi: true,
       scrollback: termCfg.scrollback,
-      fontFamily:
-        'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+      // WebKitGTK can resolve ui-monospace or an unavailable named font to a
+      // proportional fallback before reaching the end of a font stack. xterm
+      // then sizes every cell from W, leaving narrow glyphs visibly spaced out.
+      // The generic family honors the system's actual fixed-width font.
+      fontFamily: 'monospace',
       fontSize: resolvedFontSize,
       theme: THEME,
     })

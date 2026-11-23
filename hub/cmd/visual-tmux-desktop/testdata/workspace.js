@@ -57,6 +57,12 @@
   await status(value=>value.frames>value.rows+20,'scrollback output');
   await request('pause');
   await new Promise(r=>setTimeout(r,100));
+  const rows=document.querySelector('.xterm-rows');
+  const font=getComputedStyle(rows);
+  const context=document.createElement('canvas').getContext('2d');
+  context.font=`${font.fontSize} ${font.fontFamily}`;
+  if(Math.abs(context.measureText('W').width-context.measureText('i').width)>0.1)
+    throw new Error(`terminal selected a proportional font: ${font.fontFamily}`);
   const screen=document.querySelector('.xterm-screen').getBoundingClientRect();
   const firstLine=()=>Number(document.querySelector('.xterm-rows')?.firstElementChild?.textContent.match(/stream-中文-(\d+)/)?.[1]);
   const bottom=firstLine();

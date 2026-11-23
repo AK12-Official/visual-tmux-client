@@ -21,6 +21,7 @@ export const en: LocaleMessages = {
     manual: 'Manual',
     language: 'Language',
     autoLanguage: 'Follow Browser',
+    autoLanguageDesktop: 'Automatic',
     enLanguage: 'English',
     zhLanguage: '简体中文',
     none: 'None',
