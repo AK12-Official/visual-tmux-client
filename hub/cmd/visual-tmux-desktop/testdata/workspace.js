@@ -75,11 +75,28 @@
   await wait(()=>firstLine()>scrolled,'native mouse wheel scroll down');
   await new Promise(r=>setTimeout(r,200));
   if(initial.privateWayland){
+   // Finish each native gesture after the WebView has rendered its movement.
+   // Sample the settled view before reversing direction.
+   const fingerScroll=async (direction,moved)=>{
+    try {
+     await request('finger-'+direction);
+     await wait(moved,'Wayland finger-axis scroll '+direction);
+    } finally {
+     await request('finger-stop');
+    }
+    let line=firstLine(),stableSince=performance.now();
+    return wait(()=>{
+     const current=firstLine();
+     if(!Number.isFinite(current)||current!==line){
+      line=current;
+      stableSince=performance.now();
+     }
+     return performance.now()-stableSince>=200 ? {line} : null;
+    },'Wayland finger-axis scroll settle '+direction);
+   };
    const prior=firstLine();
-   await request('finger-up');await wait(()=>firstLine()<prior,'Wayland finger-axis scroll up');
-   const middle=firstLine();
-   await request('finger-down');await wait(()=>firstLine()>middle,'Wayland finger-axis scroll down');
-   await new Promise(r=>setTimeout(r,200));
+   const middle=await fingerScroll('up',()=>firstLine()<prior);
+   await fingerScroll('down',()=>firstLine()>middle.line);
    await request('checkpoint','Wayland native finger-axis scroll changed visible output in both directions');
   }
   const dimensions=await request('status');
