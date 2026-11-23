@@ -25,6 +25,9 @@ import {
 import { getConfig, resolveFontSize } from './config'
 import { getPreference, setLocale, onLocaleChange, getLocale, t, type LanguagePreference, type SupportedLocale } from './i18n/index'
 import { safeStorageGet, safeStorageSet, safeStorageRemove } from './storage'
+import { enterFullscreen, isFullscreen, leaveFullscreen } from './platform'
+import { installDesktopQuit } from './desktop-lifecycle'
+import { isDesktop } from './desktop'
 import SessionList from './components/SessionList.vue'
 import TerminalView from './components/TerminalView.vue'
 import ToastStack from './components/ToastStack.vue'
@@ -308,12 +311,12 @@ const mainEl = ref<HTMLElement | null>(null)
 // activation, a permissions policy, or exiting when not fullscreen); an
 // unhandled rejection would trip the global error banner in main.ts.
 function toggleFullscreen(): void {
-  if (document.fullscreenElement) {
-    document.exitFullscreen().catch(() => {
+  if (isFullscreen()) {
+    leaveFullscreen().catch(() => {
       /* already exited */
     })
   } else {
-    mainEl.value?.requestFullscreen().catch(() => {
+    if (mainEl.value) enterFullscreen(mainEl.value).catch(() => {
       notify('warning', t('terminal.fullscreenRefusedNotice'))
     })
   }
@@ -405,8 +408,8 @@ function closePanel(): void {
   if (filesDirty.value) {
     if (!window.confirm(t('files.closeManagerUnsavedPrompt'))) return
   }
-  if (document.fullscreenElement) {
-    document.exitFullscreen().catch(() => {
+  if (isFullscreen()) {
+    leaveFullscreen().catch(() => {
       /* already exited */
     })
   }
@@ -969,8 +972,10 @@ function onOffline() {
 }
 
 let unlistenLocale: (() => void) | null = null
+let unlistenDesktopQuit: (() => void) | null = null
 
 onMounted(async () => {
+  unlistenDesktopQuit = installDesktopQuit(() => !filesDirty.value || window.confirm(t('files.closeManagerUnsavedPrompt')))
   unlistenLocale = onLocaleChange((locale, pref) => {
     currentPreference.value = pref
     currentLocale.value = locale
@@ -983,6 +988,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  unlistenDesktopQuit?.()
   unlistenLocale?.()
   stopPolling()
   window.removeEventListener('online', onOnline)
@@ -1021,7 +1027,7 @@ onBeforeUnmount(() => {
             :aria-label="t('common.language')"
             @change="onLanguageChange"
           >
-            <option value="auto">{{ t('common.autoLanguage') }}</option>
+            <option value="auto">{{ t(isDesktop() ? 'common.autoLanguageDesktop' : 'common.autoLanguage') }}</option>
             <option value="en">English</option>
             <option value="zh-CN">简体中文</option>
           </select>
@@ -1057,7 +1063,7 @@ onBeforeUnmount(() => {
             :aria-label="t('common.language')"
             @change="onLanguageChange"
           >
-            <option value="auto">{{ t('common.autoLanguage') }}</option>
+            <option value="auto">{{ t(isDesktop() ? 'common.autoLanguageDesktop' : 'common.autoLanguage') }}</option>
             <option value="en">English</option>
             <option value="zh-CN">简体中文</option>
           </select>
@@ -1545,6 +1551,12 @@ onBeforeUnmount(() => {
 /* In fullscreen the main region covers the screen, so it needs its own
    background instead of showing through to the page. */
 .app__main:fullscreen {
+  background: var(--app-bg);
+}
+.app__main--desktop-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
   background: var(--app-bg);
 }
 /* The file manager covers the terminal area only. `.app__main` is already a

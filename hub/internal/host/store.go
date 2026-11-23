@@ -476,7 +476,12 @@ func (s *Store) Close() error {
 			s.closeErr = s.db.Close()
 		}
 		if s.lock != nil {
-			s.closeErr = errors.Join(s.closeErr, s.lock.Close())
+			// Fork temporarily duplicates the open file description even for
+			// CLOEXEC descriptors. Closing only our copy can leave ownership held
+			// until a concurrent child reaches exec. Explicitly release this
+			// store's lock before close so an embedded backend can restart now.
+			unlockErr := syscall.Flock(int(s.lock.Fd()), syscall.LOCK_UN)
+			s.closeErr = errors.Join(s.closeErr, unlockErr, s.lock.Close())
 		}
 	})
 	return s.closeErr

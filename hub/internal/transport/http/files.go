@@ -172,6 +172,9 @@ func (s *handlerState) serveFile(w http.ResponseWriter, r *http.Request, attachm
 	}
 
 	path := r.URL.Query().Get("path")
+	if attachment && !s.checkExpectedConnRev(w, r, nil) {
+		return
+	}
 	result, err := s.files.Read(r.Context(), path)
 	if err != nil {
 		mapFileError(w, err)

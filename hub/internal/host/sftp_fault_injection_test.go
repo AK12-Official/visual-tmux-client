@@ -192,6 +192,17 @@ func TestSFTPOpenSSHReplacementAndFaultInjection(t *testing.T) {
 	if err := os.WriteFile(coarseTarget, []byte("coarse origin text"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// SFTP v3 exposes whole seconds. Force an exactly matching coarse timestamp
+	// so this test exercises digest conflicts instead of usually passing due to
+	// accidental subsecond metadata mismatch.
+	coarseTime := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(coarseTarget, coarseTime, coarseTime); err != nil {
+		t.Fatal(err)
+	}
+	originDigest, err := host.ComputeContentDigest(bytes.NewReader([]byte("coarse origin text")))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	coarseStat, err := os.Stat(coarseTarget)
 	if err != nil {
@@ -200,6 +211,7 @@ func TestSFTPOpenSSHReplacementAndFaultInjection(t *testing.T) {
 	coarsePrecondition := &files.ExpectedMtime{
 		Millis: coarseStat.ModTime().UnixMilli(),
 		Nanos:  nil, // Coarse timestamp
+		Digest: originDigest,
 	}
 
 	// Content modified on disk concurrently while timestamp is artificially kept at the same millis

@@ -18,6 +18,44 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+func TestDisposableSSHKeyRotationRejectsOldTrust(t *testing.T) {
+	server := testutil.NewDisposableSSHServer(t, testutil.DisposableSSHConfig{Password: "fixture-only"})
+	address := net.JoinHostPort(server.Addr, fmt.Sprint(server.Port))
+	dial := func(fingerprint string) (*ssh.Client, error) {
+		return ssh.Dial("tcp", address, &ssh.ClientConfig{
+			User: server.User, Auth: []ssh.AuthMethod{ssh.Password(server.Password)}, Timeout: 3 * time.Second,
+			HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+				if ssh.FingerprintSHA256(key) != fingerprint {
+					return errors.New("unexpected fixture key")
+				}
+				return nil
+			},
+		})
+	}
+	first, err := dial(server.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rotated := server.RotateHostKey()
+	if rotated == server.Fingerprint {
+		t.Fatal("rotation reused key")
+	}
+	if old, err := dial(server.Fingerprint); err == nil {
+		_ = old.Close() //nolint:errcheck // preserve failed trust assertion
+		t.Fatal("old trust accepted rotated key")
+	}
+	second, err := dial(rotated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDisposableSSHFixturePasswordAuthAndTmuxIsolation(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not available")
