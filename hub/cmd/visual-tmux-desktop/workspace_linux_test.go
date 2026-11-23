@@ -283,7 +283,7 @@ func workspaceHandler(s *desktopWindow, processes *workspaceProcesses, passed *a
 			processes.paused.Store(body.Phase == "pause")
 			desktop.WriteJSON(w, map[string]bool{"ok": true})
 		case "pointer", "drag", "key-copy", "key-paste", "commit", "wheel-up",
-			"wheel-down", "pinyin", "finger-up", "finger-down":
+			"wheel-down", "pinyin", "finger-up", "finger-down", "finger-stop":
 			ok := false
 			application.InvokeSync(func() {
 				switch body.Phase {
@@ -294,7 +294,7 @@ func workspaceHandler(s *desktopWindow, processes *workspaceProcesses, passed *a
 					ok = privateKey(s.window.Load().NativeWindow(), body.Phase == "key-paste")
 				case "wheel-up", "wheel-down":
 					ok = privateWheel(s.window.Load().NativeWindow(), body.Phase == "wheel-down")
-				case "finger-up", "finger-down":
+				case "finger-up", "finger-down", "finger-stop":
 					ok = privateWaylandInput(s.window.Load().NativeWindow(), body.Phase, 0, 0, 0, 0, false)
 				case "pinyin":
 					ok = privatePinyin(s.window.Load().NativeWindow())

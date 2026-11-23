@@ -124,17 +124,18 @@ static bool command(struct connection *client) {
             key(probe,&now,keys[i],true);key(probe,&now,keys[i],false);
         }
     } else if (!strcmp(operation, "wheel-up") || !strcmp(operation, "wheel-down") ||
-               !strcmp(operation,"finger-up") || !strcmp(operation,"finger-down")) {
+               !strcmp(operation,"finger-up") || !strcmp(operation,"finger-down") ||
+               !strcmp(operation,"finger-stop")) {
         bool finger=!strncmp(operation,"finger-",7);
+        bool stop=!strcmp(operation,"finger-stop");
         int direction = strstr(operation,"down") ? 1 : -1;
         struct weston_pointer_axis_event axis = {
-            .axis = WL_POINTER_AXIS_VERTICAL_SCROLL, .value = 60 * direction,
+            .axis = WL_POINTER_AXIS_VERTICAL_SCROLL, .value = stop ? 0 : 60 * direction,
             .has_discrete = !finger, .discrete = finger ? 0 : 5 * direction
         };
         notify_axis_source(&probe->seat, finger ? WL_POINTER_AXIS_SOURCE_FINGER : WL_POINTER_AXIS_SOURCE_WHEEL);
         notify_axis(&probe->seat, &now, &axis);
         notify_pointer_frame(&probe->seat);
-        if (finger) { axis.value=0;notify_axis(&probe->seat,&now,&axis);notify_pointer_frame(&probe->seat); }
     } else {
         return false;
     }
