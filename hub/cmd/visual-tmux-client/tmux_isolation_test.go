@@ -94,7 +94,12 @@ func bindTmuxToSocket(t *testing.T, env []string, socket string) []string {
 		t.Fatalf("create the tmux wrapper directory: %v", err)
 	}
 	wrapper := filepath.Join(binDir, "tmux")
-	script := fmt.Sprintf("#!/bin/sh\nexec %q -S %q \"$@\"\n", real, socket)
+	// Guard the socket directory in the wrapper as well: tmux 3.4 (Ubuntu 24.04)
+	// fails to create the socket when its parent directory is gone, yet exits 0.
+	script := fmt.Sprintf(
+		"#!/bin/sh\nif [ ! -d %q ]; then\n  echo \"bound tmux: socket directory does not exist\" >&2\n  exit 1\nfi\nexec %q -S %q \"$@\"\n",
+		filepath.Dir(socket), real, socket,
+	)
 	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
 		t.Fatalf("write the tmux wrapper: %v", err)
 	}
@@ -169,9 +174,12 @@ func TestBoundTmuxFailsOnceTheDirectoryIsGone(t *testing.T) {
 	}
 	path, _ := lastEnvValue(env, "PATH")
 	bound, _, _ := strings.Cut(path, string(os.PathListSeparator))
-	_, _, code, err := runCmd(bound+"/tmux", env, "new-session", "-d", "-s", "gone", "sleep", "30")
+	_, stderr, code, err := runCmd(bound+"/tmux", env, "new-session", "-d", "-s", "gone", "sleep", "30")
 	if err != nil || code == 0 {
-		t.Fatalf("a session was created after the temporary directory went: code=%d err=%v", code, err)
+		t.Fatalf("a session was created after the temporary directory went: code=%d err=%v stderr=%s", code, err, stderr)
+	}
+	if _, statErr := os.Stat(socketDir); !os.IsNotExist(statErr) {
+		t.Fatalf("temporary directory reappeared after bound tmux ran: err=%v", statErr)
 	}
 }
 
