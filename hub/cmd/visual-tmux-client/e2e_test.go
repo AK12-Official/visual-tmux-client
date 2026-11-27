@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -102,12 +101,9 @@ func TestE2ERestartPreservesSession(t *testing.T) {
 	// under the long /var/folders OS temp root.
 	tmpdir := testutil.SocketDir(t)
 
-	socket := filepath.Join(tmpdir, fmt.Sprintf("tmux-%d", os.Getuid()), "default")
-	if err := os.MkdirAll(filepath.Dir(socket), 0o700); err != nil {
-		t.Fatalf("create socket dir: %v", err)
-	}
-
 	tmuxEnv := testTmuxEnv(tmpdir)
+	// The hub instances are bound to this socket by startHub.
+	socket := hubTmuxSocket(tmuxEnv)
 	_, _, code, err := runCmd(tmux, tmuxEnv, "-S", socket, "new-session", "-d", "-s", "e2e-sess")
 	if err != nil || code != 0 {
 		t.Fatalf("new-session failed: code=%d err=%v", code, err)
@@ -127,7 +123,10 @@ func TestE2ERestartPreservesSession(t *testing.T) {
 
 		const token = "e2e-secret-token"
 		cmd := exec.Command(hubBin, "--addr", addr)
-		cmd.Env = hubEnv(append(tmuxEnv, "VISUAL_TMUX_CLIENT_TOKEN="+token), stateDir)
+		// The hub reaches the server above through the named socket, never
+		// through the default position should the temporary directory go.
+		childEnv := hubEnv(append(tmuxEnv, "VISUAL_TMUX_CLIENT_TOKEN="+token), stateDir)
+		cmd.Env = bindTmuxToSocket(t, childEnv, socket)
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}

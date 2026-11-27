@@ -40,7 +40,11 @@ commands. This is a documented instruction, not a shell interception mechanism.
 
 Go tests must create private short socket directories with `testutil.SocketDir(t)`,
 clear TMUX/TMUX_PANE, pin TMUX_TMPDIR and explicitly select a socket, including
-cleanup. CLI and tmux packages install `testutil.ParentGuard` through TestMain;
+cleanup. A hub binary under test has no setting for its tmux socket, so the
+CLI tests bind the tmux on its PATH to the test's socket; TMUX_TMPDIR alone does
+not isolate it, because tmux falls back to the default position once that
+directory is gone.
+CLI and tmux packages install `testutil.ParentGuard` through TestMain;
 new tmux-backed packages need the same gate. The guard uses a disposable server
 and detects server/session-list changes after tests. It cannot undo damage or
 identify all pane/option changes, and concurrent user activity can trigger it.
