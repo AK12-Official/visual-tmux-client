@@ -1,4 +1,4 @@
-VERSION ?= 0.6.0
+VERSION ?= 0.6.1
 GOLANGCI_LINT_VERSION ?= 2.13.2
 
 .PHONY: build web test package clean lint fmt install-lint
