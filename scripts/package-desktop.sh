@@ -15,6 +15,9 @@ case "$version" in
   *[!0-9A-Za-z.+~-]*) echo 'invalid DESKTOP_VERSION' >&2; exit 1 ;;
 esac
 test -x "$binary"
+icon_svg="$project_dir/packaging/desktop/visual-tmux-client.svg"
+icon_icns="$project_dir/packaging/desktop/visual-tmux-client.icns"
+test -f "$icon_svg" || { echo "missing $icon_svg; run scripts/generate-app-icon.sh" >&2; exit 1; }
 mkdir -p "$output_dir"
 output_dir=$(CDPATH= cd -- "$output_dir" && pwd)
 staging=$(mktemp -d "${TMPDIR:-/tmp}/vtc-desktop-package.XXXXXX")
@@ -34,7 +37,7 @@ case "$(uname -s)/$(uname -m)" in
     printf '%s\n' '/etc/apparmor.d/visual-tmux-desktop' > "$root/DEBIAN/conffiles"
     cp "$project_dir/packaging/desktop/visual-tmux-client.desktop" \
       "$root/usr/share/applications/io.github.ak12official.visualtmuxclient.desktop"
-    cp "$project_dir/packaging/desktop/visual-tmux-client.svg" "$root/usr/share/icons/hicolor/scalable/apps/"
+    cp "$icon_svg" "$root/usr/share/icons/hicolor/scalable/apps/"
     cp "$project_dir/LICENSE" "$root/usr/share/doc/visual-tmux-desktop/copyright"
     cp "$project_dir/docs/desktop-verification.md" "$root/usr/share/doc/visual-tmux-desktop/VERIFICATION.md"
     cat > "$root/DEBIAN/control" <<CONTROL
@@ -54,21 +57,24 @@ CONTROL
     ;;
   Darwin/arm64|Darwin/x86_64)
     arch=$(uname -m)
+    test -f "$icon_icns" || { echo "missing $icon_icns; run scripts/generate-app-icon.sh on macOS" >&2; exit 1; }
     app="$staging/Visual Tmux Client.app"
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cp "$binary" "$app/Contents/MacOS/visual-tmux-desktop"
     chmod 755 "$app/Contents/MacOS/visual-tmux-desktop"
     cp "$project_dir/docs/desktop-verification.md" "$app/Contents/Resources/VERIFICATION.md"
+    cp "$icon_icns" "$app/Contents/Resources/visual-tmux-client.icns"
     cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>visual-tmux-desktop</string>
+<key>CFBundleIconFile</key><string>visual-tmux-client.icns</string>
 <key>CFBundleIdentifier</key><string>io.github.ak12official.visualtmuxclient</string>
 <key>CFBundleName</key><string>Visual Tmux Client</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.6.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>$version</string>
+<key>CFBundleVersion</key><string>$version</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
