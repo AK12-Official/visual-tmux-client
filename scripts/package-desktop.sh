@@ -4,7 +4,7 @@ set -eu
 umask 022
 
 project_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-version=${DESKTOP_VERSION:-0.6.0-desktop.dev}
+version=${DESKTOP_VERSION:-0.6.1-desktop.dev}
 output_dir=${OUTPUT_DIR:-"$project_dir/desktop-packages"}
 binary=${DESKTOP_BINARY:?Set DESKTOP_BINARY to a natively built visual-tmux-desktop}
 case "$version" in
