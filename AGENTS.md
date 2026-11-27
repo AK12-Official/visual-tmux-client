@@ -43,6 +43,10 @@ socket with `-S` or `-L`. Cleanup must use the same environment and socket.
   path length. Keep socket names short.
 - Use existing helpers: `newTestClient` in `hub/internal/tmux`, `testTmuxEnv`
   in `hub/cmd/visual-tmux-client`, and `tmux.ScrubbedEnv()` in product code.
+- A hub binary under test has no setting for its tmux socket, so `TMUX_TMPDIR`
+  alone does not isolate it: tmux falls back to the default position once that
+  directory is gone. Start hubs through `startSmokeServer` or the `startHub`
+  helper; both bind the hub's tmux to the test's socket (`bindTmuxToSocket`).
 - Do not weaken helpers to pass a test. Any new package that starts tmux needs
   `func TestMain(m *testing.M) { os.Exit(testutil.ParentGuard(m)) }`.
   It is currently installed in the CLI and tmux packages. The testutil package

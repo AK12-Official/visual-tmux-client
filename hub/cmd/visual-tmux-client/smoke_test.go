@@ -61,7 +61,10 @@ func startSmokeServer(
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = dir
 	stateDir := t.TempDir()
-	cmd.Env = hubEnv(append(testTmuxEnv(testutil.SocketDir(t)), env...), stateDir)
+	// Every tmux the hub runs names its socket, so a hub that outlives its
+	// temporary directory cannot fall back to the default position.
+	childEnv := hubEnv(append(testTmuxEnv(testutil.SocketDir(t)), env...), stateDir)
+	cmd.Env = bindTmuxToSocket(t, childEnv, hubTmuxSocket(childEnv))
 
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
@@ -424,7 +427,8 @@ func TestSmokeTerminalInputOutputAndReconnect(t *testing.T) {
 
 	tmuxDir := testutil.SocketDir(t)
 	env := testTmuxEnv(tmuxDir)
-	socket := filepath.Join(tmuxDir, fmt.Sprintf("tmux-%d", os.Getuid()), "default")
+	// The hub is bound to this socket by startSmokeServer.
+	socket := hubTmuxSocket(env)
 	t.Cleanup(func() {
 		tmux, err := exec.LookPath("tmux")
 		if err == nil {
