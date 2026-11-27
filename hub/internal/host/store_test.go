@@ -384,3 +384,101 @@ func TestStoreInterruptedAndRepeatedMigration(t *testing.T) {
 		t.Fatalf("expected watermark 2/2 for deleted local host, got %d/%d", nextRev, nextConnRev)
 	}
 }
+
+func TestStoreProxyAddressAndPartialSettingsUpdate(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	address := "127.0.0.1:7890"
+
+	store, err := OpenStore(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Empty by default.
+	settings, err := store.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.ProxyAddress != "" || settings.Revision != 1 || settings.DefaultHostID == nil {
+		t.Fatalf("unexpected initial settings: %+v", settings)
+	}
+
+	// A stale revision is refused and keeps the current setting.
+	stale := address
+	if _, err := store.UpdateSettings(ctx, SettingsUpdate{ProxyAddress: &stale}, 9); !errors.Is(err, ErrStaleRevision) {
+		t.Fatalf("expected ErrStaleRevision, got %v", err)
+	}
+	if _, err := store.UpdateSettings(ctx, SettingsUpdate{ProxyAddress: &stale}, 0); !errors.Is(err, ErrStaleRevision) {
+		t.Fatalf("expected ErrStaleRevision for revision 0, got %v", err)
+	}
+	if settings, err = store.GetSettings(ctx); err != nil || settings.ProxyAddress != "" {
+		t.Fatalf("refused update changed the proxy: %+v %v", settings, err)
+	}
+
+	// Setting the proxy leaves the default host alone.
+	settings, err = store.UpdateSettings(ctx, SettingsUpdate{ProxyAddress: &stale}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.ProxyAddress != address || settings.Revision != 2 ||
+		settings.DefaultHostID == nil || *settings.DefaultHostID != LocalID {
+		t.Fatalf("unexpected settings after setting the proxy: %+v", settings)
+	}
+
+	// Persisted across close and reopen, with no schema change.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }() //nolint:errcheck // cleanup
+	settings, err = store.GetSettings(ctx)
+	if err != nil || settings.ProxyAddress != address || settings.Revision != 2 {
+		t.Fatalf("proxy did not survive reopen: %+v %v", settings, err)
+	}
+	var version int
+	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil ||
+		version != schemaVersion {
+		t.Fatalf("schema version changed: %d %v", version, err)
+	}
+	var stored string
+	if err := store.db.QueryRowContext(
+		ctx, "SELECT value FROM metadata WHERE key = ?", metadataKeyProxyAddress,
+	).Scan(&stored); err != nil || stored != address {
+		t.Fatalf("proxy is not in the metadata table: %q %v", stored, err)
+	}
+
+	// An update without the proxy leaves it unchanged; clearing is explicit.
+	settings, err = store.UpdateSettings(ctx, SettingsUpdate{}, settings.Revision)
+	if err != nil || settings.ProxyAddress != address || settings.Revision != 3 {
+		t.Fatalf("proxy changed although it was not set: %+v %v", settings, err)
+	}
+	empty := ""
+	settings, err = store.UpdateSettings(ctx, SettingsUpdate{ProxyAddress: &empty}, settings.Revision)
+	if err != nil || settings.ProxyAddress != "" || settings.Revision != 4 {
+		t.Fatalf("proxy was not cleared: %+v %v", settings, err)
+	}
+	if err := store.db.QueryRowContext(
+		ctx, "SELECT count(*) FROM metadata WHERE key = ?", metadataKeyProxyAddress,
+	).Scan(&version); err != nil || version != 0 {
+		t.Fatalf("cleared proxy is still stored: %d %v", version, err)
+	}
+
+	// The default host follows the same rule: unchanged when not set, cleared by nil.
+	settings, err = store.UpdateSettings(ctx, SettingsUpdate{ProxyAddress: &stale}, settings.Revision)
+	if err != nil || settings.DefaultHostID == nil || *settings.DefaultHostID != LocalID {
+		t.Fatalf("default host changed although it was not set: %+v %v", settings, err)
+	}
+	settings, err = store.UpdateDefaultHost(ctx, nil, settings.Revision)
+	if err != nil || settings.DefaultHostID != nil || settings.ProxyAddress != address {
+		t.Fatalf("clearing the default host must keep the proxy: %+v %v", settings, err)
+	}
+	unknown := ID("missing")
+	update := SettingsUpdate{DefaultHostID: &unknown, DefaultHostSet: true}
+	if _, err := store.UpdateSettings(ctx, update, settings.Revision); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for an unknown default host, got %v", err)
+	}
+}

@@ -29,6 +29,9 @@ const fileContentType = "application/octet-stream"
 // browser matches on. The browser needs the code rather than the status: the
 // conflict flow in particular has to tell a lost race from any other failure.
 func mapHostFileError(w http.ResponseWriter, err error) bool {
+	if writeProxyError(w, err) {
+		return true
+	}
 	switch {
 	case errors.Is(err, host.ErrNotFound):
 		writeError(w, http.StatusNotFound, "host_not_found")

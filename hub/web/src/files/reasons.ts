@@ -14,6 +14,7 @@
 // requireMtime), not by any response.
 
 import { t } from '../i18n/index'
+import { proxyFailureText } from '../hostErrors'
 
 export const REASONS: Record<string, string> = {
   path_not_allowed: 'that path is outside the directories this hub may open',
@@ -58,6 +59,10 @@ export function reasonFor(
   if (code === 'file_too_large' && limit > 0) {
     return t('errors.file_too_large_limit', { limit: format(limit) })
   }
+  // A remote file operation can fail on the way to the host. The hub names the
+  // proxy in its message, which is what the explanation needs.
+  const proxyText = proxyFailureText(code)
+  if (proxyText) return proxyText
   if (REASONS[code]) {
     return t(`errors.${code}`)
   }

@@ -20,6 +20,18 @@ type Client struct {
 	socket    string
 	err       error
 	optionsMu sync.Mutex
+	// sessionEnvironment is installed before the first session is created.
+	sessionEnvironment SessionEnvironment
+}
+
+// SessionEnvironment returns variables to add to a session. It is called for
+// every session, so a changed result applies to the next one.
+type SessionEnvironment func(ctx context.Context) (map[string]string, error)
+
+// SetSessionEnvironment installs the source of the variables added to each
+// session this client creates.
+func (c *Client) SetSessionEnvironment(environment SessionEnvironment) {
+	c.sessionEnvironment = environment
 }
 
 // NewClient resolves the tmux binary and constructs a Client.
@@ -197,9 +209,18 @@ func (c *Client) Create(ctx context.Context, name string) (*session.Session, err
 		return nil, session.ErrNameInUse
 	}
 
+	var environment map[string]string
+	if c.sessionEnvironment != nil {
+		var err error
+		// A session is not started without variables it is meant to have.
+		if environment, err = c.sessionEnvironment(ctx); err != nil {
+			return nil, fmt.Errorf("session environment: %w", err)
+		}
+	}
+
 	// One command queue keeps a newly started server alive and installs defaults
 	// before its first pane can exit. A failed set-option aborts the queue.
-	args := CreateArgs(name, homeDirectory())
+	args := CreateArgs(name, homeDirectory(), environment)
 	c.optionsMu.Lock()
 	_, stderr, code, err := c.Exec(ctx, args...)
 	c.optionsMu.Unlock()

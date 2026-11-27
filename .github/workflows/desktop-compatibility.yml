@@ -12,6 +12,7 @@ on:
       - 'hub/**'
       - '.github/workflows/desktop-compatibility.yml'
       - 'scripts/package-desktop.sh'
+      - 'scripts/generate-app-icon.sh'
       - 'scripts/probe-desktop-*.py'
       - 'scripts/testdata/**'
       - 'scripts/notarize-desktop-macos.sh'
@@ -81,6 +82,31 @@ jobs:
       - name: Ensure disposable tmux fixture dependency on macOS
         if: runner.os == 'macOS'
         run: command -v tmux >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install tmux
+      - name: Check the committed application icon against its artwork
+        if: runner.os == 'macOS'
+        run: |
+          # Structure, not bytes: rasterizer versions differ between machines.
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install librsvg
+          regenerated="$RUNNER_TEMP/app-icon"
+          mkdir -p "$regenerated"
+          ICON_OUTPUT_DIR="$regenerated" sh scripts/generate-app-icon.sh
+          for icon in packaging/desktop/visual-tmux-client.icns "$regenerated/visual-tmux-client.icns"; do
+            iconset="$RUNNER_TEMP/$(basename "$(dirname "$icon")").iconset"
+            rm -rf "$iconset"
+            iconutil -c iconset "$icon" -o "$iconset"
+            test "$(find "$iconset" -name '*.png' | wc -l | tr -d ' ')" -eq 10
+            for representation in \
+              icon_16x16.png:16 icon_16x16@2x.png:32 icon_32x32.png:32 icon_32x32@2x.png:64 \
+              icon_128x128.png:128 icon_128x128@2x.png:256 icon_256x256.png:256 \
+              icon_256x256@2x.png:512 icon_512x512.png:512 icon_512x512@2x.png:1024; do
+              name=${representation%%:*}
+              pixels=${representation##*:}
+              for dimension in pixelWidth pixelHeight; do
+                test "$(sips -g "$dimension" "$iconset/$name" | awk -v key="$dimension" '$1 == key ":" { print $2 }')" -eq "$pixels"
+              done
+            done
+          done
+          test -f packaging/desktop/visual-tmux-client.svg
       - name: Record native architecture and toolchain
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
@@ -214,6 +240,8 @@ jobs:
           sudo apt-get install --yes "$PWD/$1"
           test -x /usr/bin/visual-tmux-desktop
           test -f /usr/share/applications/io.github.ak12official.visualtmuxclient.desktop
+          test -f /usr/share/icons/hicolor/scalable/apps/visual-tmux-client.svg
+          dpkg-deb -c "$1" | grep -F './usr/share/icons/hicolor/scalable/apps/visual-tmux-client.svg'
           mkdir -p "$RUNNER_TEMP/vtc-empty-path"
           # The installed binary gets an empty PATH: neither Go nor Node can be
           # invoked for its frontend or backend. Display helpers run outside it.
@@ -238,6 +266,9 @@ jobs:
           ditto -x -k "$1" packaged-launch
           app="$PWD/packaged-launch/Visual Tmux Client.app"
           codesign --verify --strict "$app"
+          test "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" = \
+            "$(basename "$1" | cut -d _ -f 2)"
+          test -f "$app/Contents/Resources/$(plutil -extract CFBundleIconFile raw "$app/Contents/Info.plist")"
           file "$app/Contents/MacOS/visual-tmux-desktop"
           # Launch Services is also used by Finder. Probe mode owns temporary
           # state and cannot use saved hosts or start a real tmux process.

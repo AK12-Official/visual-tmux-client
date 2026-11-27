@@ -136,8 +136,17 @@ func (s *TrustStore) Confirm(
 	return c.HostKey, nil
 }
 
-// ProbeEndpoint probes an SSH server's public host key without presenting any authentication credentials.
+// ProbeEndpoint probes an SSH server's public host key without presenting any
+// authentication credentials, connecting directly.
 func ProbeEndpoint(ctx context.Context, address string, port uint16, dialTimeout time.Duration) (ssh.PublicKey, error) {
+	return ProbeEndpointViaProxy(ctx, address, port, dialTimeout, "")
+}
+
+// ProbeEndpointViaProxy is ProbeEndpoint with the remote connection made
+// through the given SOCKS5 proxy address; empty dials directly.
+func ProbeEndpointViaProxy(
+	ctx context.Context, address string, port uint16, dialTimeout time.Duration, proxyAddress string,
+) (ssh.PublicKey, error) {
 	if port == 0 {
 		port = 22
 	}
@@ -149,9 +158,11 @@ func ProbeEndpoint(ctx context.Context, address string, port uint16, dialTimeout
 		dialTimeout = defaultDialTimeout
 	}
 
-	dialer := net.Dialer{Timeout: dialTimeout}
-	conn, err := dialer.DialContext(ctx, "tcp", endpoint)
+	conn, err := dialRemote(ctx, endpoint, proxyAddress, dialTimeout)
 	if err != nil {
+		if _, _, ok := ProxyFailure(err); ok { //nolint:errcheck // only the kind of failure matters here
+			return nil, err
+		}
 		return nil, fmt.Errorf("probe dial: %w", err)
 	}
 	defer func() { _ = conn.Close() }() //nolint:errcheck // probe connection cleanup

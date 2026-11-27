@@ -37,6 +37,7 @@ RECXJ0e+PkPnYftJYlni7+jWTtpvGWxCCXfsh/EY5+VRR/e1B6xnd5Mlpx
 
 	dirPermPrivate         = 0o700
 	filePermExec           = 0o755
+	filePermPrivate        = 0o600
 	extraEnvCapacity       = 4
 	windowChangeMinPayload = 8
 	subsystemHeaderLen     = 4
@@ -166,6 +167,7 @@ func setupTmuxEnvironment(t *testing.T, rootDir, socketName, socketDir string) (
 		"TMUX_TMPDIR="+socketDir,
 		"HOME="+rootDir,
 		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"ZDOTDIR="+privateShellConfig(t),
 	)
 
 	startCmd := exec.Command(realTmux, "-L", socketName, "start-server")
@@ -173,6 +175,24 @@ func setupTmuxEnvironment(t *testing.T, rootDir, socketName, socketDir string) (
 	_ = startCmd.Run() //nolint:errcheck // best-effort start isolated server
 
 	return tmuxEnv, realTmux
+}
+
+// privateShellConfig returns a directory for zsh to read its startup files
+// from, holding only an empty .zshrc. The fixture HOME has no startup files,
+// and zsh then opens a first-run wizard that swallows the first keystrokes
+// sent to a pane. The directory sits outside the served root so that file
+// listings of the fixture are unchanged.
+func privateShellConfig(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "vtc-zsh")
+	if err != nil {
+		t.Fatalf("create shell config dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) }) //nolint:errcheck // private test directory
+	if err := os.WriteFile(filepath.Join(dir, ".zshrc"), nil, filePermPrivate); err != nil {
+		t.Fatalf("write shell config: %v", err)
+	}
+	return dir
 }
 
 func buildServerConfig(server *DisposableSSHServer, hostSigner ssh.Signer) *ssh.ServerConfig {

@@ -591,6 +591,12 @@ func (r *Registry) GetSettings(ctx context.Context) (Settings, error) {
 }
 
 func (r *Registry) UpdateDefaultHost(ctx context.Context, defaultHostID *ID, expected Revision) (Settings, error) {
+	return r.UpdateSettings(ctx, SettingsUpdate{DefaultHostID: defaultHostID, DefaultHostSet: true}, expected)
+}
+
+// UpdateSettings applies a revision-checked change to the host settings,
+// leaving fields that are not set unchanged.
+func (r *Registry) UpdateSettings(ctx context.Context, update SettingsUpdate, expected Revision) (Settings, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
@@ -599,5 +605,5 @@ func (r *Registry) UpdateDefaultHost(ctx context.Context, defaultHostID *ID, exp
 	if err := r.initialize(ctx); err != nil {
 		return Settings{}, err
 	}
-	return r.store.UpdateDefaultHost(ctx, defaultHostID, expected)
+	return r.store.UpdateSettings(ctx, update, expected)
 }

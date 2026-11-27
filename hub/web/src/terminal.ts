@@ -8,6 +8,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { issueTicket, AuthError } from './api'
+import { proxyFailureText } from './hostErrors'
 import { getConfig } from './config'
 import { copyText } from './platform'
 import { isDesktop } from './desktop'
@@ -418,7 +419,9 @@ export class TerminalSession {
         return
       }
       if (this.attempt === 0) {
-        this.hooks.onNotice(message)
+        // A proxy failure is explained in words; it names the proxy so the user
+        // can tell the proxy from the host. Reconnection still continues.
+        this.hooks.onNotice(proxyFailureText(message) ?? message)
       }
       this.scheduleReconnect()
     }

@@ -703,9 +703,17 @@ func (s *Store) Delete(ctx context.Context, id ID, expected Revision) error {
 	return tx.Commit()
 }
 
+// metadataKeyProxyAddress holds the SOCKS5 proxy for remote connections in the
+// key/value metadata table. Older builds ignore the key and dial directly.
+const metadataKeyProxyAddress = "proxy_address"
+
 type Settings struct {
 	DefaultHostID *ID      `json:"defaultHostId"`
 	Revision      Revision `json:"revision"`
+	// ProxyAddress is the normalized `host:port` of the SOCKS5 proxy used for
+	// remote connections, or empty for direct connections. It never contains
+	// a credential.
+	ProxyAddress string `json:"proxyAddress"`
 }
 
 func (s *Store) GetSettings(ctx context.Context) (Settings, error) {
@@ -726,13 +734,43 @@ func (s *Store) GetSettings(ctx context.Context) (Settings, error) {
 		idVal := ID(defaultHost.String)
 		idPtr = &idVal
 	}
+	var proxy sql.NullString
+	err = s.db.QueryRowContext(
+		ctx, "SELECT value FROM metadata WHERE key = ?", metadataKeyProxyAddress,
+	).Scan(&proxy)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Settings{}, err
+	}
 	return Settings{
 		DefaultHostID: idPtr,
 		Revision:      rev,
+		ProxyAddress:  proxy.String,
 	}, nil
 }
 
+// SettingsUpdate changes host settings in one revision-checked transaction.
+// A field that is not set is left unchanged.
+type SettingsUpdate struct {
+	// DefaultHostID is the new default host when DefaultHostSet is true; nil
+	// or an empty ID clears it.
+	DefaultHostID  *ID
+	DefaultHostSet bool
+	// ProxyAddress is the normalized `host:port` of the SOCKS5 proxy; nil or
+	// empty clears it. It must already be validated; it never holds a credential.
+	ProxyAddress *string
+}
+
+// UpdateDefaultHost sets the default host, or clears it when defaultHostID is
+// nil or empty, leaving every other setting unchanged.
 func (s *Store) UpdateDefaultHost(ctx context.Context, defaultHostID *ID, expected Revision) (Settings, error) {
+	if defaultHostID != nil && *defaultHostID == "" {
+		defaultHostID = nil
+	}
+	return s.UpdateSettings(ctx, SettingsUpdate{DefaultHostID: defaultHostID, DefaultHostSet: true}, expected)
+}
+
+// UpdateSettings applies update against the current settings revision.
+func (s *Store) UpdateSettings(ctx context.Context, update SettingsUpdate, expected Revision) (Settings, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Settings{}, err
@@ -741,45 +779,28 @@ func (s *Store) UpdateDefaultHost(ctx context.Context, defaultHostID *ID, expect
 		_ = tx.Rollback() //nolint:errcheck // rollback on update failure
 	}()
 
-	var currentRev Revision
-	err = tx.QueryRowContext(ctx, "SELECT revision FROM settings WHERE id = 1").Scan(&currentRev)
-	if errors.Is(err, sql.ErrNoRows) {
-		currentRev = 1
-		if _, err := tx.ExecContext(
-			ctx,
-			"INSERT INTO settings (id, default_host_id, revision) VALUES (1, NULL, 1)",
-		); err != nil {
-			return Settings{}, err
-		}
-	} else if err != nil {
+	targetDefault, currentRev, err := currentSettingsRow(ctx, tx)
+	if err != nil {
 		return Settings{}, err
 	}
-
 	if expected <= 0 || currentRev != expected {
 		return Settings{}, ErrStaleRevision
 	}
-
-	var targetStr sql.NullString
-	if defaultHostID != nil && *defaultHostID != "" {
-		var exists int
-		if err := tx.QueryRowContext(
-			ctx,
-			"SELECT count(*) FROM hosts WHERE id = ?",
-			*defaultHostID,
-		).Scan(&exists); err != nil {
+	if update.DefaultHostSet {
+		if targetDefault, err = resolveDefaultHost(ctx, tx, update); err != nil {
 			return Settings{}, err
 		}
-		if exists == 0 {
-			return Settings{}, ErrNotFound
-		}
-		targetStr = sql.NullString{String: string(*defaultHostID), Valid: true}
+	}
+	proxy, err := applyProxySetting(ctx, tx, update)
+	if err != nil {
+		return Settings{}, err
 	}
 
 	newRev := currentRev + 1
 	res, err := tx.ExecContext(
 		ctx,
 		"UPDATE settings SET default_host_id = ?, revision = ? WHERE id = 1 AND revision = ?",
-		targetStr, newRev, currentRev,
+		targetDefault, newRev, currentRev,
 	)
 	if err != nil {
 		return Settings{}, err
@@ -794,10 +815,74 @@ func (s *Store) UpdateDefaultHost(ctx context.Context, defaultHostID *ID, expect
 	if err := tx.Commit(); err != nil {
 		return Settings{}, err
 	}
-	return Settings{
-		DefaultHostID: defaultHostID,
-		Revision:      newRev,
-	}, nil
+	result := Settings{Revision: newRev, ProxyAddress: proxy}
+	if targetDefault.Valid && targetDefault.String != "" {
+		id := ID(targetDefault.String)
+		result.DefaultHostID = &id
+	}
+	return result, nil
+}
+
+// currentSettingsRow reads the settings row, creating it with revision 1 when
+// the store has none yet.
+func currentSettingsRow(ctx context.Context, tx *sql.Tx) (sql.NullString, Revision, error) {
+	var currentRev Revision
+	var targetDefault sql.NullString
+	err := tx.QueryRowContext(ctx, "SELECT default_host_id, revision FROM settings WHERE id = 1").
+		Scan(&targetDefault, &currentRev)
+	if errors.Is(err, sql.ErrNoRows) {
+		currentRev = 1
+		_, err := tx.ExecContext(
+			ctx,
+			"INSERT INTO settings (id, default_host_id, revision) VALUES (1, NULL, 1)",
+		)
+		return targetDefault, currentRev, err
+	}
+	return targetDefault, currentRev, err
+}
+
+// resolveDefaultHost returns the default host column for update, which must
+// have DefaultHostSet set. It fails with ErrNotFound for an unknown host.
+func resolveDefaultHost(ctx context.Context, tx *sql.Tx, update SettingsUpdate) (sql.NullString, error) {
+	if update.DefaultHostID == nil || *update.DefaultHostID == "" {
+		return sql.NullString{}, nil
+	}
+	var exists int
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM hosts WHERE id = ?", *update.DefaultHostID).
+		Scan(&exists); err != nil {
+		return sql.NullString{}, err
+	}
+	if exists == 0 {
+		return sql.NullString{}, ErrNotFound
+	}
+	return sql.NullString{String: string(*update.DefaultHostID), Valid: true}, nil
+}
+
+// applyProxySetting stores the proxy address when update names one -- empty
+// removes it, absent leaves it alone -- and returns the resulting value.
+func applyProxySetting(ctx context.Context, tx *sql.Tx, update SettingsUpdate) (string, error) {
+	var currentProxy sql.NullString
+	err := tx.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key = ?", metadataKeyProxyAddress).
+		Scan(&currentProxy)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	if update.ProxyAddress == nil {
+		return currentProxy.String, nil
+	}
+	proxy := *update.ProxyAddress
+	switch proxy {
+	case "":
+		_, err = tx.ExecContext(ctx, "DELETE FROM metadata WHERE key = ?", metadataKeyProxyAddress)
+	default:
+		_, err = tx.ExecContext(
+			ctx,
+			"INSERT INTO metadata(key, value) VALUES (?, ?) "+
+				"ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+			metadataKeyProxyAddress, proxy,
+		)
+	}
+	return proxy, err
 }
 
 func (s *Store) NextRevisions(ctx context.Context, id ID) (Revision, Revision, error) {

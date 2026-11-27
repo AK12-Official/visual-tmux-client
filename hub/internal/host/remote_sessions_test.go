@@ -349,6 +349,13 @@ func TestRemoteSessionOperationsAndIsolation(t *testing.T) {
 	if createdHome != "/home/userA" {
 		t.Fatalf("expected created home /home/userA, got %q", createdHome)
 	}
+	// The proxy address names the user's own machine: a remote session is
+	// created without the environment variables a local one receives.
+	for _, cmd := range stateA.executedCmds {
+		if strings.Contains(cmd, "new-session") && strings.Contains(cmd, " -e ") {
+			t.Fatalf("a remote session was given proxy variables: %q", cmd)
+		}
+	}
 
 	// 4. Rename session on Host A
 	if err := serviceA.RenameSession(ctx, "new-project", "renamed-project"); err != nil {

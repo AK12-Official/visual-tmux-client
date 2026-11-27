@@ -1813,7 +1813,7 @@ defineExpose({
   <div class="fm" @click.self="closeMenu()">
     <header class="fm__bar">
       <button
-        class="fm__btn"
+        class="fm__btn fm__btn--icon"
         type="button"
         :title="t('files.goToParent')"
         :aria-label="t('files.goToParent')"
@@ -1824,7 +1824,7 @@ defineExpose({
       <span class="fm__path" :title="current">{{ current || '…' }}</span>
       <button class="fm__btn" type="button" :title="t('files.newFile')" :disabled="current === ''" @click="createHere(false)">{{ t('files.newFileShort') }}</button>
       <button class="fm__btn" type="button" :title="t('files.newFolder')" :disabled="current === ''" @click="createHere(true)">{{ t('files.newFolderShort') }}</button>
-      <button class="fm__btn" type="button" :title="t('files.reloadDirectory')" :aria-label="t('files.reloadDirectory')" @click="refreshCurrent">↻</button>
+      <button class="fm__btn fm__btn--icon" type="button" :title="t('files.reloadDirectory')" :aria-label="t('files.reloadDirectory')" @click="refreshCurrent">↻</button>
       <button class="fm__btn fm__btn--close" type="button" :title="t('common.close')" :aria-label="t('common.close')" @click="requestClose">✕</button>
     </header>
 

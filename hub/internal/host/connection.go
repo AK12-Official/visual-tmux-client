@@ -311,15 +311,39 @@ func (m *ConnectionManager) resolveSSHConfig(
 	return sshConfig, endpoint, nil
 }
 
+// proxyAddress reads the configured proxy when a connection is about to be
+// opened, so a changed setting applies to new connections without cached
+// state. A setting that cannot be read fails the connection rather than
+// letting it dial directly.
+func (m *ConnectionManager) proxyAddress(ctx context.Context, target Target) (string, error) {
+	if m.registry == nil {
+		return "", nil
+	}
+	settings, err := m.registry.GetSettings(ctx)
+	if err != nil {
+		return "", &Error{Target: target, Code: ErrUnavailable, Cause: fmt.Errorf("read proxy setting: %w", err)}
+	}
+	return settings.ProxyAddress, nil
+}
+
 func (m *ConnectionManager) dialAndHandshake(
 	ctx context.Context,
 	target Target,
 	endpoint string,
 	sshConfig *ssh.ClientConfig,
 ) (*ssh.Client, error) {
-	dialer := net.Dialer{Timeout: m.cfg.DialTimeout}
-	netConn, err := dialer.DialContext(ctx, "tcp", endpoint)
+	proxyAddress, err := m.proxyAddress(ctx, target)
 	if err != nil {
+		return nil, err
+	}
+	netConn, err := dialRemote(ctx, endpoint, proxyAddress, m.cfg.DialTimeout)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if code, _, ok := ProxyFailure(err); ok {
+			return nil, &Error{Target: target, Code: code, Cause: err}
+		}
 		return nil, &Error{Target: target, Code: ErrUnavailable, Cause: err}
 	}
 

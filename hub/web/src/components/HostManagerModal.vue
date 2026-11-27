@@ -21,6 +21,7 @@ import {
 } from '../api'
 import { notify } from '../toasts'
 import { getLocale, onLocaleChange, t, type SupportedLocale } from '../i18n/index'
+import { PROXY_CODES, parseProxyFailure, proxyFailureText } from '../hostErrors'
 
 const props = defineProps<{
   open: boolean
@@ -150,6 +151,26 @@ function getCapLabel(cap: CapabilityStatus | boolean | undefined, kind: 'SSH' | 
   return isCapAvailable(cap) ? t('hosts.sftpAvailable') : t('hosts.sftpUnavailable')
 }
 
+function connectionPathText(caps: HostCapabilities): string {
+  void currentLocale.value
+  const path = caps.connectionPath
+  if (!path) return ''
+  if (path.mode === 'proxy' && path.address) return t('hosts.connectionPathProxy', { proxy: path.address })
+  return t('hosts.connectionPathDirect')
+}
+
+// A status names only the code of a proxy failure; the path beside it names
+// the proxy, which is what the explanation needs.
+function capabilityErrorText(caps: HostCapabilities): string {
+  void currentLocale.value
+  const error = caps.error ?? ''
+  if (PROXY_CODES.some((code) => error.includes(code))) {
+    const proxy = caps.connectionPath?.address ?? ''
+    return proxyFailureText(error, proxy) ?? error
+  }
+  return error
+}
+
 function shouldShowAtomicOverwrite(caps: HostCapabilities): boolean {
   if (caps.sftp !== undefined) {
     if (isCapNotApplicable(caps.sftp)) return false
@@ -167,7 +188,7 @@ async function fetchHosts(): Promise<void> {
       getHostSettings().catch(() => null),
     ])
     hosts.value = fetchedHosts
-    hostSettings.value = fetchedSettings ?? { defaultHostId: null, revision: 1 }
+    hostSettings.value = fetchedSettings ?? { defaultHostId: null, revision: 1, proxyAddress: '' }
     emit('hosts-changed')
   } catch (err) {
     listError.value = err instanceof Error ? err.message : String(err)
@@ -241,6 +262,8 @@ function cancelForm(): void {
 }
 
 function formatProbeError(msg: string): { key: string; params?: Record<string, unknown> } | { raw: string } {
+  const proxy = proxyError(msg)
+  if (proxy) return proxy
   if (msg.includes('probing_disabled')) return { key: 'hosts.probingDisabled' }
   if (msg.includes('challenge_expired')) return { key: 'hosts.challengeExpired', params: { error: msg } }
   if (msg.includes('challenge_mismatch')) return { key: 'hosts.challengeMismatch', params: { error: msg } }
@@ -249,7 +272,17 @@ function formatProbeError(msg: string): { key: string; params?: Record<string, u
   return { raw: msg }
 }
 
+// proxyError names the proxy failure in a hub message as a translatable error,
+// or returns null when the message is not about the proxy.
+function proxyError(msg: string): { key: string; params?: Record<string, unknown> } | null {
+  const failure = parseProxyFailure(msg)
+  if (!failure) return null
+  return { key: `errors.${failure.code}`, params: { proxy: failure.proxy } }
+}
+
 function formatHostSubmitError(msg: string): { key: string; params?: Record<string, unknown> } | { raw: string } {
+  const proxy = proxyError(msg)
+  if (proxy) return proxy
   if (msg.includes('duplicate_local_host')) {
     return { key: 'hosts.duplicateLocalHost' }
   }
@@ -675,8 +708,19 @@ onBeforeUnmount(() => {
                     >
                       {{ (activeCapabilities[item.id] as HostCapabilities).posixRename ? t('hosts.atomicOverwriteSupported') : t('hosts.atomicOverwriteUnsupported') }}
                     </span>
-                    <span v-if="(activeCapabilities[item.id] as HostCapabilities).error" class="host-caps-error">
-                      {{ (activeCapabilities[item.id] as HostCapabilities).error }}
+                    <span
+                      v-if="(activeCapabilities[item.id] as HostCapabilities).connectionPath"
+                      class="host-cap-pill host-cap-pill--path"
+                      data-testid="host-connection-path"
+                    >
+                      {{ connectionPathText(activeCapabilities[item.id] as HostCapabilities) }}
+                    </span>
+                    <span
+                      v-if="(activeCapabilities[item.id] as HostCapabilities).error"
+                      class="host-caps-error"
+                      data-testid="host-caps-error"
+                    >
+                      {{ capabilityErrorText(activeCapabilities[item.id] as HostCapabilities) }}
                     </span>
                   </div>
                 </div>
@@ -1224,6 +1268,11 @@ onBeforeUnmount(() => {
   color: var(--th-warning);
   border: 1px solid rgba(251, 191, 36, 0.3);
 }
+.host-cap-pill--path {
+  background: rgba(96, 165, 250, 0.12);
+  color: var(--th-accent);
+  border: 1px solid rgba(96, 165, 250, 0.3);
+}
 .host-readonly-text {
   display: flex;
   align-items: center;
@@ -1315,6 +1364,11 @@ onBeforeUnmount(() => {
   padding: 0.4rem 0.6rem;
   font-size: 0.85rem;
   font-family: inherit;
+}
+/* The fixed control height leaves no room for vertical padding. */
+.host-input {
+  padding-top: 0;
+  padding-bottom: 0;
 }
 .host-textarea {
   font-family: var(--app-code-font);

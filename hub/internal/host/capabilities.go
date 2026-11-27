@@ -33,7 +33,16 @@ const (
 	reasonAuthFailed      = "authentication_failed"
 	reasonHostKeyMismatch = "host_key_mismatch"
 	reasonFilesDisabled   = "files_disabled"
+
+	connectionPathDirect = "direct"
+	connectionPathProxy  = "proxy"
 )
+
+// ConnectionPath names how remote connections to a host are established.
+type ConnectionPath struct {
+	Mode    string `json:"mode"` // "direct", or "proxy" with Address set
+	Address string `json:"address,omitempty"`
+}
 
 // CapabilityStatus describes the outcome of an individual subsystem test.
 type CapabilityStatus struct {
@@ -65,6 +74,8 @@ type HostCapabilities struct {
 	Files      FileCapability   `json:"files"`
 	ObservedAt time.Time        `json:"observedAt,omitempty"`
 	Error      string           `json:"error,omitempty"`
+	// ConnectionPath is set for SSH hosts only; the local host dials nothing.
+	ConnectionPath *ConnectionPath `json:"connectionPath,omitempty"`
 }
 
 // CapabilityChecker checks host availability and subsystem capabilities.
@@ -89,8 +100,14 @@ func (m *ConnectionManager) CheckCapabilities(ctx context.Context, id ID) (HostC
 		return m.checkLocalCapabilities(ctx, h, now)
 	}
 
+	path, err := m.connectionPath(ctx)
+	if err != nil {
+		return HostCapabilities{}, err
+	}
 	if !h.Trusted {
-		return untrustedCapabilities(h, now), nil
+		caps := untrustedCapabilities(h, now)
+		caps.ConnectionPath = path
+		return caps, nil
 	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, remoteProbeTimeout)
@@ -103,7 +120,9 @@ func (m *ConnectionManager) CheckCapabilities(ctx context.Context, id ID) (HostC
 
 	probeConn, err := lease.OpenDedicated(probeCtx, "probe")
 	if err != nil {
-		return mapSSHProbeError(err, h, now), nil
+		caps := mapSSHProbeError(err, h, now)
+		caps.ConnectionPath = path
+		return caps, nil
 	}
 	defer func() {
 		_ = probeConn.Close() //nolint:errcheck // probe connection cleanup
@@ -113,15 +132,28 @@ func (m *ConnectionManager) CheckCapabilities(ctx context.Context, id ID) (HostC
 	sftpStatus, fileCap := probeSFTPCapability(probeCtx, probeConn.Client, now)
 
 	return HostCapabilities{
-		HostID:     id,
-		Revision:   h.Revision,
-		Online:     true,
-		SSH:        CapabilityStatus{State: CapabilityStateAvailable, Available: true, ObservedAt: now},
-		Tmux:       tmuxStatus,
-		SFTP:       sftpStatus,
-		Files:      fileCap,
-		ObservedAt: now,
+		HostID:         id,
+		Revision:       h.Revision,
+		Online:         true,
+		SSH:            CapabilityStatus{State: CapabilityStateAvailable, Available: true, ObservedAt: now},
+		Tmux:           tmuxStatus,
+		SFTP:           sftpStatus,
+		Files:          fileCap,
+		ObservedAt:     now,
+		ConnectionPath: path,
 	}, nil
+}
+
+// connectionPath reports the route remote connections currently take.
+func (m *ConnectionManager) connectionPath(ctx context.Context) (*ConnectionPath, error) {
+	settings, err := m.registry.GetSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if settings.ProxyAddress == "" {
+		return &ConnectionPath{Mode: connectionPathDirect}, nil
+	}
+	return &ConnectionPath{Mode: connectionPathProxy, Address: settings.ProxyAddress}, nil
 }
 
 func probeLocalTmux(ctx context.Context, sessSvc Sessions, now time.Time) CapabilityStatus {
@@ -252,6 +284,10 @@ func untrustedCapabilities(h Host, now time.Time) HostCapabilities {
 
 func mapSSHProbeError(err error, h Host, now time.Time) HostCapabilities {
 	errStr := reasonHostUnavailable
+	if code, _, ok := ProxyFailure(err); ok {
+		// The route failed, not the host: the proxy code is the reason.
+		return sshFailureCapabilities(h, now, string(code))
+	}
 	var fullErr strings.Builder
 	fullErr.WriteString(err.Error())
 	for curr := err; curr != nil; curr = errors.Unwrap(curr) {
@@ -268,6 +304,12 @@ func mapSSHProbeError(err error, h Host, now time.Time) HostCapabilities {
 	} else if strings.Contains(errLow, "not trusted") {
 		errStr = reasonHostNotTrusted
 	}
+	return sshFailureCapabilities(h, now, errStr)
+}
+
+// sshFailureCapabilities reports a failed SSH connection; errStr names the
+// reason for every subsystem that depends on it.
+func sshFailureCapabilities(h Host, now time.Time, errStr string) HostCapabilities {
 	return HostCapabilities{
 		HostID:   h.ID,
 		Revision: h.Revision,
