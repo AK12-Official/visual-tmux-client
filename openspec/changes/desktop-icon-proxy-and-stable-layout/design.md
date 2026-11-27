@@ -71,7 +71,7 @@ Implement only SOCKS5 `CONNECT` without authentication (RFC 1928): TCP connect t
 | Reply: general failure, not allowed by ruleset, TTL expired, or the proxy closes without a reply | proxy refused | `proxy_refused` |
 | Reply: network or host unreachable, or the connect reply times out | target unreachable through proxy | `proxy_target_unreachable` |
 
-All four use HTTP 503 like `host_unavailable`, carry the proxy address in the diagnostic (it is not a secret) and are recorded as connection failures by the existing pool backoff. Trust and authentication errors are produced after the tunnel is open and are unchanged. Each wire code gets a message in both locales that names the proxy address and says whether the problem is the proxy or the target host.
+All four use HTTP 503 like `host_unavailable`, carry the proxy address in the diagnostic (it is not a secret) and are recorded as connection failures by the existing pool backoff; an attempt made during that backoff reports the same code and cause, so a proxy that stays down keeps being named as the proxy and not as the host. Trust and authentication errors are produced after the tunnel is open and are unchanged. Each wire code gets a message in both locales that names the proxy address and says whether the problem is the proxy or the target host.
 
 ### 4. The setting lives in host state, in the metadata table
 

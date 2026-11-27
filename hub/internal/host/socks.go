@@ -113,10 +113,11 @@ func dialSOCKS5(ctx context.Context, proxyAddress, endpoint string, timeout time
 func socksConnect(
 	ctx context.Context, conn net.Conn, host string, port uint16, proxyAddress string, timeout time.Duration,
 ) error {
+	// The connection deadline enforces only the dial budget. An earlier
+	// context deadline is enforced by closing the connection below: a read
+	// then ends with the closed connection, never with a deadline of its own
+	// that would race the context and be taken for a proxy that does not answer.
 	deadline := time.Now().Add(timeout)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
 	if err := conn.SetDeadline(deadline); err != nil {
 		return proxyFailure(ErrProxyRefused, proxyAddress, "set deadline: %w", err)
 	}

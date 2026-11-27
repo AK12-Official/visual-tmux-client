@@ -387,6 +387,20 @@ func TestReconnectAfterProxyStopsTargetsTheProxyOnly(t *testing.T) {
 	if targetConnections.Load() != 1 {
 		t.Fatalf("reconnect reached the target directly %d times", targetConnections.Load()-1)
 	}
+
+	// A second attempt while the pool backs off names the proxy as well; a
+	// reconnect in the background must not turn the outage into "host down".
+	_, err = lease.GetControl(ctx)
+	if !errors.Is(err, host.ErrProxyUnreachable) {
+		t.Fatalf("attempt during the backoff: expected the proxy to be reported as unreachable, got %v", err)
+	}
+	if code, proxyAddress, ok := host.ProxyFailure(err); !ok ||
+		code != host.ErrProxyUnreachable || proxyAddress != proxy.Addr {
+		t.Fatalf("backoff proxy failure = %s, %q, %v", code, proxyAddress, ok)
+	}
+	if targetConnections.Load() != 1 {
+		t.Fatalf("the attempt during the backoff reached the target %d times", targetConnections.Load()-1)
+	}
 }
 
 func TestProxyChangeKeepsActiveConnectionsAndAppliesToNewOnes(t *testing.T) {

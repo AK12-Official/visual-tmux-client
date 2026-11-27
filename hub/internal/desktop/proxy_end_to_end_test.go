@@ -150,11 +150,21 @@ func TestRemoteHostsUseTheConfiguredProxyEndToEnd(t *testing.T) {
 	assertProxyTargets("reconnect", seen+1)
 
 	// 4. Without the proxy, the remote host is reported as unreachable
-	// through it, and the local host keeps working.
+	// through it, and the local host keeps working. Stopping the proxy also
+	// drops the control connection. A request that arrives before the pool
+	// has noticed reports the lost connection, as after any drop; the next
+	// one dials, so the proxy is named right after.
 	proxy.Close()
-	status, body = call(http.MethodGet, "/api/hosts/remote/sessions", "")
-	if status != http.StatusServiceUnavailable || !strings.Contains(body, "proxy_unreachable: proxy "+proxy.Addr) {
-		t.Fatalf("remote sessions without the proxy: %d %s", status, body)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		status, body = call(http.MethodGet, "/api/hosts/remote/sessions", "")
+		if status == http.StatusServiceUnavailable && strings.Contains(body, "proxy_unreachable: proxy "+proxy.Addr) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("remote sessions without the proxy: %d %s", status, body)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	status, body = call(http.MethodGet, "/api/hosts/local/sessions", "")
 	expect("local sessions without the proxy", http.StatusOK, status, body)
