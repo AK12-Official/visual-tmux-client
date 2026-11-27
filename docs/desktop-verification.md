@@ -226,3 +226,34 @@ The accepted requirements are in the
 [Desktop application specification](../openspec/specs/desktop-application/spec.md).
 The macOS responsiveness issue during extended use is still tracked separately
 in [TODO](TODO.md#桌面应用).
+
+### Control geometry in the real WebView
+
+`TestNativeControlGeometry` in `hub/cmd/visual-tmux-desktop` runs with private
+state, synthetic sessions and no single-instance profile. The page script does
+not depend on timers to advance: it switches language through the real language
+selector, selects the synthetic session and measures every visible button,
+selector and input, keyed by position in the DOM. Notifications are excluded
+because they come and go on their own schedule. It reports three scenes in each
+language, with both workspace snapshots taken at the same age of the page:
+
+| Scene | Controls compared |
+| --- | --- |
+| Workspace | Top-bar host and language selectors, Settings, Hosts and Disconnect, sidebar collapse, New session, sort modes, Select, row action glyphs, Help, terminal font-size, fullscreen and close buttons |
+| Host manager list | Dialog close, Add Host, Refresh, and the Test, Edit, Delete and Select actions of the host card |
+| Add-host form | Dialog close, every text input and the port selector, Probe Server Fingerprint, Cancel, Create Host |
+
+The native side fails the test on any width or height difference of more than
+half a pixel between the two languages, on a different number or order of
+visible controls, and on any label that wraps or does not fit its control.
+`GEOMETRY_STEP` lines in the output give the per-scene timing and the
+`GEOMETRY` table the measured size of every control in both languages. Set
+`VTC_GEOMETRY_HOLD_MS` to keep each scene on screen when inspecting it by hand.
+
+It runs through the existing native entry points: `go test -tags desktop
+./cmd/visual-tmux-desktop` on macOS and the complete test binary under X11 and
+Weston on Ubuntu. On 2026-11-26 it passed on macOS (arm64, WKWebView) in about
+five seconds; window captures of all three scenes in both languages show the
+same positions and sizes, centered labels and no clipped text. The Ubuntu runs
+and the icon checks await their next workflow execution. Width tokens carry
+twenty percent of slack on Latin labels for the wider fallback fonts there.

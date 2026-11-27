@@ -15,7 +15,9 @@ import (
 
 func TestDefaultRegistryIsEager(t *testing.T) {
 	dir := t.TempDir()
+	// Linux resolves the config directory from XDG_CONFIG_HOME, macOS from HOME.
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
 	ctx := context.Background()
 	r, err := NewRegistry(ctx, "", "")
 	if err != nil {
@@ -24,7 +26,11 @@ func TestDefaultRegistryIsEager(t *testing.T) {
 	defer r.Close() //nolint:errcheck // test cleanup
 
 	// Verify durable state was created eagerly
-	stateDir := filepath.Join(dir, "visual-tmux-client")
+	base, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(base, "visual-tmux-client")
 	entries, err := os.ReadDir(stateDir)
 	if err != nil || len(entries) == 0 {
 		t.Fatalf("expected durable state files in %s: %v, len=%d", stateDir, err, len(entries))

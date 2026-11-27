@@ -32,6 +32,8 @@ Tests use isolated sockets and target only their own server during cleanup.
 - Secure remote host enrollment with SSH password or ed25519/RSA private key (with passphrase support) and strict Trust On First Use (TOFU) host key pinning.
 - Encrypted credential storage at rest using AES-256-GCM with an authenticated master key.
 - Per-host isolated session workspaces, independent connection pools, and automatic keepalives.
+- Route every connection to remote hosts (enrollment, terminals, file transfers and reconnection) through one SOCKS5 proxy set in the workspace's Settings dialog, with plain-language errors that say whether the proxy or the host is failing.
+- Give new local terminal sessions the same proxy as the standard proxy variables, so commands such as `git` over HTTPS and `curl` run in them connect through it.
 - Built-in Chinese tmux guide available from the in-app help button.
 - Session names accept non-ASCII text such as Chinese (up to 64 characters); `:`, `.`, `/`, `\`, `;`, full-width lookalikes (`：`, `．`, `；`), edge whitespace, and control characters are reserved/disallowed.
 - Preserve terminal state across browser disconnects by leaving tmux sessions running.
@@ -76,7 +78,7 @@ Run `./visual-tmux-client --help` to see all flags and environment variables.
 
 ## Experimental desktop application
 
-The desktop entry hosts the same embedded Vue interface and Go HTTP/WebSocket backend in a native window. It signs in automatically. Development builds target Ubuntu 24.04 amd64 and macOS arm64/amd64. The desktop acceptance checklist is complete. Desktop packages are available as development workflow artifacts. See the [build and operation guide](docs/desktop.md), [verification results](docs/desktop-verification.md), and [known macOS responsiveness issue](docs/TODO.md#桌面应用).
+The desktop entry hosts the same embedded Vue interface and Go HTTP/WebSocket backend in a native window. It signs in automatically. Development builds target Ubuntu 24.04 amd64 and macOS arm64/amd64. Packages carry the application icon generated from the artwork in `packaging/desktop/icon/`. The desktop acceptance checklist is complete. Desktop packages are available as development workflow artifacts. See the [build and operation guide](docs/desktop.md), [verification results](docs/desktop-verification.md), and [known macOS responsiveness issue](docs/TODO.md#桌面应用).
 
 Build the frontend, then build the native entry with Go 1.26.10 and CGO enabled:
 
@@ -91,6 +93,8 @@ go build -tags desktop -o ../visual-tmux-desktop ./cmd/visual-tmux-desktop
 Linux builds need `pkg-config`, `libgtk-4-dev` and `libwebkitgtk-6.0-dev`; macOS builds need Xcode Command Line Tools and the deployment-target flags in the desktop guide. Installed desktop packages need neither Go nor Node. Local sessions still require tmux.
 
 On macOS, replace the Go build line with `MACOSX_DEPLOYMENT_TARGET=12.0 go build -tags desktop -ldflags '-extldflags=-mmacosx-version-min=12.0' -o ../visual-tmux-desktop ./cmd/visual-tmux-desktop`. On Ubuntu with restricted user namespaces, use the DEB's configured AppArmor profile; a source binary at another path needs its own matching profile. Packaging and unsigned/notarized artifact status are documented in the desktop guide.
+
+The proxy for remote hosts is set in the workspace's Settings dialog (before the Hosts button) and is shared with a server-mode process that uses the same host state; see the desktop guide. Its wording assumes no networking background: each message names the proxy address and says whether the proxy or the host is the problem.
 
 Use `--config <file>` for an explicit configuration. Otherwise desktop mode discovers `visual-tmux-client/visual-tmux-client.yaml` under the OS user configuration directory. It owns the loopback address, fresh token and same-origin policy; `--addr` is unavailable. A headless process owning the same host state must be closed before desktop startup. Desktop UI preferences persist separately from the changing port; credentials and editor drafts are excluded. Closing the window or choosing Quit confirms unsaved edits and waits for preference writes. Returning to the existing server command remains available after closing the desktop.
 

@@ -42,7 +42,7 @@ type HostRegistry interface {
 	Save(ctx context.Context, input host.HostInput, expected host.Revision) (host.Host, error)
 	Delete(ctx context.Context, id host.ID, expected host.Revision) error
 	GetSettings(ctx context.Context) (host.Settings, error)
-	UpdateDefaultHost(ctx context.Context, defaultHostID *host.ID, expected host.Revision) (host.Settings, error)
+	UpdateSettings(ctx context.Context, update host.SettingsUpdate, expected host.Revision) (host.Settings, error)
 }
 
 // RouterConfig holds dependencies and configuration for constructing the HTTP router.
@@ -66,9 +66,7 @@ type RouterConfig struct {
 	OnHostRemoved           func(id host.ID)
 	TrustStore              *host.TrustStore
 	Capabilities            host.CapabilityChecker
-	ProbeDialer             func(
-		ctx context.Context, address string, port uint16, timeout time.Duration,
-	) (ssh.PublicKey, error)
+	ProbeDialer             ProbeDialer
 }
 
 type handlerState struct {
@@ -124,8 +122,22 @@ func mapSessionError(w http.ResponseWriter, err error) {
 	case errors.Is(err, session.ErrTmuxNotFound):
 		writeError(w, http.StatusServiceUnavailable, "tmux_unavailable")
 	default:
-		writeError(w, http.StatusInternalServerError, err.Error())
+		if !writeProxyError(w, err) {
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
 	}
+}
+
+// writeProxyError reports a proxy failure with HTTP 503 and the proxy address
+// in the diagnostic, so the user can tell a proxy problem from a host problem.
+// It reports whether err was a proxy failure.
+func writeProxyError(w http.ResponseWriter, err error) bool {
+	code, proxy, ok := host.ProxyFailure(err)
+	if !ok {
+		return false
+	}
+	writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("%s: proxy %s", code, proxy))
+	return true
 }
 
 func (s *handlerState) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -542,9 +554,48 @@ func (s *handlerState) deleteHost(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// updateHostSettingsRequest distinguishes an absent field (left unchanged)
+// from an explicit null (cleared).
 type updateHostSettingsRequest struct {
-	DefaultHostID *host.ID      `json:"defaultHostId"`
-	Revision      host.Revision `json:"revision"`
+	DefaultHostID  *host.ID
+	DefaultHostSet bool
+	ProxyAddress   *string
+	Revision       host.Revision
+}
+
+func (r *updateHostSettingsRequest) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		DefaultHostID json.RawMessage `json:"defaultHostId"`
+		ProxyAddress  json.RawMessage `json:"proxyAddress"`
+		Revision      host.Revision   `json:"revision"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	r.DefaultHostID, r.DefaultHostSet = nil, false
+	r.ProxyAddress = nil
+	r.Revision = raw.Revision
+
+	if len(raw.DefaultHostID) > 0 && string(raw.DefaultHostID) != "null" {
+		var id host.ID
+		if err := json.Unmarshal(raw.DefaultHostID, &id); err != nil {
+			return err
+		}
+		r.DefaultHostID, r.DefaultHostSet = &id, true
+	} else if len(raw.DefaultHostID) > 0 {
+		r.DefaultHostSet = true
+	}
+
+	if len(raw.ProxyAddress) > 0 {
+		var address string
+		if string(raw.ProxyAddress) != "null" {
+			if err := json.Unmarshal(raw.ProxyAddress, &address); err != nil {
+				return host.ErrInvalidProxyAddress
+			}
+		}
+		r.ProxyAddress = &address
+	}
+	return nil
 }
 
 func (s *handlerState) getHostSettings(w http.ResponseWriter, r *http.Request) {
@@ -568,8 +619,24 @@ func (s *handlerState) updateHostSettings(w http.ResponseWriter, r *http.Request
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxRequestBodyBytes)
 	var req updateHostSettingsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if errors.Is(err, host.ErrInvalidProxyAddress) {
+			writeError(w, http.StatusBadRequest, "invalid_proxy_address")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
+	}
+	update := host.SettingsUpdate{
+		DefaultHostID:  req.DefaultHostID,
+		DefaultHostSet: req.DefaultHostSet,
+	}
+	if req.ProxyAddress != nil {
+		normalized, err := host.NormalizeProxyAddress(*req.ProxyAddress)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_proxy_address")
+			return
+		}
+		update.ProxyAddress = &normalized
 	}
 	expectedRev := req.Revision
 	if expectedRev == 0 {
@@ -583,7 +650,7 @@ func (s *handlerState) updateHostSettings(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "revision required")
 		return
 	}
-	settings, err := s.hosts.UpdateDefaultHost(r.Context(), req.DefaultHostID, expectedRev)
+	settings, err := s.hosts.UpdateSettings(r.Context(), update, expectedRev)
 	if err != nil {
 		mapHostError(w, err)
 		return
@@ -618,7 +685,7 @@ func (s *handlerState) probeDraftEndpoint(w http.ResponseWriter, r *http.Request
 	}
 	key, err := s.probeDialer(r.Context(), trimmedAddr, port, defaultProbeTimeout)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "probe_failed")
+		writeProbeError(w, err)
 		return
 	}
 	endpoint := net.JoinHostPort(trimmedAddr, fmt.Sprintf("%d", port))
@@ -628,6 +695,12 @@ func (s *handlerState) probeDraftEndpoint(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func writeProbeError(w http.ResponseWriter, err error) {
+	if !writeProxyError(w, err) {
+		writeError(w, http.StatusServiceUnavailable, "probe_failed")
+	}
 }
 
 func (s *handlerState) probeHostEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -655,7 +728,7 @@ func (s *handlerState) probeHostEndpoint(w http.ResponseWriter, r *http.Request)
 	}
 	key, err := s.probeDialer(r.Context(), h.Address, port, defaultProbeTimeout)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "probe_failed")
+		writeProbeError(w, err)
 		return
 	}
 	endpoint := net.JoinHostPort(h.Address, fmt.Sprintf("%d", port))
@@ -798,7 +871,9 @@ func mapHostError(w http.ResponseWriter, err error) {
 	case errors.Is(err, host.ErrOutcomeUnknown):
 		writeError(w, http.StatusBadGateway, "outcome_unknown")
 	default:
-		writeError(w, http.StatusBadRequest, err.Error())
+		if !writeProxyError(w, err) {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 	}
 }
 
@@ -813,7 +888,27 @@ func NewRouter(
 	return NewRouterWithResolver(cfg, host.NewLocalResolver(sessions, files, nil), tickets, wsHandler)
 }
 
+// ProbeDialer returns the host key an endpoint presents, or an error that
+// explains why it could not be reached.
+type ProbeDialer func(ctx context.Context, address string, port uint16, timeout time.Duration) (ssh.PublicKey, error)
+
 // NewRouterWithResolver constructs host-aware routing.
+func settingsProbeDialer(hosts HostRegistry) ProbeDialer {
+	// Probes take the same route as every other remote connection. A proxy
+	// setting that cannot be read fails the probe instead of dialing directly.
+	return func(ctx context.Context, address string, port uint16, timeout time.Duration) (ssh.PublicKey, error) {
+		proxyAddress := ""
+		if hosts != nil {
+			settings, err := hosts.GetSettings(ctx)
+			if err != nil {
+				return nil, err
+			}
+			proxyAddress = settings.ProxyAddress
+		}
+		return host.ProbeEndpointViaProxy(ctx, address, port, timeout, proxyAddress)
+	}
+}
+
 func NewRouterWithResolver(
 	cfg RouterConfig,
 	resolver host.Resolver,
@@ -830,7 +925,7 @@ func NewRouterWithResolver(
 	}
 	probeDialer := cfg.ProbeDialer
 	if probeDialer == nil {
-		probeDialer = host.ProbeEndpoint
+		probeDialer = settingsProbeDialer(cfg.Hosts)
 	}
 
 	state := &handlerState{

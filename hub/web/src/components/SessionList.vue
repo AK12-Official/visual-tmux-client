@@ -11,6 +11,7 @@ import {
   type OrderState,
 } from '../ordering'
 import { getLocale, onLocaleChange, t, type SupportedLocale } from '../i18n/index'
+import { proxyFailureText } from '../hostErrors'
 
 const props = withDefaults(
   defineProps<{
@@ -296,6 +297,8 @@ onBeforeUnmount(() => {
 })
 
 function formatSessionListError(err: string): string {
+  const proxyText = proxyFailureText(err)
+  if (proxyText) return proxyText
   if (err.includes('host_unavailable')) {
     if (err.includes(':')) {
       const diag = err.slice(err.indexOf(':') + 1).trim()
@@ -589,6 +592,9 @@ function getRowLabel(name: string, subtitle?: string | null): string {
   padding: 0.3rem 0.5rem;
   font-family: var(--app-code-font);
   font-size: 0.8rem;
+  /* The fixed control height leaves no room for vertical padding. */
+  padding-top: 0;
+  padding-bottom: 0;
 }
 .session-list__btn {
   background: var(--th-raised);

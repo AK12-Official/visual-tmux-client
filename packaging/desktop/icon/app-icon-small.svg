@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Simplified variant for 32 pixels and below: the same composition with
+       strokes that stay visible and no frame around the screen. -->
+  <rect x="100" y="100" width="824" height="824" rx="184" fill="#1f2937"/>
+  <path d="M270 370 440 512 270 654M520 512h234" fill="none" stroke="#93c5fd" stroke-width="128" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

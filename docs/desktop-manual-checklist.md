@@ -35,6 +35,25 @@ GNOME/Mutter and X11 environments, repeat save, cancel, replacement confirmation
 and byte comparison there. The Weston 13 desktop-shell portal crash is retained
 as a known reproducer in the Linux record; it is not a passing configuration.
 
+- [ ] After installing the package, check the application menu, the dock or
+  taskbar while the app runs, and the window switcher: each shows the terminal
+  prompt icon, sharp at the size the desktop draws it. Switch the desktop icon
+  theme or scale and check it again.
+- [ ] Save a proxy address in Settings, then open a new local terminal. Run
+  `tmux show-environment -t <session> https_proxy` in it, replacing `<session>`
+  with the name the sidebar shows for it. It prints `https_proxy=socks5h://`
+  followed by the saved address. A session opened before the address was saved
+  prints nothing and says `unknown variable` instead, and so does a new session
+  after the address is cleared. Then run a command that honors these variables, such as
+  `curl -I https://github.com`, and check that it connects. If your shell
+  configuration sets proxy variables of its own, its values are in effect in
+  the terminal, which the settings dialog points out.
+- [ ] Switch the interface language from English to Chinese and back with the
+  sidebar open, in the host manager list and in the add-host form. No button,
+  selector or input may change height or width, and no label may wrap or be
+  cut off. A longer error or hint may wrap. Terminal connections and unsaved
+  editor content survive both switches.
+
 ## macOS
 
 The user reported passing the full [macOS manual acceptance checklist](desktop-macos-acceptance.md)
@@ -45,6 +64,26 @@ and notarization remain optional and require the owner’s signing credentials.
   The user observed increasing lag until the app became unusable. Track the
   fix and sustained-use verification in
   [desktop performance TODO](TODO.md#桌面应用).
+
+- [ ] After unpacking the development archive, check the icon in Finder, in
+  Launchpad and in the Dock while the app runs. Each shows the terminal prompt
+  icon at the same visual size as neighboring apps, sharp in list, icon and
+  Cover Flow views. Relaunch the app so Dock and Launchpad drop any cached icon
+  from an older package.
+- [ ] Save a proxy address in Settings, then open a new local terminal. Run
+  `tmux show-environment -t <session> https_proxy` in it, replacing `<session>`
+  with the name the sidebar shows for it. It prints `https_proxy=socks5h://`
+  followed by the saved address. A session opened before the address was saved
+  prints nothing and says `unknown variable` instead, and so does a new session
+  after the address is cleared. Then run a command that honors these variables, such as
+  `curl -I https://github.com`, and check that it connects. If your shell
+  configuration sets proxy variables of its own, its values are in effect in
+  the terminal, which the settings dialog points out.
+- [ ] Switch the interface language from English to Chinese and back with the
+  sidebar open, in the host manager list and in the add-host form. No button,
+  selector or input may change height or width, and no label may wrap or be
+  cut off. A longer error or hint may wrap. Terminal connections and unsaved
+  editor content survive both switches.
 
 Automated CI and installed-package gates passed at implementation commit
 `5f8a6a37ec0e59d4183dbcfb0e14238fea297cd8`; see the final Linux evidence record.

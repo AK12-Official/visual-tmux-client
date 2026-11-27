@@ -168,7 +168,9 @@ func (b *RemoteSessionBackend) Create(ctx context.Context, name string) (*sessio
 		name = generated
 	}
 
-	args := tmux.CreateArgs(name, b.home)
+	// The proxy address names the user's own machine, so a remote session
+	// is created without it.
+	args := tmux.CreateArgs(name, b.home, nil)
 	_, stderr, code, err := b.exec(ctx, true, args...)
 	if err != nil {
 		return nil, fmt.Errorf("exec new-session: %w", err)

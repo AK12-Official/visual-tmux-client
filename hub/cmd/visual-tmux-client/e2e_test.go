@@ -127,7 +127,7 @@ func TestE2ERestartPreservesSession(t *testing.T) {
 
 		const token = "e2e-secret-token"
 		cmd := exec.Command(hubBin, "--addr", addr)
-		cmd.Env = append(tmuxEnv, "XDG_CONFIG_HOME="+stateDir, "VISUAL_TMUX_CLIENT_TOKEN="+token)
+		cmd.Env = hubEnv(append(tmuxEnv, "VISUAL_TMUX_CLIENT_TOKEN="+token), stateDir)
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}

@@ -15,6 +15,7 @@ import (
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/host"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/session"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/terminal"
+	"github.com/AK12-Official/visual-tmux-client/hub/internal/tmux"
 	thttp "github.com/AK12-Official/visual-tmux-client/hub/internal/transport/http"
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/transport/ws"
 )
@@ -99,6 +100,10 @@ func New(cfg *config.Config, prov config.Provenance, staticFS fs.FS, opt ...Opti
 	if err != nil {
 		fileService.Close()
 		return nil, fmt.Errorf("host registry: %w", err)
+	}
+
+	if client, ok := sessBackend.(*tmux.Client); ok {
+		client.SetSessionEnvironment(localSessionEnvironment(registry))
 	}
 
 	wsOpts := newWSOptions(cfg)

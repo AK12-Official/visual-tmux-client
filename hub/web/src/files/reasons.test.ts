@@ -88,3 +88,15 @@ test('the too-large case names the limit instead of the refusal', () => {
   )
   resetLocaleForTest('en')
 })
+
+test('a remote file operation that fails on the way to the host names the proxy', () => {
+  resetLocaleForTest('en')
+  const text = reasonFor('proxy_unreachable: proxy 127.0.0.1:7890')
+  assert.ok(text.includes('127.0.0.1:7890'), 'the explanation names the proxy')
+  assert.ok(!text.includes('proxy_unreachable'), 'the bare code is not shown')
+
+  setLocale('zh-CN')
+  const zhText = reasonFor('proxy_unreachable: proxy 127.0.0.1:7890')
+  assert.ok(zhText.includes('127.0.0.1:7890'))
+  assert.ok(zhText.includes('代理'))
+})

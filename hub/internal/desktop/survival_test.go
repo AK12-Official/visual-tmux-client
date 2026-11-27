@@ -82,7 +82,7 @@ func TestQuitRelaunchPreservesAttachedLocalAndRemoteTmux(t *testing.T) {
 		if status != http.StatusCreated {
 			t.Fatalf("create %s: %d %s", id, status, body)
 		}
-		attachments = append(attachments, attachDesktopSession(t, first, id))
+		attachments = append(attachments, attachDesktopSession(t, first, id, "desktop-survival"))
 	}
 	defer func() {
 		for _, connection := range attachments {
@@ -101,13 +101,13 @@ func TestQuitRelaunchPreservesAttachedLocalAndRemoteTmux(t *testing.T) {
 		if status != http.StatusOK || !strings.Contains(body, "desktop-survival") {
 			t.Fatalf("%s session did not survive: %d %s", id, status, body)
 		}
-		attachments = append(attachments, attachDesktopSession(t, second, id))
+		attachments = append(attachments, attachDesktopSession(t, second, id, "desktop-survival"))
 	}
 }
 
-func attachDesktopSession(t *testing.T, controller *Controller, hostID string) *websocket.Conn {
+func attachDesktopSession(t *testing.T, controller *Controller, hostID, session string) *websocket.Conn {
 	t.Helper()
-	payload, err := json.Marshal(map[string]string{"hostId": hostID, "session": "desktop-survival"})
+	payload, err := json.Marshal(map[string]string{"hostId": hostID, "session": session})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func attachDesktopSession(t *testing.T, controller *Controller, hostID string) *
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	address := "ws" + strings.TrimPrefix(controller.Bridge.origin, "http") +
-		"/ws/" + hostID + "/desktop-survival?ticket=" + issued.Ticket
+		"/ws/" + hostID + "/" + session + "?ticket=" + issued.Ticket
 	connection, _, err := websocket.Dial(ctx, address, &websocket.DialOptions{
 		HTTPHeader: http.Header{"Origin": {controller.Bridge.origin}},
 	})

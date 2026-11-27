@@ -14,6 +14,7 @@ import {
   renameSession,
   setToken,
   updateHostSettings,
+  changeHostSettings,
 } from './api'
 
 function setupMockStorage() {
@@ -296,4 +297,56 @@ test('API supports getHostSettings and updateHostSettings', async () => {
   assert.equal(lastUrl, '/api/host-settings?revision=2')
   assert.equal(lastMethod, 'PUT')
   assert.deepEqual(lastBody, { defaultHostId: 'local', revision: 2 })
+})
+
+test('host settings carry the proxy address and a change sends only the fields being changed', async () => {
+  setupMockStorage()
+  setToken('test-token')
+
+  let lastUrl = ''
+  let lastBody: unknown = null
+  let stored = { defaultHostId: 'server-1', revision: 2, proxyAddress: '127.0.0.1:7890' }
+
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    lastUrl = String(input)
+    lastBody = init?.body ? JSON.parse(String(init.body)) : null
+    if (lastUrl === '/api/host-settings') {
+      return new Response(JSON.stringify(stored), { status: 200 })
+    }
+    const revision = Number(new URL(lastUrl, 'http://localhost').searchParams.get('revision'))
+    if (init?.method === 'PUT' && revision === stored.revision) {
+      const { revision: _rev, ...change } = lastBody as Record<string, unknown>
+      if ('defaultHostId' in change) stored = { ...stored, defaultHostId: change.defaultHostId as string | null }
+      if ('proxyAddress' in change) stored = { ...stored, proxyAddress: change.proxyAddress as string }
+      stored = { ...stored, revision: stored.revision + 1 }
+      return new Response(JSON.stringify(stored), { status: 200 })
+    }
+    return new Response(JSON.stringify({ error: 'host_revision_conflict' }), { status: 409 })
+  }
+
+  const settings = await getHostSettings()
+  assert.equal(settings.proxyAddress, '127.0.0.1:7890')
+  assert.equal(settings.defaultHostId, 'server-1')
+
+  // Changing only the proxy leaves the default host out of the request.
+  const changed = await changeHostSettings({ proxyAddress: '127.0.0.1:7891' }, 2)
+  assert.deepEqual(lastBody, { proxyAddress: '127.0.0.1:7891', revision: 2 })
+  assert.equal(changed.proxyAddress, '127.0.0.1:7891')
+  assert.equal(changed.defaultHostId, 'server-1')
+  assert.equal(changed.revision, 3)
+
+  // Changing only the default host leaves the proxy out of the request.
+  const defaulted = await changeHostSettings({ defaultHostId: 'local' }, 3)
+  assert.deepEqual(lastBody, { defaultHostId: 'local', revision: 3 })
+  assert.equal(defaulted.proxyAddress, '127.0.0.1:7891')
+
+  // An empty string is sent, and clears the proxy.
+  const cleared = await changeHostSettings({ proxyAddress: '' }, 4)
+  assert.deepEqual(lastBody, { proxyAddress: '', revision: 4 })
+  assert.equal(cleared.proxyAddress, '')
+
+  // A missing proxy address in a reply reads as no proxy.
+  stored = { defaultHostId: 'local', revision: 6, proxyAddress: undefined } as unknown as typeof stored
+  const legacy = await getHostSettings()
+  assert.equal(legacy.proxyAddress, undefined)
 })

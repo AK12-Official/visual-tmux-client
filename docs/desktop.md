@@ -57,6 +57,25 @@ Normal reload recovers the document-session credential. Application → Reload w
 
 Downloads retain the source host and connection revision while a native chooser selects the local destination. Existing source authorization, roots, disabled-file setting and size limits remain authoritative. Cancellation writes nothing; overwrite requires confirmation, and incomplete transfers do not replace the previous destination.
 
+## Proxy for remote hosts
+
+Where direct SSH connections are blocked but a proxy app such as Clash can reach the hosts, open **Settings** in the top bar (before **Hosts**), enter the proxy address and save. Desktop and browser mode share the setting, because it is stored with the host state rather than among the desktop preferences.
+
+- **What to enter.** The address and port the proxy app listens on, as `host:port`, for example `127.0.0.1:7890`. A leading `socks5://` is accepted and removed. Anything else, including a username or password or an `http://` address, is refused with an explanation under the field. Leave the field empty to connect directly.
+- **What uses it.** Every new connection to every remote host: checking the server key when a host is added or repaired, terminals, file operations and reconnection. The local tmux server is never contacted through it. Terminals that are already open keep their connection; the proxy applies when a connection is next opened, so a changed address takes effect on reconnection. The host card in the host manager shows whether each host connects directly or through the proxy.
+- **Commands in a local terminal.** Each local terminal session created while a proxy is set receives the standard variables that tell commands about a proxy: `http_proxy`, `https_proxy` and `all_proxy`, in lower and in upper case, naming the proxy as `socks5h://host:port`, plus `no_proxy` and `NO_PROXY` listing `localhost`, `127.0.0.1`, `::1` and `.local`. Programs that read them, such as `git` over HTTPS and `curl`, then connect through the proxy, and windows opened in such a session inherit them. Programs that do not read these variables, or that accept only an HTTP proxy address, are not covered: `ssh` and `git` over SSH keep going direct. Nothing is added to sessions on remote hosts. A session keeps the variables it was created with, so open a new one after changing the address. Variables set by your own shell configuration, such as a line in `~/.zshrc`, are applied afterwards and take precedence; the settings dialog says so.
+- **What is not supported.** A proxy that asks for a username or password, HTTP proxies, a different proxy per host, reading the system proxy settings, and `~/.ssh/config` `ProxyJump` or `ProxyCommand` entries. The setting is not a secret and is stored next to the default host.
+- **When it fails.** The session list stops retrying until you choose Retry, and the message says which side to look at. An open terminal keeps trying to reconnect with longer gaps; the notice above it names the proxy:
+
+| The message says | What to do |
+| --- | --- |
+| The proxy cannot be reached | Start the proxy app and check the address in Settings. |
+| The proxy asks for a username or password | Use a proxy address that needs no sign-in. |
+| The proxy refused to connect to the host | Check the proxy app's rules: this host is probably set to go direct, which is blocked. |
+| The host did not answer through the proxy | Check the host's address and port; the proxy is working. |
+
+- **Rollback.** A previous build ignores the stored address and connects directly, as it always did.
+
 ## Closing and recovery
 
 Closing the only window and Application → Quit / Cmd+Q / Ctrl+Q use the same confirmation path. Cancel preserves editor state and terminal attachments. Confirmed quit waits up to five seconds for queued preferences; failed or stalled persistence keeps the application open with a visible error. Signals and backend failures use bounded resource cleanup. Tmux sessions remain owned by tmux rather than by the GUI process; abrupt process termination cannot recover unsaved editor buffers.
@@ -71,7 +90,24 @@ After building a native binary from the repository root:
 DESKTOP_BINARY=./visual-tmux-desktop sh scripts/package-desktop.sh
 ```
 
-The script produces an Ubuntu amd64 DEB with GTK4/WebKitGTK runtime dependencies, launcher and icon, or an architecture-specific macOS `.app` ZIP. The DEB includes a narrowly attached AppArmor profile for `/usr/bin/visual-tmux-desktop`, allowing WebKit to create its renderer sandbox under Ubuntu 24.04 namespace restrictions. Install/remove hooks load/unload only that profile when AppArmor is enabled. The macOS development archive is labeled `development-unsigned`: it uses ad-hoc signing with no Developer ID or notarization. These are development artifacts, not a desktop release. CI publishes them as workflow artifacts and preserves existing headless releases.
+The script produces an Ubuntu amd64 DEB with GTK4/WebKitGTK runtime dependencies, launcher and icon, or an architecture-specific macOS `.app` ZIP with its icon. It stops when an icon file is missing. The DEB includes a narrowly attached AppArmor profile for `/usr/bin/visual-tmux-desktop`, allowing WebKit to create its renderer sandbox under Ubuntu 24.04 namespace restrictions. Install/remove hooks load/unload only that profile when AppArmor is enabled. The macOS development archive is labeled `development-unsigned`: it uses ad-hoc signing with no Developer ID or notarization. These are development artifacts, not a desktop release. CI publishes them as workflow artifacts and preserves existing headless releases.
+
+### Application icon
+
+Both packages show the same artwork. The sources are `packaging/desktop/icon/app-icon.svg` (master, drawn on the 1024-unit Apple icon grid) and `app-icon-small.svg` (a simplified drawing used at 32 pixels and below). Their outputs are committed and packaging only copies them:
+
+| File | Used by |
+| --- | --- |
+| `packaging/desktop/visual-tmux-client.svg` | Linux: `hicolor/scalable/apps` launcher icon |
+| `packaging/desktop/visual-tmux-client.icns` | macOS: `CFBundleIconFile`, ten representations from 16 to 1024 pixels |
+
+After editing the artwork, regenerate and commit the results from the repository root:
+
+```sh
+sh scripts/generate-app-icon.sh
+```
+
+The script needs `rsvg-convert` (Homebrew: `brew install librsvg`; Ubuntu: `librsvg2-bin`). The `.icns` is produced only on macOS, which also provides `iconutil`; elsewhere the script writes the Linux icon and stops. Set `ICON_OUTPUT_DIR` to write elsewhere, as CI does when it regenerates the icon and checks that the committed `.icns` still has all ten representations at the expected sizes. Byte equality is not required, because rasterizer versions differ. The package version in the archive name, `CFBundleShortVersionString` and `CFBundleVersion` all come from `DESKTOP_VERSION`.
 
 On Ubuntu with restricted namespaces, a source binary at another path needs a matching AppArmor profile. The DEB installation configures the packaged executable's path. Source build success alone does not verify sandbox startup from an arbitrary location.
 

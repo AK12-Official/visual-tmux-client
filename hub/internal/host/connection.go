@@ -123,6 +123,7 @@ type hostConnPool struct {
 	target          Target
 	failures        int
 	nextAllowedDial time.Time
+	lastFailure     *Error
 	controlClient   *ssh.Client
 	controlStopKeep chan struct{}
 	dedicated       map[*ManagedConn]struct{}
@@ -140,11 +141,25 @@ func computeBackoff(failures int, maxBackoff time.Duration) time.Duration {
 	return backoff
 }
 
-func (p *hostConnPool) recordFailure(maxBackoff time.Duration) {
+func (p *hostConnPool) recordFailure(maxBackoff time.Duration, cause error) {
 	p.mu.Lock()
 	p.failures++
 	p.nextAllowedDial = time.Now().Add(computeBackoff(p.failures, maxBackoff))
+	var failure *Error
+	if errors.As(cause, &failure) {
+		p.lastFailure = failure
+	}
 	p.mu.Unlock()
+}
+
+// backoffError is the error of an attempt made during the backoff. It keeps
+// the code and cause of the failure that started the backoff, so that a proxy
+// that is down keeps being reported as the proxy and not as the host.
+func backoffError(target Target, failure *Error) *Error {
+	if failure == nil {
+		return &Error{Target: target, Code: ErrUnavailable, Cause: errors.New("host connection backoff active")}
+	}
+	return &Error{Target: target, Code: failure.Code, Cause: failure.Cause}
 }
 
 func (p *hostConnPool) recordSuccess() {
@@ -311,15 +326,39 @@ func (m *ConnectionManager) resolveSSHConfig(
 	return sshConfig, endpoint, nil
 }
 
+// proxyAddress reads the configured proxy when a connection is about to be
+// opened, so a changed setting applies to new connections without cached
+// state. A setting that cannot be read fails the connection rather than
+// letting it dial directly.
+func (m *ConnectionManager) proxyAddress(ctx context.Context, target Target) (string, error) {
+	if m.registry == nil {
+		return "", nil
+	}
+	settings, err := m.registry.GetSettings(ctx)
+	if err != nil {
+		return "", &Error{Target: target, Code: ErrUnavailable, Cause: fmt.Errorf("read proxy setting: %w", err)}
+	}
+	return settings.ProxyAddress, nil
+}
+
 func (m *ConnectionManager) dialAndHandshake(
 	ctx context.Context,
 	target Target,
 	endpoint string,
 	sshConfig *ssh.ClientConfig,
 ) (*ssh.Client, error) {
-	dialer := net.Dialer{Timeout: m.cfg.DialTimeout}
-	netConn, err := dialer.DialContext(ctx, "tcp", endpoint)
+	proxyAddress, err := m.proxyAddress(ctx, target)
 	if err != nil {
+		return nil, err
+	}
+	netConn, err := dialRemote(ctx, endpoint, proxyAddress, m.cfg.DialTimeout)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if code, _, ok := ProxyFailure(err); ok {
+			return nil, &Error{Target: target, Code: code, Cause: err}
+		}
 		return nil, &Error{Target: target, Code: ErrUnavailable, Cause: err}
 	}
 
@@ -368,12 +407,9 @@ func (m *ConnectionManager) dialTransport(ctx context.Context, target Target) (*
 
 	pool.mu.Lock()
 	if time.Now().Before(pool.nextAllowedDial) {
+		failure := pool.lastFailure
 		pool.mu.Unlock()
-		return nil, nil, &Error{
-			Target: target,
-			Code:   ErrUnavailable,
-			Cause:  errors.New("host connection backoff active"),
-		}
+		return nil, nil, backoffError(target, failure)
 	}
 	pool.mu.Unlock()
 
@@ -392,7 +428,7 @@ func (m *ConnectionManager) dialTransport(ctx context.Context, target Target) (*
 	if err != nil {
 		releaseSem()
 		if ctx.Err() == nil {
-			pool.recordFailure(m.cfg.MaxBackoff)
+			pool.recordFailure(m.cfg.MaxBackoff, err)
 		}
 		return nil, nil, err
 	}

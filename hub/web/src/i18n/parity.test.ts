@@ -20,7 +20,7 @@ test('en and zh-CN catalogs have identical namespaces', () => {
 })
 
 test('en and zh-CN catalogs have 100% key and parameter parity', () => {
-  const requiredNamespaces = ['common', 'auth', 'hosts', 'sessions', 'terminal', 'files', 'help', 'errors']
+  const requiredNamespaces = ['common', 'auth', 'hosts', 'sessions', 'terminal', 'files', 'help', 'errors', 'settings']
   const namespaces = Object.keys(en) as (keyof typeof en)[]
 
   for (const ns of requiredNamespaces) {

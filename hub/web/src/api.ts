@@ -255,11 +255,19 @@ export interface FileCapability {
   error?: string
 }
 
+/** How remote connections to a host are established. Absent for the local host. */
+export interface ConnectionPath {
+  mode: 'direct' | 'proxy'
+  /** The proxy address, in `host:port` form, when the mode is `proxy`. */
+  address?: string
+}
+
 export interface HostCapabilities {
   hostId?: string
   revision?: number
   connectionType?: ConnectionType
   online?: boolean
+  connectionPath?: ConnectionPath
   ssh?: CapabilityStatus | boolean
   tmux?: CapabilityStatus | boolean
   sftp?: CapabilityStatus | boolean
@@ -378,6 +386,14 @@ export async function testHostCapabilities(id: string): Promise<HostCapabilities
 export interface HostSettings {
   defaultHostId: string | null
   revision: number
+  /** The SOCKS5 proxy for remote connections as `host:port`, or empty for direct connections. */
+  proxyAddress: string
+}
+
+/** HostSettingsChange names the settings to change. A setting that is left out keeps its value. */
+export interface HostSettingsChange {
+  defaultHostId?: string | null
+  proxyAddress?: string
 }
 
 export async function getHostSettings(): Promise<HostSettings> {
@@ -386,14 +402,27 @@ export async function getHostSettings(): Promise<HostSettings> {
   return (await res.json()) as HostSettings
 }
 
+/** updateHostSettings changes the default host and leaves every other setting as it is. */
 export async function updateHostSettings(
   defaultHostId: string | null,
+  expectedRevision: number,
+): Promise<HostSettings> {
+  return changeHostSettings({ defaultHostId }, expectedRevision)
+}
+
+/**
+ * changeHostSettings applies a settings change against a revision. Only the
+ * settings present in `change` are sent, so the others keep their values; an
+ * empty `proxyAddress` clears the proxy.
+ */
+export async function changeHostSettings(
+  change: HostSettingsChange,
   expectedRevision: number,
 ): Promise<HostSettings> {
   const res = await authFetch(`/api/host-settings?revision=${expectedRevision}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ defaultHostId, revision: expectedRevision }),
+    body: JSON.stringify({ ...change, revision: expectedRevision }),
   })
   if (!res.ok) throw new Error(await errorText(res))
   return (await res.json()) as HostSettings

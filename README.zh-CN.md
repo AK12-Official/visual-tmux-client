@@ -30,6 +30,8 @@ VTC 创建或连接会话时，会在所连接的 tmux 服务上设置全局默�
 - 安全远程主机注册：支持 SSH 密码与加密私钥认证（ed25519、RSA、ECDSA，支持密钥口令 Passphrase），严格实行首次使用信任（TOFU）主机公钥指纹 Pinning。
 - 静态加密凭据存储：使用 AES-256-GCM 与认证主密钥安全加密保存远程主机凭据。
 - 主机工作空间相互隔离：独立会话命名空间、连接池管理及自动 Keepalive 心跳探测。
+- 可在工作区的“设置”对话框中填写一个 SOCKS5 代理地址，与远程主机之间的全部连接（注册、终端、文件传输、重连）都会经过它；出错时用直白的文字说明问题出在代理还是主机。
+- 新建的本地终端会话会以标准代理环境变量的形式带上同一个代理，其中运行的 `git`（HTTPS 地址）和 `curl` 等命令会通过它联网。
 - 内置中文 tmux 指南，点击应用内的帮助按钮即可查阅。
 - 会话名称支持包括中文在内的非 ASCII 字符（最多 64 字符）；保留/禁用 `:`、`.`、`/`、`\`、`;`、全角易混淆符号（`：`、`．`、`；`）、边缘空白及控制字符。
 - 浏览器断开不会影响后台会话，tmux 会话持续运行。
@@ -74,7 +76,7 @@ VISUAL_TMUX_CLIENT_TOKEN="$(openssl rand -base64 32)" ./visual-tmux-client
 
 ## 实验性桌面应用
 
-桌面入口通过原生窗口承载现有 Vue 前端，并在进程内运行原有 Go HTTP/WebSocket 后端，自动完成登录。开发版本面向 Ubuntu 24.04 amd64 和 macOS arm64/amd64。桌面验收清单已完成，安装包通过 CI 提供为开发构建产物。详见[构建与运行说明](docs/desktop.md)、[验证记录](docs/desktop-verification.md)及 [macOS 已知卡顿问题](docs/TODO.md#桌面应用)。
+桌面入口通过原生窗口承载现有 Vue 前端，并在进程内运行原有 Go HTTP/WebSocket 后端，自动完成登录。开发版本面向 Ubuntu 24.04 amd64 和 macOS arm64/amd64。安装包使用由 `packaging/desktop/icon/` 中的源文件生成的应用图标。桌面验收清单已完成，安装包通过 CI 提供为开发构建产物。详见[构建与运行说明](docs/desktop.md)、[验证记录](docs/desktop-verification.md)及 [macOS 已知卡顿问题](docs/TODO.md#桌面应用)。
 
 先构建前端，再使用 Go 1.26.10、启用 CGO 构建桌面入口：
 
@@ -89,6 +91,8 @@ go build -tags desktop -o ../visual-tmux-desktop ./cmd/visual-tmux-desktop
 Linux 构建需要 `pkg-config`、`libgtk-4-dev`、`libwebkitgtk-6.0-dev`；macOS 需要 Xcode Command Line Tools 和桌面指南中的部署目标参数。安装后的桌面包不需要 Go 或 Node，本地会话仍需要 tmux。
 
 macOS 请将 Go 构建行替换为 `MACOSX_DEPLOYMENT_TARGET=12.0 go build -tags desktop -ldflags '-extldflags=-mmacosx-version-min=12.0' -o ../visual-tmux-desktop ./cmd/visual-tmux-desktop`。Ubuntu 若限制用户命名空间，请使用 DEB 配置的 AppArmor 规则；其他路径下的源码构建程序需要匹配其路径的规则。打包方法及未签名/公证产物状态见桌面指南。
+
+远程主机的代理地址在工作区的“设置”对话框（“主机”按钮左侧）中填写，与使用同一主机状态的服务器模式进程共用，详见桌面指南。相关提示按不具备网络知识来措辞：每条都写明代理地址，并说明问题出在代理还是主机。
 
 可用 `--config <文件>` 显式指定配置；否则从系统用户配置目录下发现 `visual-tmux-client/visual-tmux-client.yaml`。桌面模式管理 loopback 地址、随机 Token 和同源策略，不提供 `--addr`。若已有 headless 进程占用同一主机状态目录，需要先关闭它。界面偏好独立于动态端口保存，不持久化凭据或编辑草稿。关闭窗口或选择 Quit 会先确认未保存编辑，再等待偏好写入；关闭桌面后仍可改用原有服务器命令。
 

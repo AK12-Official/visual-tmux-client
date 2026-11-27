@@ -53,6 +53,9 @@ export const en: LocaleMessages = {
   hosts: {
     title: 'Host Management',
     manage: 'Manage remote hosts',
+    settings: 'Settings',
+    connectionPathDirect: 'Direct connection',
+    connectionPathProxy: 'Via proxy {proxy}',
     hosts: 'Hosts',
     selectHost: 'Select Host…',
     chooseHost: 'Choose a host to manage tmux sessions:',
@@ -443,11 +446,33 @@ export const en: LocaleMessages = {
     tmux_unavailable: 'tmux is unavailable on this host. Install tmux or correct its configured executable path.',
     outcome_unknown: 'the write outcome is uncertain; the connection dropped during commit',
     host_revision_conflict: 'the host configuration has changed; please refresh',
+    proxy_unreachable:
+      'The proxy {proxy} cannot be reached. Check that the proxy app is running and that its address is correct in Settings.',
+    proxy_auth_required: 'The proxy {proxy} asks for a username or password, which this app does not support.',
+    proxy_refused: 'The proxy {proxy} refused to connect to the host. Check the rules in the proxy app.',
+    proxy_target_unreachable: 'The host did not answer through the proxy {proxy}. Check the host address and port.',
     unknown: 'Unknown error: {diagnostic}',
     authFailed: 'Authentication failed',
     hostConflict: 'Host configuration conflict',
     jsError: 'JS Error: {message} ({filename}:{lineno})',
     unhandledRejection: 'Unhandled rejection: {reason}',
+  },
+  settings: {
+    title: 'Settings',
+    close: 'Close settings',
+    connectionSection: 'Remote connections',
+    proxyLabel: 'Proxy address',
+    proxyPlaceholder: 'For example 127.0.0.1:7890',
+    proxyHintDirect:
+      'Leave it empty to connect directly. With a proxy, remote connections and new local terminals both use it.',
+    proxyHintProxy: 'Remote connections and new local terminals both use the proxy {proxy}.',
+    proxyShellOverrideHint: 'Proxy variables set in your own shell configuration take precedence.',
+    invalidProxyAddress:
+      'Enter the proxy as host:port, for example 127.0.0.1:7890. Usernames, passwords and http:// addresses are not supported.',
+    loadFailed: 'The settings could not be loaded.',
+    revisionConflict: 'The settings were changed elsewhere. Check the current value, then save again.',
+    saveFailed: 'The settings could not be saved.',
+    saved: 'Settings saved',
   },
   toasts: {
     regionLabel: 'Notifications',

@@ -5,10 +5,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/AK12-Official/visual-tmux-client/hub/internal/testutil"
+	"github.com/AK12-Official/visual-tmux-client/hub/internal/tmux"
 )
 
 // Never let a test inherit the caller's tmux server or temporary directory.
@@ -22,6 +24,28 @@ func testTmuxEnv(dir string) []string {
 		}
 	}
 	return append(env, "TMUX_TMPDIR="+dir)
+}
+
+// hubEnv returns the environment for a hub under test. The hub keeps its host
+// state in the config directory, which Linux reads from XDG_CONFIG_HOME and
+// macOS from HOME, so both name the test's directory and appear exactly once:
+// where a name repeats, the platform decides which value holds, and a repeated
+// real HOME lets a hub under test open the user's own state.
+func hubEnv(env []string, stateDir string) []string {
+	return append(
+		tmux.FilterEnv(env, "HOME", "XDG_CONFIG_HOME"),
+		"XDG_CONFIG_HOME="+stateDir,
+		"HOME="+stateDir,
+	)
+}
+
+func TestHubEnvKeepsTheHubAwayFromTheUserState(t *testing.T) {
+	given := []string{"PATH=/bin", "HOME=/real/home", "XDG_CONFIG_HOME=/real/xdg", "HOME=/real/home"}
+	env := hubEnv(given, "/test/state")
+	want := []string{"PATH=/bin", "XDG_CONFIG_HOME=/test/state", "HOME=/test/state"}
+	if !reflect.DeepEqual(env, want) {
+		t.Fatalf("hub environment:\n got %q\nwant %q", env, want)
+	}
 }
 
 func TestTerminalTestsPreserveParentTmux(t *testing.T) {

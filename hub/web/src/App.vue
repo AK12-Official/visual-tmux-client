@@ -33,6 +33,8 @@ import TerminalView from './components/TerminalView.vue'
 import ToastStack from './components/ToastStack.vue'
 import HelpModal from './components/HelpModal.vue'
 import HostManagerModal from './components/HostManagerModal.vue'
+import SettingsModal from './components/SettingsModal.vue'
+import { isProxyFailure, proxyFailureText } from './hostErrors'
 
 // The file manager is loaded when it is first opened. It carries the editor,
 // which is by far the largest dependency in the application and is of no use to
@@ -481,6 +483,7 @@ function toggleSidebar(): void {
 
 const helpOpen = ref(false)
 const hostManagerOpen = ref(false)
+const settingsOpen = ref(false)
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -560,8 +563,10 @@ async function refresh() {
     listError.value = msg
     listStale.value = true
 
-    // Stop automatic polling on host-level failures to offer host repair
+    // Stop automatic polling on host-level failures to offer host repair. A
+    // failing proxy is one: retrying it on a timer would only repeat the error.
     if (
+      isProxyFailure(msg) ||
       msg.startsWith('host_unavailable') ||
       msg.startsWith('host_not_found') ||
       msg.startsWith('host_revision_conflict') ||
@@ -677,6 +682,8 @@ function openHostManagerAdd(): void {
 }
 
 function formatSessionError(msg: string, action: 'create' | 'rename' | 'kill'): string {
+  const proxyText = proxyFailureText(msg)
+  if (proxyText) return proxyText
   if (msg.includes('name_in_use')) {
     return t('sessions.nameInUse')
   }
@@ -1024,6 +1031,7 @@ onBeforeUnmount(() => {
             id="login-lang-select"
             v-model="currentPreference"
             class="auth-card__lang-select"
+            :class="{ 'auth-card__lang-select--desktop': isDesktop() }"
             :aria-label="t('common.language')"
             @change="onLanguageChange"
           >
@@ -1060,6 +1068,7 @@ onBeforeUnmount(() => {
             id="header-lang-select"
             v-model="currentPreference"
             class="app__lang-select"
+            :class="{ 'app__lang-select--desktop': isDesktop() }"
             :aria-label="t('common.language')"
             @change="onLanguageChange"
           >
@@ -1069,6 +1078,7 @@ onBeforeUnmount(() => {
           </select>
         </div>
         <div class="app__bar-actions">
+          <button class="app__bar-btn app__settings-btn" type="button" :aria-label="t('settings.title')" @click="settingsOpen = true">{{ t('hosts.settings') }}</button>
           <button class="app__bar-btn" type="button" :aria-label="t('hosts.manage')" @click="hostManagerOpen = true">{{ t('hosts.hosts') }}</button>
           <button class="app__logout" type="button" :aria-label="t('auth.signOut')" @click="logout">{{ t('auth.signOut') }}</button>
         </div>
@@ -1253,6 +1263,7 @@ onBeforeUnmount(() => {
     </template>
 
     <HelpModal :open="helpOpen" @close="helpOpen = false" />
+    <SettingsModal :open="settingsOpen" @close="settingsOpen = false" />
     <HostManagerModal
       :open="hostManagerOpen"
       :initial-host-id="managerInitialHostId"
@@ -1598,7 +1609,7 @@ onBeforeUnmount(() => {
   color: var(--th-text-hi);
   border: 1px solid var(--th-border);
   border-radius: 4px;
-  padding: 0.4rem 0.6rem;
+  padding: 0 0.6rem;
   font-family: var(--app-code-font);
   font-size: 0.85rem;
 }

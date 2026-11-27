@@ -11,5 +11,6 @@ export interface LocaleMessages {
   files: Record<string, string>
   help: Record<string, string>
   errors: Record<string, string>
+  settings: Record<string, string>
   toasts: Record<string, string>
 }
